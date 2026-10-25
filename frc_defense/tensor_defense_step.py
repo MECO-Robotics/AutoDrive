@@ -22,18 +22,12 @@ class TensorDefenseStepMixin:
         active_mask=(torch.ones(self.n,device=self.device,dtype=torch.bool)
                      if active_mask is None else
                      torch.as_tensor(active_mask,device=self.device,dtype=torch.bool).reshape(self.n))
-        if _active_count is None:
-            active_count=self.n if full_batch else int(active_mask.sum().item())
-        else:
-            active_count=int(_active_count)
-        if active_count != self.n:
+        active_count=(self.n if full_batch else
+                      int(_active_count) if _active_count is not None else None)
+        if not full_batch:
             self._planner_tick_aligned=False
         self._planner_full_batch_active=(self._planner_tick_aligned and
-                                         active_count == self.n)
-        if active_count == 0:
-            return (self._last_observation,torch.zeros(self.n,device=self.device),
-                    torch.zeros(self.n,device=self.device,dtype=torch.bool),
-                    torch.zeros(self.n,device=self.device,dtype=torch.bool),{})
+                                         full_batch)
         a=torch.as_tensor(action,device=self.device,dtype=self.sim.pose.dtype)
         if self.action_mode=="strategic":
             if a.ndim==2 and a.shape[-1]==1:a=a.squeeze(-1)
@@ -160,11 +154,10 @@ class TensorDefenseStepMixin:
             return self._finish_step(goal,old_position,old_distance,a,active_mask,active_count,
                                      _return_info,_capture_observation)
         elif kind=="random":
-            count=active_count
-            theta_values=torch.rand((count,),device=self.device,generator=self.generator)*(2*math.pi)
-            speed_values=torch.rand((count,),device=self.device,generator=self.generator)*self.sim.speed[active_mask,1]
-            theta=torch.zeros((self.n,),device=self.device).masked_scatter(active_mask,theta_values)
-            speed=torch.zeros((self.n,),device=self.device).masked_scatter(active_mask,speed_values)
+            theta_values=torch.rand((self.n,),device=self.device,generator=self.generator)*(2*math.pi)
+            speed_values=torch.rand((self.n,),device=self.device,generator=self.generator)*self.sim.speed[:,1]
+            theta=torch.where(active_mask,theta_values,torch.zeros_like(theta_values))
+            speed=torch.where(active_mask,speed_values,torch.zeros_like(speed_values))
             oppxy=torch.stack((theta.cos()*speed,theta.sin()*speed),-1)
             oppxy=self._opponent_velocity_command(oppxy,active_mask)
             opp=torch.cat((oppxy,torch.zeros((self.n,1),device=self.device)),dim=-1)

@@ -48,22 +48,17 @@ class TensorDefenseObservationMixin:
 
     def _random_active(self, active_mask, tail_shape, *, normal=False, high=None,
                        active_count=None):
-        count=int(active_mask.sum().item()) if active_count is None else int(active_count)
+        active_mask=torch.as_tensor(active_mask,device=self.device,dtype=torch.bool).reshape(self.n)
         dtype=torch.long if high is not None else self.sim.pose.dtype
-        if count:
-            shape=(count,*tail_shape)
-            if normal:
-                values=torch.randn(shape,device=self.device,generator=self.generator)
-            elif high is not None:
-                values=torch.randint(high,shape,device=self.device,generator=self.generator)
-            else:
-                values=torch.rand(shape,device=self.device,generator=self.generator)
-            if count == self.n:
-                return values
-            out=torch.zeros((self.n,*tail_shape),device=self.device,dtype=dtype)
-            out[active_mask]=values
-            return out
-        return torch.zeros((self.n,*tail_shape),device=self.device,dtype=dtype)
+        shape=(self.n,*tail_shape)
+        if normal:
+            values=torch.randn(shape,device=self.device,generator=self.generator)
+        elif high is not None:
+            values=torch.randint(high,shape,device=self.device,generator=self.generator)
+        else:
+            values=torch.rand(shape,device=self.device,generator=self.generator)
+        return torch.where(active_mask.reshape(self.n,*([1]*len(tail_shape))),values,
+                           torch.zeros_like(values)).to(dtype=dtype)
 
     def _update_perception(self, reset_mask=None, active_mask=None, active_count=None):
         """Advance simple per-robot FUEL tracking from simulated sensor detections."""

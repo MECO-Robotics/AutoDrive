@@ -267,10 +267,9 @@ class TensorDefenseResetMixin:
     def reset_done(self,mask):
         """Reset selected environment slots; return the full fresh observation batch."""
         mask=torch.as_tensor(mask,device=self.device,dtype=torch.bool).reshape(self.n)
-        full_reset=bool(mask.all().item())
-        # Per-world reset phases may now differ; only a full-batch reset can
-        # restore the common scalar cadence.
-        self._planner_tick_aligned=full_reset
+        # A device reset mask cannot select a host-side scalar fast path.
+        # Keep per-world cadence active after every reset call.
+        self._planner_tick_aligned=False
         self._planner_full_batch_active=False
         self.sim.reset_done(mask)
         self._sample_static_opponents(mask)

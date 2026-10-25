@@ -747,11 +747,7 @@ class TensorThreeVsThreeEnv(
         if _return_info is not None:
             capture_info=bool(_return_info)
         active_count=(self.n if full_batch else
-                      int(_active_count) if _active_count is not None else
-                      int(active.sum().item()))
-        if active_count == 0:
-            obs=self._last_obs
-            return obs,torch.zeros((self.n,6),device=self.device),torch.zeros_like(active),torch.zeros_like(active),{}
+                      int(_active_count) if _active_count is not None else None)
         if planner_goal_override_target_track is not None:
             if (type(planner_goal_override_target_track) is not int or
                     not 0 <= planner_goal_override_target_track < self.track_mask.shape[-1]):
@@ -964,8 +960,7 @@ class TensorThreeVsThreeEnv(
         # a host integer. While it reports the full batch and planner cadence
         # remains aligned, every planner row has the same replan tick; avoid
         # reducing the GPU mask and synchronizing a device boolean each tick.
-        full_active_batch=(full_batch or
-                           (_active_count is not None and active_count==self.n))
+        full_active_batch=full_batch
         if full_active_batch and self._planner_tick_aligned:
             self._planner_tick_scalar+=1
             self.planner_ticks.add_(1)
@@ -1425,7 +1420,7 @@ class TensorThreeVsThreeEnv(
         if hasattr(self, "_curriculum_commands"):
             commands = self._curriculum_commands(commands, active)
         advance_with_fuel(self,commands,None if full_batch else active,
-                          active_nonempty=active_count>0)
+                          active_nonempty=True)
         self._advance_policy_pose_odometry(prior_velocity, active)
         if stationary_pose is not None:
             stationary=active[:,None]&~enabled[None,:]
@@ -1467,22 +1462,19 @@ class TensorThreeVsThreeEnv(
             perception_tick = (self.steps % self.perception_interval) == 0
             update_active = active & perception_tick
             aging_active = active & ~perception_tick
-            if aging_active.any():
-                self.track_age.copy_(torch.where(
+            self.track_age.copy_(torch.where(
                     aging_active[:, None, None] & self.track_mask,
                     self.track_age + self.dt, self.track_age))
-                self.track_pos.add_(torch.where(
+            self.track_pos.add_(torch.where(
                     (aging_active[:, None, None] & self.track_mask)[..., None],
                     self.track_vel * self.dt, torch.zeros_like(self.track_vel)))
-                self.track_mask &= ~((self.track_age > self.perception_track_timeout) &
+            self.track_mask &= ~((self.track_age > self.perception_track_timeout) &
                                      aging_active[:, None, None])
-                self.opponent_age.copy_(torch.where(
+            self.opponent_age.copy_(torch.where(
                     aging_active[:, None] & self.opponent_valid,
                     self.opponent_age + self.dt, self.opponent_age))
-                self.opponent_valid &= ~((self.opponent_age > 1.) & aging_active[:, None])
-            update_count = int(update_active.sum().item())
-            if update_count:
-                self._update_perception(update_active, active_count=update_count)
+            self.opponent_valid &= ~((self.opponent_age > 1.) & aging_active[:, None])
+            self._update_perception(update_active)
         done=torch.zeros_like(active)
         truncated=active&(self.steps>=self.horizon)
         # Shared zero-sum score signal: positive for scoring one's alliance,

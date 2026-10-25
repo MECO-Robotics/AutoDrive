@@ -95,20 +95,13 @@ class TensorThreeVsThreeObservationMixin:
 
     def _random_active(self, active, tail_shape, *, normal=False, dtype=None,
                        active_count=None):
-        """Draw only for active worlds so stopped episodes do not consume RNG."""
-        count=(int(active.sum().item()) if active_count is None else int(active_count))
-        if not count:
-            return torch.zeros((self.n,*tail_shape),device=self.device,
-                               dtype=dtype or torch.float32)
-        shape=(count,*tail_shape)
+        """Draw a fixed batch and mask inactive worlds without reading the mask on CPU."""
+        active=torch.as_tensor(active,device=self.device,dtype=torch.bool).reshape(self.n)
+        shape=(self.n,*tail_shape)
         sample=(torch.randn(shape,device=self.device,generator=self.generator)
                 if normal else torch.rand(shape,device=self.device,generator=self.generator))
-        if count == self.n:
-            return sample
-        result=torch.zeros((self.n,*tail_shape),device=self.device,
-                           dtype=dtype or torch.float32)
-        result[active]=sample
-        return result
+        return torch.where(active.reshape(self.n,*([1]*len(tail_shape))),sample,
+                           torch.zeros_like(sample)).to(dtype=dtype or sample.dtype)
 
     def _update_perception(self, active, active_count=None):
         """Update per-robot free-FUEL and nearest-opponent tracks."""
@@ -876,8 +869,8 @@ class TensorThreeVsThreeObservationMixin:
             normalize_tensor_observation_batch_in_place(flat,self.sim.field_length,
                                                         self.sim.field_width,sp,om)
         if self._last_obs is None:
-            if not bool(active.all()):
+            if active_mask is not None:
                 raise RuntimeError(
-                    "cannot build a partial observation batch before every world has an observation frame")
+                    "cannot build a masked observation batch before initial frames exist")
             return obs
         return torch.where(active[:,None,None], obs, self._last_obs)

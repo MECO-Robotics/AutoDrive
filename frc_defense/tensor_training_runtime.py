@@ -201,10 +201,6 @@ def _held_action_interval(env, action: torch.Tensor, ticks: int,
         # episode clock, avoiding a GPU->CPU copy/reduction at every decision.
         active_counts = [env.n if known_remaining_ticks >= tick else 0
                          for tick in range(1, ticks + 1)]
-    elif hasattr(env, "horizon"):
-        remaining_ticks = (int(env.horizon) - env.steps).detach().cpu()
-        active_counts = [int((remaining_ticks >= tick).sum())
-                         for tick in range(1, ticks + 1)]
     sparse_observation_capture = bool(
         getattr(env, "_ppo_sparse_delayed_observation_capture", False) and
         getattr(env, "action_mode", None) == "strategic" and
@@ -225,8 +221,9 @@ def _held_action_interval(env, action: torch.Tensor, ticks: int,
             env._ppo_observation_delay_groups = delay_groups
     active_world_physics_ticks = 0
     for tick_index in range(ticks):
-        active_worlds_this_tick = (active_counts[tick_index] if active_counts is not None
-                                   else int(active_this_decision.sum().item()))
+        if active_counts is None:
+            raise ValueError("held-action intervals require scheduler-known remaining ticks")
+        active_worlds_this_tick = active_counts[tick_index]
         step_kwargs = {"active_mask": active_this_decision}
         if return_info is not None:
             # PPO consumes observations, rewards, and episode flags only. The
