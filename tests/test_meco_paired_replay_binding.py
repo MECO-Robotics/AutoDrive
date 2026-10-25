@@ -168,7 +168,7 @@ def _trusted_campaign_fixture(monkeypatch):
 
 def _validate_trusted_fixture(campaign, bindings, worker):
     return _validate_paired_calibration_campaign_inputs(campaign, 0, bindings,
-        worker, (41, 42), repo_root="/unused", configuration_artifacts={},
+        worker, (41, 42), device="cuda:0", repo_root="/unused", configuration_artifacts={},
         policy="D1", calibration_control_policy="D1", candidate_k=16,
         route_cost_weight=2.5, prediction_mode="current")
 
@@ -210,13 +210,14 @@ def test_campaign_inputs_reject_control_binding_and_worker_mutations(monkeypatch
 
 
 @pytest.mark.parametrize("mutation", ["source", "freeze", "partition", "approval",
-    "worker", "binding", "control"])
+    "worker", "device", "binding", "control"])
 def test_evaluate_rejects_campaign_mutations_before_device_or_environment(monkeypatch, mutation):
     from frc_defense import meco_track_training
 
     campaign, bindings, worker = _trusted_campaign_fixture(monkeypatch)
     mutated_bindings = dict(bindings)
     mutated_worker = dict(worker)
+    requested_device = "cpu"
     if mutation == "source":
         campaign["source"] = {"source_identity_sha256": "wrong"}
     elif mutation == "freeze":
@@ -227,6 +228,8 @@ def test_evaluate_rejects_campaign_mutations_before_device_or_environment(monkey
         campaign["estimand_approval"] = {"approval_sha256": "wrong"}
     elif mutation == "worker":
         mutated_worker["device_index"] = 1
+    elif mutation == "device":
+        requested_device = "cuda:1"
     elif mutation == "binding":
         changed = dict(bindings[42])
         changed["work_unit_id"] = "0" * 64
@@ -239,7 +242,7 @@ def test_evaluate_rejects_campaign_mutations_before_device_or_environment(monkey
         mutated_bindings[41] = changed
     with pytest.raises(ValueError):
         meco_track_training.evaluate_meco({}, scenario_id="pickup_simple",
-            categories=("single",), episodes=2, master_seed=41, device="cpu",
+            categories=("single",), episodes=2, master_seed=41, device=requested_device,
             episode_seeds=(41, 42), split="calibration", qualification_case={
                 "layout_id": "layout-a", "defender_family": "family-a",
                 "start_condition": "start-a", "sensor_profile": "sensor-a"},

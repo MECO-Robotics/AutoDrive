@@ -551,7 +551,7 @@ def _validate_paired_calibration_replay_bindings(bindings, seeds, worker, *,
 
 
 def _validate_paired_calibration_campaign_inputs(campaign, shard_index, bindings,
-        worker, seeds, *, repo_root, configuration_artifacts, policy,
+        worker, seeds, *, device, repo_root, configuration_artifacts, policy,
         calibration_control_policy, candidate_k, route_cost_weight,
         prediction_mode):
     """Resolve all replay claims against the frozen campaign before simulation."""
@@ -567,7 +567,8 @@ def _validate_paired_calibration_campaign_inputs(campaign, shard_index, bindings
         raise ValueError("paired calibration per-seed binding must be an object")
     expected_worker = next((assignment for assignment in campaign["worker_assignments"]
         if assignment["worker_id"] == shard["worker_id"]), None)
-    if expected_worker is None or worker != expected_worker:
+    if (expected_worker is None or worker != expected_worker
+            or device != expected_worker["device"]):
         raise ValueError("paired calibration worker identity differs from exact shard assignment")
     first_unit = first_binding.get("work_unit", {})
     group_fields = ("scenario_id", "category", "split", "repetition",
@@ -2735,7 +2736,8 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
         _validate_paired_calibration_campaign_inputs(
             paired_calibration_campaign, paired_calibration_shard_index,
             paired_calibration_bindings, paired_calibration_worker_identity,
-            scored_seeds, repo_root=Path(__file__).resolve().parents[1],
+            scored_seeds, device=device,
+            repo_root=Path(__file__).resolve().parents[1],
             configuration_artifacts=paired_calibration_configuration_artifacts,
             policy=trusted_policy, calibration_control_policy=calibration_control_policy,
             candidate_k=candidate_k_override,
@@ -2872,7 +2874,6 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
     from .meco_phase4 import validate_phase4_factor
     from .meco_device import normalized_device_info
     from .fuel_physics_hip import prepare_native_fuel_extension
-    prepare_native_fuel_extension(device)
     phase4_factor = validate_phase4_factor(phase4_factor)
     if phase4_contact_factor_id not in (None, "contact.robot_bump"):
         raise ValueError("unsupported Phase 4 contact factor")
@@ -2912,6 +2913,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                 (control_prediction_modes or {}).get("D2", "cv")),
             qualification_case={"category": categories[0], **(qualification_case or {})},
             runtime_identity=runtime_identity)
+    prepare_native_fuel_extension(device)
     if condition_id is not None and (not isinstance(condition_id, str) or not condition_id):
         raise ValueError("condition_id must be a nonempty string when provided")
     if qualification_case is not None:
