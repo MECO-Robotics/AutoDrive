@@ -84,14 +84,21 @@ def _opponent_tracking_available(raster):
     """Use only the shared observation raster to apply the protocol stale-time rule."""
     confidence = raster[:, 4]
     signed_time = raster[:, 5]
-    return bool(((confidence > 0.) &
-                 (signed_time >= -TRACK_LOSS_STALE_SECONDS)).any().item())
+    return ((confidence > 0.) &
+            (signed_time >= -TRACK_LOSS_STALE_SECONDS)).any()
 
 
 def _tracking_reset_hidden(hidden, previously_available, raster):
     available = _opponent_tracking_available(raster)
-    reset = previously_available is True and not available
-    return (None if reset else hidden), available, reset
+    if previously_available is None:
+        reset = torch.zeros((), device=raster.device, dtype=torch.bool)
+    else:
+        previous = torch.as_tensor(previously_available, device=raster.device,
+                                   dtype=torch.bool)
+        reset = previous & ~available
+    if hidden is not None:
+        hidden = torch.where(reset, torch.zeros_like(hidden), hidden)
+    return hidden, available, reset
 
 
 @dataclass(frozen=True)

@@ -2,6 +2,7 @@ import pytest
 import math
 import time
 import torch
+from torch.utils._python_dispatch import TorchDispatchMode
 
 from frc_defense.experimental_route_evaluation import (
     DeviceRouteBatch,
@@ -15,10 +16,18 @@ from frc_defense.meco_candidates import (CandidateCommitment, DeviceCandidateBat
 from frc_defense.meco_track_training import _d1_d2_scores
 from types import SimpleNamespace
 from frc_defense.learning_contract import CandidateTable
-from frc_defense.meco_tracks import (EXTRA_FEATURES, SAFE_ACTION_FEATURES,
+from frc_defense.meco_tracks import (EXTRA_FEATURES, MECO_CANDIDATE_MODEL_INPUT_WIDTH,
+                                     SAFE_ACTION_FEATURES,
                                      ProductionMecoAdapter, SafeActionCandidates,
-                                     make_meco_track,
+                                     make_meco_track, sample_candidate_action,
                                      score_candidates)
+
+
+class _NoHostScalarSync(TorchDispatchMode):
+    def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+        if func._schema.name == "aten::_local_scalar_dense":
+            raise AssertionError("numeric device value synchronized to host before selection")
+        return func(*args, **(kwargs or {}))
 
 
 def test_device_route_batch_keeps_a_fixed_tensor_contract():
@@ -179,13 +188,22 @@ def test_production_adapter_consumes_device_candidates_without_host_mask_project
     assert submitted["request"].candidate_support_mode == "device-mask"
     assert submitted["request"].valid_mask == ()
     assert torch.equal(submitted["inputs"]["candidate_features"], batch.candidate_features)
-    if track == "C2":
-        assert torch.equal(submitted["inputs"]["__candidate_valid_mask"], batch.valid_mask)
-    else:
-        assert "__candidate_valid_mask" not in submitted["inputs"]
+    assert torch.equal(submitted["inputs"]["__candidate_valid_mask"], batch.valid_mask)
     assert result["inference_status"] == "deterministic_fallback"
     assert torch.isfinite(result["logits"][0, 0])
     assert torch.isneginf(result["logits"][0, 1])
+
+
+def test_c2_context_matches_unmasked_all_query_baseline_for_empty_and_mixed_support():
+    model = make_meco_track("C2").eval()
+    raster = torch.randn((1, 6, 16, 16))
+    globals_ = torch.randn((1, 7))
+    features = torch.randn((1, 4, MECO_CANDIDATE_MODEL_INPUT_WIDTH))
+    baseline = model(raster, globals_, features)
+    for support in (torch.tensor([[True, False, True, False]]),
+                    torch.zeros((1, 4), dtype=torch.bool)):
+        masked = model(raster, globals_, features, candidate_mask=support)
+        assert torch.equal(masked["hidden"], baseline["hidden"])
 
 
 @pytest.mark.parametrize("track", ("C1", "C2"))
@@ -261,13 +279,14 @@ def test_device_candidate_builder_feeds_scorer_without_materializing_feature_row
             torch.zeros_like(goals), available,
             torch.ones_like(available), torch.zeros(candidate_count)))
     commitment = CandidateCommitment("action:7", 7, 0, None, 0, 20)
-    candidate_set = meco_candidates._build_device_candidate_set(env, base,
-        SimpleNamespace(resolution_m=.5),
-        [(index, 0, 0., 0., None) for index in range(count)] +
-        [(7, 0, 0., 0., None)], {},
-        candidate_k=count, action_ticks=1, prediction_mode="current",
-        active_commitment=commitment, continue_index=count, oracle_capacity=count,
-        learned_traversal_cost=None, learned_cost_scale=1.)
+    with _NoHostScalarSync():
+        candidate_set = meco_candidates._build_device_candidate_set(env, base,
+            SimpleNamespace(resolution_m=.5),
+            [(index, 0, 0., 0., None) for index in range(count)] +
+            [(7, 0, 0., 0., None)], {},
+            candidate_k=count, action_ticks=1, prediction_mode="current",
+            active_commitment=commitment, continue_index=count, oracle_capacity=count,
+            learned_traversal_cost=None, learned_cost_scale=1.)
 
     assert candidate_set.device_batch is not None
     assert all(value is None for row in candidate_set.table.features for value in row)
@@ -278,13 +297,16 @@ def test_device_candidate_builder_feeds_scorer_without_materializing_feature_row
     assert candidate_set.device_batch.raw_features[0, :, switch_column].tolist() == [
         0.] * candidate_count
     model = make_meco_track(track).eval()
-    result = score_candidates(track, model,
-        raster=torch.zeros((1, 6, 16, 16)), globals_=torch.zeros((1, 7)),
-        table=candidate_set.table, candidate_batch=candidate_set.device_batch,
-        route_cost=candidate_set.route_cost_points[None],
-        risk_cost=candidate_set.risk_cost_points[None])
+    with _NoHostScalarSync():
+        result = score_candidates(track, model,
+            raster=torch.zeros((1, 6, 16, 16)), globals_=torch.zeros((1, 7)),
+            table=candidate_set.table, candidate_batch=candidate_set.device_batch,
+            route_cost=candidate_set.route_cost_points[None],
+            risk_cost=candidate_set.risk_cost_points[None])
+        selected = sample_candidate_action(result["logits"], deterministic=True)
     assert torch.isfinite(result["logits"][0, 0])
     assert torch.isneginf(result["logits"][0, 1])
+    assert selected[0].shape == (1,)
 
 
 def test_d1_d2_device_batch_scoring_keeps_route_and_risk_cost_on_device():
@@ -423,7 +445,7 @@ def test_c_track_scorer_consumes_device_candidate_features_and_mask(track):
     assert torch.isneginf(result["logits"][0, 1])
 
 
-def test_c2_context_reduction_uses_exact_candidate_mask_and_tolerates_empty_support():
+def test_c2_context_preserves_all_query_recurrent_state_and_tolerates_empty_support():
     torch.manual_seed(17)
     model = make_meco_track("C2").eval()
     raster = torch.randn((1, 6, 16, 16))
@@ -437,9 +459,11 @@ def test_c2_context_reduction_uses_exact_candidate_mask_and_tolerates_empty_supp
     empty_output = model(raster, globals_, with_two, hidden,
                          candidate_mask=torch.tensor([[False, False]]))
 
-    torch.testing.assert_close(masked_output["hidden"], single_output["hidden"])
-    torch.testing.assert_close(masked_output["candidate_utility"][:, :1],
-                               single_output["candidate_utility"])
+    all_query_output = model(raster, globals_, with_two, hidden)
+    torch.testing.assert_close(masked_output["hidden"], all_query_output["hidden"])
+    torch.testing.assert_close(masked_output["candidate_utility"],
+                               all_query_output["candidate_utility"])
+    assert not torch.allclose(masked_output["hidden"], single_output["hidden"])
     assert torch.isfinite(empty_output["hidden"]).all()
     assert torch.isfinite(empty_output["candidate_utility"]).all()
     with pytest.raises(ValueError, match="candidate mask"):

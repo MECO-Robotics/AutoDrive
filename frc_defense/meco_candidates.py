@@ -570,7 +570,7 @@ def _device_candidate_ids(base, specs, continue_index, active_commitment):
 @torch.no_grad()
 def _build_device_candidate_set(env, base, graph, specs, target_rows, *,
         candidate_k, action_ticks, prediction_mode, active_commitment,
-        continue_index,
+        continue_index, commitment_match_valid=None,
         oracle_capacity, learned_traversal_cost, learned_cost_scale):
     """Build Plan C policy tensors on env.device from stable host spec IDs."""
     device = torch.device(env.device)
@@ -616,6 +616,11 @@ def _build_device_candidate_set(env, base, graph, specs, target_rows, *,
         learned_cost_scale=learned_cost_scale,
         learned_cost_provenance="meco_legal_heading_penalty_projection_v1")
     route_available = geometry["allowed"] & route_full.feasible
+    if continue_index is not None and commitment_match_valid is not None:
+        route_available = route_available & torch.where(
+            torch.arange(count, device=device) == continue_index,
+            commitment_match_valid.to(device=device, dtype=torch.bool),
+            torch.ones(count, device=device, dtype=torch.bool))
     distance = torch.where(route_available, route_full.distance_m.to(dtype),
                            torch.zeros(count, device=device, dtype=dtype))
     heading_delta = geometry["headings"] - env.policy_pose[0, 3, 2]
@@ -705,7 +710,7 @@ def _build_device_candidate_set(env, base, graph, specs, target_rows, *,
         fallback_index = next((i for i, candidate_id in enumerate(policy_ids)
                                if candidate_id == "hold"), 0)
     fallback = torch.tensor(fallback_index, device=device, dtype=torch.long)
-    fallback_valid = valid[0, fallback]
+    fallback_valid = valid[0].gather(0, fallback.reshape(1)).squeeze(0)
     valid_cost = route_cost_for_fallback.masked_fill(~valid[0], float("inf"))
     cheapest = valid_cost.argmin()
     hold_index = next((i for i, candidate_id in enumerate(policy_ids)
@@ -1159,28 +1164,34 @@ def build_route_feasible_candidates(env, observation: torch.Tensor,
     # top-four buffer index. Any lost, illegal, or expired commitment is dropped.
     active_commitment = commitment
     continue_spec = None
+    commitment_match_valid = torch.ones((), device=env.device, dtype=torch.bool)
     if active_commitment is not None:
         action = active_commitment.action_index
         if sequence >= active_commitment.expires_sequence:
             active_commitment = None
         elif action < 4:
             source = active_commitment.source_xy_m
-            matches = []
-            if source is not None:
-                points, _, sensed = _world_zero_perceived_fuel(env)
-                for track in torch.nonzero(sensed, as_tuple=False).flatten().tolist():
-                    point = points[track]
-                    gap = math.hypot(float(point[0]) - source[0], float(point[1]) - source[1])
-                    matches.append((gap, int(track)))
-            if not matches or min(matches)[0] > CANDIDATE_BOUNDARY["commitment_target_matching_tolerance_m"]:
+            action = next((i for i in range(4) if base.table.valid_mask[i]), None)
+            points, _, sensed = _world_zero_perceived_fuel(env)
+            if source is not None and points.shape[0] and action is not None:
+                source_xy = torch.as_tensor(source, device=points.device,
+                                            dtype=points.dtype)
+                gaps = torch.linalg.vector_norm(points - source_xy, dim=-1)
+                nearest_gap, nearest_track = gaps.masked_fill(
+                    ~sensed, float("inf")).min(dim=0)
+                commitment_match_valid = (torch.isfinite(nearest_gap) &
+                    (nearest_gap <= CANDIDATE_BOUNDARY[
+                        "commitment_target_matching_tolerance_m"]))
+                # Transfer only the selected stable sensed-track identity.
+                track = int(nearest_track.item())
+            else:
+                commitment_match_valid = torch.zeros((), device=env.device,
+                                                      dtype=torch.bool)
+                track = 0
+            if action is None:
                 active_commitment = None
             else:
-                track = min(matches)[1]
-                action = next((i for i in range(4) if base.table.valid_mask[i]), None)
-                if action is None:
-                    active_commitment = None
-                else:
-                    continue_spec = (action, active_commitment.goal_variant, 0., 0., track)
+                continue_spec = (action, active_commitment.goal_variant, 0., 0., track)
         else:
             if not base.table.valid_mask[action]:
                 active_commitment = None
@@ -1209,6 +1220,7 @@ def build_route_feasible_candidates(env, observation: torch.Tensor,
             candidate_k=candidate_k, action_ticks=action_ticks,
             prediction_mode=prediction_mode, active_commitment=active_commitment,
             continue_index=continue_index,
+            commitment_match_valid=commitment_match_valid,
             oracle_capacity=oracle_capacity,
             learned_traversal_cost=learned_traversal_cost,
             learned_cost_scale=learned_cost_scale)

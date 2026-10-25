@@ -309,7 +309,7 @@ class ProductionMecoAdapter:
                         ({support_key} if candidate_mask is not None else set()))):
                 return None
             if (request.candidate_support_mode == "device-mask" and
-                    (self.track != "C2" or candidate_mask is None)):
+                    (self.track not in ("C1", "C2") or candidate_mask is None)):
                 return None
             tensors = tuple(model_inputs[name] for name in request.input_names)
             if tuple(tuple(t.shape) for t in tensors) != request.input_shapes:
@@ -327,7 +327,7 @@ class ProductionMecoAdapter:
                     return None
             by_name = dict(model_inputs)
             if candidate_mask is not None:
-                if (self.track != "C2" or request.candidate_support_mode != "device-mask"
+                if (self.track not in ("C1", "C2") or request.candidate_support_mode != "device-mask"
                         or not isinstance(candidate_mask, torch.Tensor)
                         or candidate_mask.dtype != torch.bool
                         or candidate_mask.device != self.device
@@ -1074,9 +1074,10 @@ class C2MapCrossAttentionGRU(nn.Module):
                 or candidate_mask.dtype != torch.bool
                 or candidate_mask.device != candidate_features.device):
             raise ValueError("C2 candidate mask must be bool [B,C] on the candidate device")
-        candidate_weights = candidate_mask.to(queried.dtype)[..., None]
-        candidate_context = ((queried * candidate_weights).sum(1) /
-                             candidate_weights.sum(1).clamp_min(1.))
+        # Preserve the original all-query context. Support masks gate action
+        # selection; using them to reweight this pooled state changes C2's
+        # recurrent context whenever any candidate is infeasible.
+        candidate_context = queried.mean(1)
         state = self.context(global_state + candidate_context, hidden)
         fused = torch.cat((queried, state[:, None].expand(-1, queried.shape[1], -1), candidate), -1)
         scored = F.silu(_fixed_order_candidate_linear(fused, self.scorer[0]))
@@ -1342,7 +1343,7 @@ def score_candidates(track: str, model: nn.Module, *, raster: torch.Tensor,
             ordered_inputs = {name: inputs[name] for name in inference_request.input_names
                               if name in inputs}
             broker_inputs = dict(ordered_inputs)
-            if track == "C2" and candidate_batch is not None:
+            if track in ("C1", "C2") and candidate_batch is not None:
                 broker_inputs["__candidate_valid_mask"] = valid_candidates
             broker_handle = model.submit_inference(inference_request, broker_inputs)
 
@@ -1545,13 +1546,18 @@ def categorical_from_candidate_logits(logits: torch.Tensor):
     if logits.ndim < 1:
         raise ValueError("candidate logits must have an action dimension")
     centered_logits = logits - logits.amax(dim=-1, keepdim=True)
-    return torch.distributions.Categorical(logits=centered_logits)
+    # The async assertion above is the device-safe validity check. PyTorch's
+    # default distribution validation converts that predicate to a host bool.
+    return torch.distributions.Categorical(logits=centered_logits,
+                                           validate_args=False)
 
 
 def sample_candidate_action(logits: torch.Tensor, *, deterministic=False):
     """Sample a legal categorical choice and return action and PPO log-probability."""
-    if logits.ndim != 2 or not bool(torch.isfinite(torch.logsumexp(logits, dim=-1)).all()):
+    if logits.ndim != 2:
         raise ValueError("each decision requires at least one finite candidate logit")
+    torch._assert_async(torch.isfinite(torch.logsumexp(logits, dim=-1)).all(),
+                        "each decision requires at least one finite candidate logit")
     distribution = categorical_from_candidate_logits(logits)
     action = logits.argmax(-1) if deterministic else distribution.sample()
     return action, distribution.log_prob(action), distribution.entropy()
