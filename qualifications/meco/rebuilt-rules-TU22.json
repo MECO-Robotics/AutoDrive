@@ -1,0 +1,95 @@
+{
+  "schema": "rebuilt-rules-snapshot-v1",
+  "game": "2026 FIRST Robotics Competition REBUILT",
+  "manual_version": "TU22",
+  "team_updates_version": "combined through TU22",
+  "retrieved_utc": "2026-10-25T09:34:10Z",
+  "authorities": [
+    {
+      "id": "game_manual_tu22",
+      "url": "https://firstfrc.blob.core.windows.net/frc2026/Manual/2026GameManual.pdf",
+      "sha256": "5c67300fc412a1eed8ca9dc37fb6644aee05795a2befed1f69736643cbf95139"
+    },
+    {
+      "id": "combined_team_updates_tu22",
+      "url": "https://firstfrc.blob.core.windows.net/frc2026/Manual/TeamUpdates/REBUILT_TeamUpdate-Combined.pdf",
+      "sha256": "8ec2754d157b7f35cf93b4be301ebdf576f2abf2650975731dcc3cdf5ab0ecb1"
+    }
+  ],
+  "applicable_sections": [
+    "Game Manual 6.4",
+    "Game Manual 6.5",
+    "Game Manual 6.6",
+    "Game Manual 7.4",
+    "Game Manual 10.5",
+    "Game Manual 10.6",
+    "Game Manual 10.6.4",
+    "Game Manual 13.2",
+    "Team Updates through TU22, only where they amend the sections above"
+  ],
+  "match_clock_seconds": {
+    "duration": 160,
+    "periods": [
+      {"id": "auto", "start_inclusive": 0, "end_exclusive": 20},
+      {"id": "transition", "start_inclusive": 20, "end_exclusive": 30},
+      {"id": "shift_1", "start_inclusive": 30, "end_exclusive": 55},
+      {"id": "shift_2", "start_inclusive": 55, "end_exclusive": 80},
+      {"id": "shift_3", "start_inclusive": 80, "end_exclusive": 105},
+      {"id": "shift_4", "start_inclusive": 105, "end_exclusive": 130},
+      {"id": "end_game", "start_inclusive": 130, "end_exclusive": 160}
+    ],
+    "fuel_assessment_grace_seconds": {
+      "after_auto": 3,
+      "after_teleop": 3,
+      "after_hub_deactivation": 3
+    }
+  },
+  "fuel": {
+    "sensor_crossing_required": true,
+    "points_per_fuel": {"active_hub": 1, "inactive_hub": 0},
+    "auto_hub_status": "both_active",
+    "transition_hub_status": "both_active",
+    "end_game_hub_status": "both_active",
+    "alliance_shifts": {
+      "auto_fuel_leader_hub_inactive_in_shift_1": true,
+      "hub_status_alternates_each_shift": true,
+      "auto_tie_requires_fms_selected_shift_1_inactive_alliance": true
+    }
+  },
+  "tower": {
+    "assessment": "human_volunteer",
+    "auto_allowed_levels": [1],
+    "auto_level_points": {"1": 15},
+    "auto_max_level_1_robots_per_alliance": 2,
+    "teleop_one_level_per_robot": true,
+    "teleop_level_points": {"1": 10, "2": 20, "3": 30},
+    "auto_level_1_robot_may_earn_teleop_points": true
+  },
+  "penalties": {
+    "assessment": "referee_adjudication_required",
+    "minor_foul_opponent_points": 5,
+    "major_foul_opponent_points": 15,
+    "contact_event_alone_is_not_a_foul": true
+  },
+  "disqualification": {
+    "qualification": "affected_team_receives_zero_match_points_and_zero_ranking_points",
+    "playoff": "affected_alliance_receives_zero_match_points"
+  },
+  "championship_roster_and_lineup": {
+    "championship_alliance_roster_teams": 4,
+    "active_match_teams_per_alliance": 3,
+    "lineup_rule": "any_three_of_four_roster_teams_may_play_each_match",
+    "fourth_roster_team_is_not_an_active_robot_or_score_slot": true
+  },
+  "ranking_points": {
+    "separate_from_match_points": true,
+    "must_not_be_added_to_match_score": true
+  },
+  "explicit_exclusions": [
+    "The two-robot TensorDefenseEnv FUEL event is an abstract score-action event, not a HUB sensor-crossing event.",
+    "Current simulation has no authoritative Tower adjudication or referee foul ingress.",
+    "Current two-robot simulation does not cover the six active robot slots of a complete match.",
+    "This snapshot does not make simulated outcomes eligible for qualification.",
+    "FUEL acquisition, throughput, policy reward, contact, and inferred intent are not official scoring events."
+  ]
+}
