@@ -134,7 +134,7 @@ PHASE4_REQUIREMENT_BINDINGS = {
             "every_expected_world_must_be_legal": True,
             "required_state_ids": ("scenario_defined", "assigned_registry_profile_id"),
             "qualification_eligible": False},
-        "limitations": ("registered full-team poses are applied after reset and before perception; legal-start rate and stratified outcomes still lack authoritative simulator signals",)},
+        "limitations": ("runtime records and exact paired reduction now define authoritative signals, but no held-out source-bound report or fresh replay/dashboard review has been accepted; candidate executability remains fail-closed",)},
     "teammate_behaviors": {**_COMMON,
         "factor_ids": ("teammate.behavior_pool",),
         "runtime_event": None,

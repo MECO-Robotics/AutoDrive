@@ -3761,6 +3761,8 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                     env.phase4_start_profile_validated_world_count),
                                 "validated_pose_world_indices": list(range(
                                     int(env.phase4_start_profile_validated_world_count))),
+                                "validated_pose_world_index_semantics":
+                                    "zero_based_simulator_batch_index",
                                 "per_world_legal": list(
                                     env.phase4_start_profile_legality or ()),
                                 "legal_start_validation_rate": float(
