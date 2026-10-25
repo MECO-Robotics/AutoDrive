@@ -761,6 +761,7 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
                replay_selection: dict | None = None,
                contact_geometries: tuple[str, ...] = (),
                phase4_opponent_schedule: dict | None = None,
+               phase4_direct_pursuit_binding: dict | None = None,
                start_profile_registry_id: str | None = None,
                focal_pose_offsets: tuple[str, ...] = (),
                teammate_behavior_pool_seed: int | None = None,
@@ -847,6 +848,26 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
             factor_id=phase4_opponent_schedule.get("factor_id"),
             protocol_id=(qualification_provenance["protocol_id"]
                          if qualification_provenance is not None else None))
+    if phase4_direct_pursuit_binding is not None:
+        from .meco_phase4_opponents import validate_opponent_policy_schedule
+        if (qualification_provenance is None or evaluation_split != "validation" or
+                not isinstance(phase4_direct_pursuit_binding, dict) or
+                phase4_direct_pursuit_binding.get("protocol_sha256") !=
+                    qualification_provenance["protocol_sha256"]):
+            raise ValueError("direct-pursuit outcomes require exact frozen validation protocol binding")
+        direct_schedule = phase4_direct_pursuit_binding.get("schedule")
+        validated_direct = validate_opponent_policy_schedule(direct_schedule,
+            scenario_id=scenario_id, categories=categories,
+            qualification_case=qualification_case, seeds=seeds,
+            split=evaluation_split, factor_id="opponent.direct_pursuit",
+            protocol_id=qualification_provenance["protocol_id"])
+        if (phase4_direct_pursuit_binding.get("policy_id") != "direct_pursuit" or
+                phase4_direct_pursuit_binding.get("factor_id") != "opponent.direct_pursuit" or
+                phase4_direct_pursuit_binding.get("schedule_sha256") !=
+                    validated_direct["schedule_sha256"] or
+                (phase4_opponent_schedule is not None and
+                 phase4_opponent_schedule != validated_direct)):
+            raise ValueError("direct-pursuit condition schedule differs from its outcome binding")
     start_profile_assignment = None
     if start_profile_registry_id is not None:
         if qualification_provenance is None:
@@ -875,6 +896,11 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
     execution_device = normalized_device_info(device)
     bundle_hashes = _checkpoint_hashes(checkpoints)
     source_hash = _source_identity_hash(source_identity())
+    if phase4_direct_pursuit_binding is not None:
+        phase4_direct_pursuit_binding = {**phase4_direct_pursuit_binding,
+            "checkpoint_bundle_sha256": bundle_hashes,
+            "source_identity_sha256": source_hash,
+            "execution_device": execution_device}
     config_hashes, protocol_ids, frozen_shared_config = (
         _checkpoint_configuration_provenance(checkpoints))
     conditions = default_conditions(scenario_id, categories=categories,
@@ -932,6 +958,7 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
         "execution_device": execution_device,
         "qualification_case": qualification_case,
         "phase4_opponent_schedule": phase4_opponent_schedule,
+        "phase4_direct_pursuit_binding": phase4_direct_pursuit_binding,
         "phase4_start_profile_assignment": start_profile_assignment,
         "training_configuration_sha256": config_hashes,
         "training_protocol_ids": protocol_ids,
@@ -1039,6 +1066,7 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
             inference_disable_tick=condition.inference_disable_tick,
             phase4_factor=condition.phase4_factor,
             phase4_opponent_schedule=phase4_opponent_schedule,
+            phase4_direct_pursuit_binding=phase4_direct_pursuit_binding,
             phase4_contact_factor_id=("contact.robot_bump"
                 if condition.contact_geometry_id is not None else None),
             phase4_route_outcome_factor_ids=route_outcome_factor_ids,

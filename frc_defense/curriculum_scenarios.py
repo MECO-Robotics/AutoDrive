@@ -198,6 +198,9 @@ class CurriculumEnv(TensorThreeVsThreeEnv):
                     opponent_runtime['applied_slots'] = sorted(set(
                         opponent_runtime['applied_slots']) | {int(slot)})
                     opponent_runtime['applied_command_calls'] += 1
+                    calls_by_slot = opponent_runtime['applied_command_calls_by_slot']
+                    calls_by_slot[str(slot)] = calls_by_slot.get(str(slot), 0) + int(
+                        active_requested.sum().item())
                 continue
             level = pressure['level']
             if factor and slot == 0 and factor['kind'] in (
@@ -299,8 +302,9 @@ def make_curriculum_env(scenario_id, category, num_envs, device, seed, *, horizo
         if (scenario_id not in ('offense_vs_scripted_pressure', 'full_match_offense')
                 or _pressure_level(category) not in supported_levels):
             raise ValueError('Phase 4 opponent policy requires a registered pressure category')
-        if phase4_opponent_policy_id == 'trench_interceptor' and phase4_opponent_schedule is None:
-            raise ValueError('trench interceptor requires its protocol-bound validation schedule')
+        if (phase4_opponent_policy_id in ('trench_interceptor', 'direct_pursuit')
+                and phase4_opponent_schedule is None):
+            raise ValueError('scheduled Phase 4 opponent requires its protocol-bound validation schedule')
     elif phase4_opponent_schedule is not None:
         raise ValueError('opponent validation schedule requires its assigned policy ID')
     trench_schedule = None
@@ -396,6 +400,8 @@ def make_curriculum_env(scenario_id, category, num_envs, device, seed, *, horizo
         'category': category, 'seed': int(phase4_opponent_seed),
         'configured_slots': trench_schedule['configured_pressure_slots'][category],
         'applied_slots': [], 'applied_command_calls': 0,
+        'applied_command_calls_by_slot': {
+            str(slot): 0 for slot in trench_schedule['configured_pressure_slots'][category]},
         'interception_rate': None, 'alternate_crossing_success_rate': None,
         'trench_crossing_time_s': None, 'qualification_eligible': False})
     env.contact_geometry_id = contact_geometry_id

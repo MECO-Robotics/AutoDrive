@@ -154,6 +154,13 @@ def compile_opponent_policy_schedule(*, policy_id: str, scenario_id: str,
                 any(category not in TRENCH_INTERCEPTION_CATEGORIES
                     for category in categories)):
             raise ValueError("trench interception requires a category subset of its exact 14-category validation domain, scenario, factor, protocol, and policy")
+    if factor_id == "opponent.direct_pursuit":
+        if (policy_id != "direct_pursuit" or
+                scenario_id != "offense_vs_scripted_pressure" or
+                not isinstance(protocol_id, str) or not protocol_id or
+                not categories or any(not opponent_policy_runtime_domain_supported(
+                    scenario_id, category) for category in categories)):
+            raise ValueError("direct pursuit requires its exact pressure-category validation domain, scenario, factor, protocol, and policy")
     if (not isinstance(categories, (list, tuple)) or not categories or
             any(not isinstance(category, str) or not category for category in categories) or
             len(set(categories)) != len(categories)):
@@ -174,7 +181,8 @@ def compile_opponent_policy_schedule(*, policy_id: str, scenario_id: str,
         "factor_id": factor_id,
         "protocol_id": protocol_id,
         "category_domain": (list(TRENCH_INTERCEPTION_CATEGORIES)
-            if factor_id == "opponent.trench_interception" else None),
+            if factor_id == "opponent.trench_interception" else
+            list(categories) if factor_id == "opponent.direct_pursuit" else None),
         "policy_family": POLICY_FACTOR_IDS[policy_id],
         "configured_pressure_slots": {category: list(opponent_policy_runtime_slots(
                                       category, allow_level_zero=(
