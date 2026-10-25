@@ -3568,6 +3568,69 @@
         "verdict_detail": "Pass 3 approved the exact ledger/API/test candidate as the pending-review candidate. Finalization records that candidate SHA as both implementer.candidate_commit and reviewer.approved_commit; finalizer identity and its separate review verdict remain outside the pinned ledger."
       },
       "limits": "Documentation and provenance summary for reviewed Phase 4 runtime wiring. No new end-to-end simulator evaluation, fresh replay, held-out behavior outcomes, current-dashboard replay review, qualification, or promotion is established; qualification remains disabled."
+    },
+    {
+      "requirement_id": "plan-c-device-resident-route-decision",
+      "title": "Plan C device-resident route and selection slice",
+      "planner": {
+        "status": "summary-only",
+        "artifact": {
+          "path": "docs/plans/gpu-resident-route-decision-slice-20261025.md",
+          "sha256": "8c6c67ffb2934fa3a4ce40b54c5cc2f2e2cb4877b5eedac9c31a2936a6879b5a",
+          "kind": "scoped-transcript-summary",
+          "status": "transcript-summary"
+        }
+      },
+      "implementer": {
+        "candidate_commit": "cdeb9391bf23e5c2460527959132008aee6f8eb1",
+        "integration_commit": "e87d757cb70262b523a4342315695bf600cf24c7",
+        "implementation_commits": [
+          "fcc21cc2355ffdfcc93418662b1c0170a25bf7a3",
+          "23b2a82e6a1127efe023c3a51e24c615fcbd86f1",
+          "48dd075983bfa66dd4de74cd1f9f8e24a7ef7cbc",
+          "aee21f7174438c7562dd68084f9799c34a6762b1",
+          "3311b562b12f603c228311559f1df0fb9429b728",
+          "b1a54e315890d8edc2de97bd96a38b9e09a56ee2",
+          "250de033d306d3f84e71735b0dfe0700aa160f77",
+          "26fa014f29174312c363095973b194481d1274f7",
+          "0d095f19e823eb4fe8035aa5ebf88c6f27ba881a",
+          "9e28273a0208c5aaa6c8ed84528e6076d58b294c",
+          "5fff8095d69e1394143dcee4be7bca9b4d88c630",
+          "99eccb62937d3a3c19970d3a08a89f464df1827b",
+          "7a383b9e49df3e8a72b7bd58c4e1f3870c8fbd40",
+          "5feb1dbc8b37a0878b1a8e5ed0706c5efdae12d7",
+          "f6bc9b4a0d6c316ad941361198eb7385b4999f86",
+          "806487829eaf9daf8a6b3f0041d007a3f6acc200",
+          "cb8a89b5ca0fcefc3bba1f3432501f76ccd09f33",
+          "9d4af6f64e85bac260e4aabf5dc7c06b8b898bb2",
+          "215f41b18f203490d3a86169a8ba55a38f1d4c8b",
+          "b048ccb7f93761d408720bde5b8e476fcef16687",
+          "493c9eba5a4842092c785da553330b25a726a0c5",
+          "cdeb9391bf23e5c2460527959132008aee6f8eb1"
+        ],
+        "paths": [
+          "docs/implementation-provenance/gpu-plan-c-route-decision-slice-20261025.md",
+          "frc_defense/experimental_route_evaluation.py",
+          "frc_defense/meco_candidates.py",
+          "frc_defense/meco_track_training.py",
+          "frc_defense/meco_tracks.py",
+          "tests/test_meco_device_route_batch.py"
+        ],
+        "status": "implemented"
+      },
+      "reviewer": {
+        "artifact": {
+          "path": "docs/implementation-provenance/plan-c-device-resident-selection-20261025.md",
+          "sha256": "2a0a2a91a8ebfe3f87b835b78c51b92166ea1c21307b2011383176d84a179290",
+          "kind": "scoped-transcript-summary",
+          "status": "review-summary"
+        },
+        "status": "approved-summary",
+        "verdict": "approved",
+        "approved_commit": "cdeb9391bf23e5c2460527959132008aee6f8eb1",
+        "verdict_detail": "Independent exact-head Pass 3 approved the Plan C source/code candidate at cdeb9391bf23e5c2460527959132008aee6f8eb1. This provenance entry is a separate ledger/dashboard change; it does not claim runtime validation."
+      },
+      "limits": "Source/code review only. Seeded simulator evaluation, fresh replay, GPU/HIP parity and profiling, current-dashboard verification, training, runtime evidence, and qualification remain pending. The slice is partial Plan C device residency and does not establish whole-system GPU-only execution."
     }
   ],
   "evidence_class": "scoped_transcript_summary",

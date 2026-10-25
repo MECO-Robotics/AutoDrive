@@ -41,16 +41,18 @@ def test_current_manifest_is_validated_as_summary_only():
     assert result["validation_status"] == "validated_summary_only"
     assert result["status"] == "scoped-transcript-summaries"
     assert result["evidence_class"] == "scoped_transcript_summary"
-    assert len(result["tranches"]) == 88
+    assert len(result["tranches"]) == 89
     assert result["tranches"][-1]["requirement_id"] == (
+        "plan-c-device-resident-route-decision")
+    assert result["tranches"][-2]["requirement_id"] == (
         "phase4-runtime-status-ledger-dashboard")
     assert hashlib.sha256(MANIFEST.read_bytes()).hexdigest() == (
         dashboard_api._EXPECTED_THREE_PASS_PROVENANCE_SHA256)
     assert hashlib.sha256(json.dumps(
         result["tranches"][:-1], sort_keys=True, separators=(",", ":")
     ).encode()).hexdigest() == (
-        "7f86456dbf21fbeffb43105681ece6c1dfd71bdfd2efb415796c0f51b76bc663")
-    phase4_status = result["tranches"][-1]
+        "af5303953982a989276a62bcc47abb78700e5d5b4273f93796fcc3a356423829")
+    phase4_status = result["tranches"][-2]
     assert phase4_status["planner"]["artifact"] == {
         "path": "docs/plans/phase4-runtime-status-ledger-dashboard-20261025.md",
         "sha256": "3fd84e8adaab8b8ab92d08123dd10d7486890255476259a17de7c31d6a95549c",
@@ -107,6 +109,38 @@ def test_current_manifest_is_validated_as_summary_only():
         "5f199c68efdc4e17ae77fa4e286c15adaf9093d6")
     assert plan_a_hip["reviewer"]["approved_commit"] == (
         "5f199c68efdc4e17ae77fa4e286c15adaf9093d6")
+    plan_c = result["tranches"][-1]
+    assert plan_c["requirement_id"] == "plan-c-device-resident-route-decision"
+    assert plan_c["planner"]["artifact"] == {
+        "path": "docs/plans/gpu-resident-route-decision-slice-20261025.md",
+        "sha256": "8c6c67ffb2934fa3a4ce40b54c5cc2f2e2cb4877b5eedac9c31a2936a6879b5a",
+        "kind": "scoped-transcript-summary",
+        "status": "transcript-summary",
+    }
+    assert plan_c["implementer"]["candidate_commit"] == (
+        "cdeb9391bf23e5c2460527959132008aee6f8eb1")
+    assert plan_c["reviewer"]["approved_commit"] == (
+        "cdeb9391bf23e5c2460527959132008aee6f8eb1")
+    assert plan_c["implementer"]["integration_commit"] == (
+        "e87d757cb70262b523a4342315695bf600cf24c7")
+    assert plan_c["implementer"]["implementation_commits"][-1] == (
+        plan_c["implementer"]["candidate_commit"])
+    assert len(plan_c["implementer"]["implementation_commits"]) == 22
+    assert len(plan_c["implementer"]["paths"]) == 6
+    assert plan_c["reviewer"]["status"] == "approved-summary"
+    assert plan_c["reviewer"]["verdict"] == "approved"
+    assert "simulator" in plan_c["limits"]
+    assert "GPU/HIP" in plan_c["limits"]
+    assert "qualification" in plan_c["limits"]
+    plan_c_summary = (REPO / plan_c["reviewer"]["artifact"]["path"]).read_text()
+    for required_reference in (
+        "gpu-resident-route-decision-slice-20261025.md",
+        "cdeb9391bf23e5c2460527959132008aee6f8eb1",
+        "e87d757cb70262b523a4342315695bf600cf24c7",
+        "seeded simulator evaluation",
+        "current-dashboard verification",
+    ):
+        assert required_reference in plan_c_summary
     durable_schedule = next(t for t in result["tranches"]
         if t["requirement_id"] == "meco-durable-evaluation-schedule")
     assert durable_schedule["implementer"]["commit"] == (
