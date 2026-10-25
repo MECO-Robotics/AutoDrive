@@ -9,15 +9,15 @@ executed or qualified episode.
 
 | Requirement | Factor ID | Runtime event | Required signals | Current status |
 | --- | --- | --- | --- | --- |
-| stationary blockage | `blockage.stationary` | none | route completion, time lost to blockage, alternate crossing | Not wired; signals unavailable |
+| stationary blockage | `blockage.stationary` | route-goal lifecycle endpoint record | route completion, time lost to blockage, alternate crossing | Existing factor capture now retains a fully observed, exact-bound route completion diagnostic when available; no representative replay; other required outcomes remain unavailable and qualification is disabled |
 | direct pursuit | `opponent.direct_pursuit` | none | interception, time lost to opponents, robot contact | Sensed-state policy helper exists, but validation slot assignment is not wired; signals unavailable |
 | trench interception | `opponent.trench_interception` | none | interception, alternate crossing, trench crossing time | Sensed-state policy helper exists, but validation slot assignment is not wired; signals unavailable |
-| feints | `opponent.feint_reversal` | `feint_reversal_tick` | reaction latency, interception, route completion | Existing factor can run and record reversal; all required outcome signals unavailable |
+| feints | `opponent.feint_reversal` | `feint_reversal_tick` plus route-goal lifecycle endpoint record | reaction latency, interception, route completion | Existing factor capture can retain a fully observed, exact-bound route completion diagnostic; reaction latency/interception remain unavailable, no representative replay has validated it, and qualification is disabled |
 | reactive defenders and opponent pools | `defender.reactive_pool` | none | interception, policy-family coverage, paired outcome by family | Seven-policy helper exists, but validation schedule is not wired; signals unavailable |
 | multiple legal team start states | `start.legal_team_poses` | none | legal start validation, outcome by start state | Start-pose helpers exist, but validation reset is not wired; signals unavailable |
 | teammate behaviors | `teammate.behavior_pool` | none | outcome by behavior, teammate collision, score contribution | Schedule helper exists, but validation action assignment is not wired; signals unavailable |
 | sensor delay and low confidence | `sensor.delay_120ms`, `sensor.low_confidence` | delayed-observation ticks, confidence-cap refresh/reduction | outcome by sensor condition, stale-observation reaction latency, outcome by confidence band | Existing factors capture stimulus; required outcome signals unavailable |
-| abrupt opponent change | `opponent.abrupt_policy_change` | `policy_change_tick` | reaction latency, interception, route completion | Existing factor can run and record switch; all required outcome signals unavailable |
+| abrupt opponent change | `opponent.abrupt_policy_change` | `policy_change_tick` plus route-goal lifecycle endpoint record | reaction latency, interception, route completion | Existing factor capture can retain a fully observed, exact-bound route completion diagnostic; reaction latency/interception remain unavailable, no representative replay has validated it, and qualification is disabled |
 | bumps and contact | `contact.robot_bump` | `phase4_contact_exposure`, `phase4_pair_contact_event`, `first_route_progress_interval`, `selected_goal_endpoint_completion_rate` | robot contact rate, recovery time, route completion | Three registered geometries flow through diagnostic matrix conditions and reset; slot 2 receives the sensed-target approach while slot 3 remains the evaluated policy. Records separate exposure, solver-confirmed pair (2,3) contact, route crossing, an outer-tick interval-censored route-progress observation, and an episode-wide selected-goal endpoint diagnostic. Neither diagnostic is contact-caused recovery or registry route completion; D0 has no selected-goal ledger, and qualification stays disabled. |
 | observation-only focal pose mislocalization | `observation.focal_pose_offset` | none | relocalization time, pose-error recovery, safety contact | Observation-boundary helper exists, but validation reset/observation application is not wired; signals unavailable |
 
@@ -39,6 +39,15 @@ completion. Contact geometry conditions are diagnostic-only and explicitly
 qualification-ineligible. They are blocked from final-test use. Route crossing
 is recorded as a separate observed event and is not promoted to route
 completion.
+
+For stationary blockage, feint reversal, and abrupt policy change, the generic
+factor capture now embeds the existing route-goal lifecycle record only when
+all attempts have valid completed or explicitly registered failure outcomes,
+with no censoring, and its episode, source digest, policy, factor ID, and
+condition exactly match the capture. Timeout, abandonment, replacement, or
+missing measurements remain censored. The route record is exposed as a
+non-authoritative diagnostic; it does not make any cell executable or
+qualification-eligible, and no selected-goal endpoint proxy is used.
 
 The separate `first_route_progress_interval` diagnostic checks whether
 remaining distance along the current executable route to the pinned selected

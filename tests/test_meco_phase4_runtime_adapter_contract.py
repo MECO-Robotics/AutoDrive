@@ -138,6 +138,61 @@ def test_capture_binds_only_realized_existing_stimuli_and_marks_missing_outcomes
         expected_split="validation", expected_qualification_case=capture["qualification_case"])
 
 
+def test_capture_accepts_only_complete_route_outcome_with_exact_episode_binding():
+    from frc_defense.meco_phase4_runtime_adapter import phase4_route_completion_record
+
+    factor = phase4_factor_config("feinting_opponent")
+    source = {"repository": "fixture", "commit": "abc123"}
+    source_hash = hashlib.sha256(json.dumps(source, sort_keys=True,
+        allow_nan=False).encode()).hexdigest()
+    binding = {"episode_id": "episode-1", "policy_id": "A1",
+        "scenario_id": "case", "category": "category", "case_id": "case-1",
+        "seed": 21, "split": "validation", "factor_id": "opponent.feint_reversal",
+        "condition": "factor_treatment", "source_identity_sha256": source_hash}
+    route = phase4_route_completion_record([{
+        "macro_index": 0, "episode_id": "episode-1",
+        "source_identity_sha256": source_hash, "goal_lifecycle_id": "goal-1",
+        "selected_goal_id": "goal-1", "route_id": "route-1", "goal_xy_m": [0., 0.],
+        "goal_heading_rad": None, "execution_valid": True,
+        "execution_exclusion_reasons": [], "executed_action_trace": [0],
+        "terminal_goal_distance_m": .01, "goal_heading_required": False,
+        "terminal_heading_error_rad": None, "terminal_pose_xy_m": [.01, 0.],
+        "terminal_pose_heading_rad": 0.}], binding=binding)
+    capture = phase4_factor_exposure(factor, {"feint_reversal_tick": 360}, {},
+        source_identity=source, split="validation", seed=21,
+        scenario_id="case", category="category", episode_id="episode-1",
+        policy_id="A1", route_completion_by_factor={
+            "opponent.feint_reversal": route})
+    observed = capture["route_outcome_observation"]
+    assert observed["route_completion_rate"] == 1.
+    assert observed["binding"] == binding
+    assert observed["authoritative_signal_available"] is False
+    assert capture["qualification_eligible"] is False
+    validate_phase4_capture(capture, expected_source_identity=source)
+    wrong_condition = copy.deepcopy(capture)
+    wrong_condition["route_outcome_observation"]["binding"]["condition"] = "no_factor"
+    with pytest.raises(ValueError, match="binding mismatch"):
+        validate_phase4_capture(wrong_condition, expected_source_identity=source)
+
+    wrong_episode = copy.deepcopy(route)
+    wrong_episode["binding"]["episode_id"] = "episode-2"
+    with pytest.raises(ValueError, match="binding mismatch"):
+        phase4_factor_exposure(factor, {"feint_reversal_tick": 360}, {},
+            source_identity=source, split="validation", seed=21,
+            scenario_id="case", category="category", episode_id="episode-1",
+            policy_id="A1", route_completion_by_factor={
+                "opponent.feint_reversal": wrong_episode})
+
+    censored = copy.deepcopy(route)
+    censored["censored"] = 1
+    censored_capture = phase4_factor_exposure(factor,
+        {"feint_reversal_tick": 360}, {}, source_identity=source,
+        split="validation", seed=21, scenario_id="case", category="category",
+        episode_id="episode-1", policy_id="A1", route_completion_by_factor={
+            "opponent.feint_reversal": censored})
+    assert censored_capture["route_outcome_observation"] is None
+
+
 def test_stationary_blockage_is_registered_and_capture_requires_reset_assignment():
     factor = phase4_factor_config("stationary_blockage")
     source = {"repository": "fixture", "commit": "abc123"}

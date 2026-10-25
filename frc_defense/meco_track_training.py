@@ -3511,6 +3511,38 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                              "split": split}, sort_keys=True).encode()).hexdigest()
                             if inference_disable_tick is not None and policy in selected
                             else None)
+                        phase4_route_completion_records = ({
+                            factor_id: phase4_route_completion_record(
+                                metric_ledger_record.get("goal_attempts"), binding={
+                                    "episode_id": episode_id,
+                                    "policy_id": record_policy,
+                                    "checkpoint_policy_id": policy_manifest[
+                                        record_policy]["policy_id"],
+                                    "checkpoint_sha256": policy_manifest[
+                                        record_policy]["checkpoint_sha256"],
+                                    "scenario_id": scenario_id,
+                                    "category": category,
+                                    "execution_device": json.dumps(execution_device,
+                                        sort_keys=True, separators=(",", ":"),
+                                        allow_nan=False),
+                                    "condition_id": condition_id or "unpaired_evaluation",
+                                    "case_id": hashlib.sha256(json.dumps({
+                                        "evaluation_case": evaluation_case,
+                                        "qualification_case": qualification_case,
+                                        "category": category}, sort_keys=True,
+                                        separators=(",", ":"),
+                                        allow_nan=False).encode()).hexdigest(),
+                                    "seed": int(seed), "split": split,
+                                    "factor_id": factor_id,
+                                    "condition": phase4_route_condition(factor_id,
+                                        phase4_factor=phase4_factor,
+                                        contact_factor_id=phase4_contact_factor_id),
+                                    "source_identity_sha256": source_hash,
+                                    "goal_attempt_coverage_available":
+                                        metric_ledger_record.get(
+                                            "goal_attempt_coverage_available") is True})
+                            for factor_id in phase4_route_outcome_factor_ids
+                        } if phase4_route_outcome_factor_ids else None)
                         record = {"scenario_id": scenario_id, "category": category,
                             "diagnostic_performance": diagnostic_performance,
                             "input_contract_sha256": input_contract_digest(),
@@ -3638,40 +3670,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                 phase4_pair_contact_event_record(env.sim,
                                     factor_id=phase4_contact_factor_id)
                                 if phase4_contact_factor_id is not None else None),
-                            "phase4_route_completion_by_factor": ({
-                                factor_id: phase4_route_completion_record(
-                                    metric_ledger_record.get("goal_attempts"), binding={
-                                        "episode_id": episode_id,
-                                        "policy_id": record_policy,
-                                        "checkpoint_policy_id": policy_manifest[
-                                            record_policy]["policy_id"],
-                                        "checkpoint_sha256": policy_manifest[
-                                            record_policy]["checkpoint_sha256"],
-                                        "scenario_id": scenario_id,
-                                        "category": category,
-                                        "execution_device": json.dumps(execution_device,
-                                            sort_keys=True, separators=(",", ":"),
-                                            allow_nan=False),
-                                        "condition_id": condition_id or "unpaired_evaluation",
-                                        "case_id": hashlib.sha256(json.dumps({
-                                            "evaluation_case": evaluation_case,
-                                            "qualification_case": qualification_case,
-                                            "category": category},
-                                            sort_keys=True, separators=(",", ":"),
-                                            allow_nan=False).encode()).hexdigest(),
-                                        "seed": int(seed),
-                                        "split": split,
-                                        "factor_id": factor_id,
-                                        "condition": phase4_route_condition(factor_id,
-                                            phase4_factor=phase4_factor,
-                                            contact_factor_id=phase4_contact_factor_id),
-                                        "source_identity_sha256": source_hash,
-                                        "goal_attempt_coverage_available":
-                                            metric_ledger_record.get(
-                                                "goal_attempt_coverage_available") is True,
-                                    })
-                                for factor_id in phase4_route_outcome_factor_ids
-                            } if phase4_route_outcome_factor_ids else None),
+                            "phase4_route_completion_by_factor": phase4_route_completion_records,
                             "phase4_contact_exposure": ({
                                 "factor_id": "contact.robot_bump",
                                 "geometry_id": contact_geometry_id,
@@ -3719,7 +3718,10 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                 metrics, source_identity=sources, split=split,
                                 seed=seed, scenario_id=scenario_id,
                                 category=category,
-                                qualification_case=qualification_case),
+                                qualification_case=qualification_case,
+                                episode_id=episode_id, policy_id=record_policy,
+                                route_completion_by_factor=phase4_route_completion_records,
+                                contact_factor_id=phase4_contact_factor_id),
                             "phase4_response_metrics": ({name: metrics.get(name)
                                 for name in ("success", "useful_throughput",
                                     "route_switches", "route_aba_proxy",

@@ -946,7 +946,11 @@ def phase4_factor_exposure(factor: dict | None, runtime_metrics: dict | None,
                            metrics: dict | None, *, source_identity: dict,
                            split: str, seed: int, scenario_id: str,
                            category: str,
-                           qualification_case: dict | None = None) -> dict | None:
+                           qualification_case: dict | None = None,
+                           episode_id: str | None = None,
+                           policy_id: str | None = None,
+                           route_completion_by_factor: dict | None = None,
+                           contact_factor_id: str | None = None) -> dict | None:
     """Build an immutable-provenance capture; missing/unrealized signals fail closed."""
     if factor is None:
         return None
@@ -1028,6 +1032,21 @@ def phase4_factor_exposure(factor: dict | None, runtime_metrics: dict | None,
     # is not promoted into a requirement-specific signal by this adapter.
     observed = {name: outcomes[name] for name in authoritative_signals if name in outcomes}
     unavailable = sorted(set(required_signals) - set(observed))
+    route_factor_id = {
+        "stationary_blockage": "blockage.stationary",
+        "feinting_opponent": "opponent.feint_reversal",
+        "abrupt_opponent_policy_change": "opponent.abrupt_policy_change",
+    }.get(kind)
+    route_observation = None
+    if realized and route_factor_id is not None and route_completion_by_factor is not None:
+        expected_condition = phase4_route_condition(route_factor_id,
+            phase4_factor=factor, contact_factor_id=contact_factor_id)
+        route_observation = _phase4_route_completion_observation(
+            route_completion_by_factor.get(route_factor_id),
+            expected_binding={"episode_id": episode_id,
+                "policy_id": policy_id, "factor_id": route_factor_id,
+                "condition": expected_condition,
+                "source_identity_sha256": source_hash})
     return {
         "schema": "meco-phase4-realized-stimulus-capture-v1",
         "status": "realized_stimulus_outcomes_incomplete" if realized else "stimulus_not_realized",
@@ -1036,6 +1055,8 @@ def phase4_factor_exposure(factor: dict | None, runtime_metrics: dict | None,
         "scenario_id": scenario_id,
         "category": category,
         "qualification_case": qualification_case,
+        "episode_id": episode_id,
+        "policy_id": policy_id,
         "seed": seed if split != "test" else None,
         "seed_redacted": split == "test",
         "source_identity": source_identity,
@@ -1048,11 +1069,68 @@ def phase4_factor_exposure(factor: dict | None, runtime_metrics: dict | None,
                           "evidence": event_evidence},
         "authoritative_observed_signals": observed,
         "required_signals_unavailable": unavailable,
+        # Route completion is preserved as a separately validated diagnostic.
+        # The registry does not yet consider it authoritative for qualification.
+        "route_outcome_observation": route_observation,
         "missing_runtime_sources": sorted({limitation for row in bindings
                                              for limitation in row["limitations"]}),
         "disclosure": {"contains_final_test_seed_assignments": False,
                        "seed_is_episode_seed_only": True},
     }
+
+
+def _phase4_route_completion_observation(record: dict | None, *,
+                                        expected_binding: dict) -> dict | None:
+    """Accept only complete route lifecycle records with the exact episode binding."""
+    if record is None:
+        return None
+    if not isinstance(record, dict) or record.get("schema") != \
+            "meco-phase4-route-completion-attempts-v1":
+        raise ValueError("route completion capture has invalid record schema")
+    binding = record.get("binding")
+    if (not isinstance(binding, dict) or any(value is None for value in
+            expected_binding.values()) or any(binding.get(key) != value
+            for key, value in expected_binding.items())):
+        raise ValueError("route completion capture episode/source/factor/condition binding mismatch")
+    attempts = record.get("attempts")
+    attempted = record.get("attempted")
+    completed = record.get("completed")
+    failures = record.get("observed_failure")
+    censored = record.get("censored")
+    rate = record.get("route_completion_rate")
+    if (not isinstance(attempts, list) or type(attempted) is not int or attempted <= 0 or
+            len(attempts) != attempted or type(completed) is not int or completed < 0 or
+            type(failures) is not int or failures < 0 or type(censored) is not int or
+            censored != 0 or completed + failures != attempted or
+            type(rate) not in (int, float) or not math.isfinite(rate) or
+            not math.isclose(rate, completed / attempted, rel_tol=0., abs_tol=1e-12)):
+        return None
+    for attempt in attempts:
+        if (not isinstance(attempt, dict) or attempt.get("outcome") not in
+                ("completed", "observed_failure") or attempt.get("censor_reasons") or
+                attempt.get("binding") != binding or
+                attempt.get("source_identity_sha256") !=
+                    expected_binding["source_identity_sha256"]):
+            return None
+        event = attempt.get("objective_event")
+        if attempt["outcome"] == "completed":
+            if (not isinstance(event, dict) or event.get("schema") !=
+                    "meco-evaluator-route-endpoint-v1" or event.get("source") !=
+                    "evaluator_terminal_slot3_truth_after_executed_macro"):
+                return None
+        elif (not isinstance(event, dict) or event.get("schema") !=
+                "meco-registered-route-objective-failure-v1"):
+            return None
+    return {"schema": "meco-phase4-route-outcome-observation-v1",
+        "factor_id": expected_binding["factor_id"],
+        "condition": expected_binding["condition"],
+        "binding": dict(binding), "attempted": attempted,
+        "completed": completed, "observed_failure": failures,
+        "censored": 0, "route_completion_rate": rate,
+        "attempts": attempts,
+        "source_record_schema": record["schema"],
+        "authoritative_signal_available": False,
+        "qualification_eligible": False}
 
 
 def validate_phase4_capture(capture: dict, *,
@@ -1129,6 +1207,34 @@ def validate_phase4_capture(capture: dict, *,
             len(unavailable) != len(set(unavailable)) or
             unavailable != sorted(set(required) - set(observed)) or not unavailable):
         raise ValueError("Phase 4 capture required/unavailable signal accounting is inconsistent")
+
+    route_observation = capture.get("route_outcome_observation")
+    route_factor_id = {"stationary_blockage": "blockage.stationary",
+        "feinting_opponent": "opponent.feint_reversal",
+        "abrupt_opponent_policy_change": "opponent.abrupt_policy_change"}.get(
+            factor["kind"])
+    if route_observation is not None:
+        if route_factor_id is None:
+            raise ValueError("Phase 4 route outcome is unsupported for this factor")
+        expected_condition = phase4_route_condition(route_factor_id,
+            phase4_factor=factor, contact_factor_id=None)
+        expected_binding = {"episode_id": capture.get("episode_id"),
+            "policy_id": capture.get("policy_id"), "factor_id": route_factor_id,
+            "condition": expected_condition,
+            "source_identity_sha256": embedded_hash}
+        revalidated = _phase4_route_completion_observation({
+            "schema": "meco-phase4-route-completion-attempts-v1",
+            "binding": route_observation.get("binding"),
+            "attempts": route_observation.get("attempts"),
+            "attempted": route_observation.get("attempted"),
+            "completed": route_observation.get("completed"),
+            "observed_failure": route_observation.get("observed_failure"),
+            "censored": route_observation.get("censored"),
+            "route_completion_rate": route_observation.get("route_completion_rate")},
+            expected_binding=expected_binding)
+        if revalidated is None or any(route_observation.get(key) != value
+                for key, value in revalidated.items()):
+            raise ValueError("Phase 4 route outcome observation is incomplete or invalid")
 
     event = capture.get("runtime_event")
     if not isinstance(event, dict) or event.get("realized") is not True:
