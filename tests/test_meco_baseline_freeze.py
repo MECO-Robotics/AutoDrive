@@ -11,6 +11,7 @@ from frc_defense.meco_baseline_freeze import (
     AUTHORITATIVE_FIELD_SOURCES,
     PARTITION_NAMES,
     PARTITION_WORKFLOWS,
+    REQUIRED_CONFIGURATION_ARTIFACT_IDS,
     canonical_sha256,
     compile_baseline_freeze,
     compile_partition_contract,
@@ -112,7 +113,10 @@ def _runtime_identity() -> dict[str, str]:
 
 
 def _configuration_artifacts() -> dict[str, bytes]:
-    return {"campaign_config": b'{"layout":"2026_rebuilt","dt":0.02}'}
+    return {
+        artifact_id: f'{{"artifact":"{artifact_id}","fixture":true}}'.encode()
+        for artifact_id in sorted(REQUIRED_CONFIGURATION_ARTIFACT_IDS)
+    }
 
 
 def _field_records(root: Path) -> dict[str, dict]:
@@ -185,10 +189,10 @@ def test_baseline_freeze_is_bound_to_clean_source_runtime_and_field_sources(tmp_
     )
     assert validate_baseline_freeze(
         freeze, tmp_path, configuration_artifacts=_configuration_artifacts()) == freeze
-    assert freeze["configuration_artifacts"] == [{
-        "artifact_id": "campaign_config",
-        "content_sha256": hashlib.sha256(_configuration_artifacts()["campaign_config"]).hexdigest(),
-    }]
+    assert freeze["configuration_artifacts"] == [
+        {"artifact_id": artifact_id,
+         "content_sha256": hashlib.sha256(config_bytes).hexdigest()}
+        for artifact_id, config_bytes in sorted(_configuration_artifacts().items())]
     assert "path" not in freeze["configuration_artifacts"][0]
 
     changed = dict(freeze)
@@ -283,8 +287,12 @@ def test_baseline_freeze_rejects_missing_or_drifted_configuration_artifacts(tmp_
         "runtime_identity": _runtime_identity(),
         "field_records": _field_records(tmp_path),
     }
-    with pytest.raises(ValueError, match="configuration artifacts"):
-        compile_baseline_freeze(tmp_path, **arguments, configuration_artifacts={})
+    for missing_id in REQUIRED_CONFIGURATION_ARTIFACT_IDS:
+        incomplete = _configuration_artifacts()
+        del incomplete[missing_id]
+        with pytest.raises(ValueError, match="configuration artifact IDs"):
+            compile_baseline_freeze(
+                tmp_path, **arguments, configuration_artifacts=incomplete)
 
     config = _configuration_artifacts()
     freeze = compile_baseline_freeze(
@@ -292,12 +300,14 @@ def test_baseline_freeze_rejects_missing_or_drifted_configuration_artifacts(tmp_
     with pytest.raises(ValueError, match="configuration artifact identity drifted"):
         validate_baseline_freeze(
             freeze, tmp_path,
-            configuration_artifacts={"campaign_config": b'{"layout":"shifted"}'})
+            configuration_artifacts={**config, "field_layout": b'{"layout":"shifted"}'})
 
-    with pytest.raises(ValueError, match="stable logical ID"):
+    invalid_ids = dict(config)
+    invalid_ids["/tmp/config.json"] = invalid_ids.pop("field_layout")
+    with pytest.raises(ValueError, match="configuration artifact IDs"):
         compile_baseline_freeze(
             tmp_path, **arguments,
-            configuration_artifacts={"/tmp/config.json": b"config"})
+            configuration_artifacts=invalid_ids)
 
 
 def test_partition_contract_is_deterministic_disjoint_and_final_test_isolated():

@@ -3,13 +3,16 @@
 The MECO track evaluator calls ``make_curriculum_env`` from
 ``meco_track_training.evaluate_meco``. That factory builds ``CurriculumEnv``
 from ``TensorThreeVsThreeEnv`` and applies scenario, category, layout, sensor,
-and opponent assignments. The sources below follow that path through its
-simulator mixins and runtime reporter. Constructor defaults and per-run
-overrides are not an effective campaign configuration, so callers must
-supply observed values, runtime identity, and the content bytes of every
-outcome-affecting configuration artifact. Config artifacts are stored by a
-stable logical ID and content digest; filesystem locations are not identity.
-This module does not instantiate a simulator or create a production freeze.
+and opponent assignments. ``tensor_3v3.py`` imports the shared low-level
+``TensorVectorizedSimulator`` from ``tensor_sim.py``; only that shared physics
+dependency is included in the source map. The map also follows scenario and
+opponent selection through the evaluator and their registries. Constructor
+defaults and per-run overrides are not an effective campaign configuration,
+so callers must supply observed values, runtime identity, and the content
+bytes of every required outcome-affecting configuration artifact. Config
+artifacts are stored by stable logical ID and content digest; filesystem
+locations are not identity. This module does not instantiate a simulator or
+create a production freeze.
 
 The simulator reports scored FUEL piece counts; it does not assign official
 match points. Do not use those counts as a ``match_points`` field or as a
@@ -116,6 +119,16 @@ PARTITION_WORKFLOWS = {
     "validation": frozenset({"validation", "model_selection"}),
     "final_test": frozenset({"final_evaluation"}),
 }
+REQUIRED_CONFIGURATION_ARTIFACT_IDS = frozenset({
+    "campaign_assignment",
+    "evaluation_protocol",
+    "drivetrain_physics",
+    "gamepiece_rules",
+    "field_layout",
+    "scenario_registry",
+    "opponent_schedule",
+    "sensor_profile",
+})
 
 _HEX_40 = re.compile(r"^[0-9a-f]{40}$")
 _HEX_64 = re.compile(r"^[0-9a-f]{64}$")
@@ -204,9 +217,15 @@ def _normalize_configuration_artifacts(
     artifacts: Mapping[str, bytes],
 ) -> list[dict[str, str]]:
     """Bind supplied config contents without persisting their filesystem paths."""
-    if (not isinstance(artifacts, Mapping) or not artifacts
+    if (not isinstance(artifacts, Mapping)
             or any(not isinstance(key, str) for key in artifacts)):
-        raise ValueError("configuration artifacts must provide every effective config content")
+        raise ValueError("configuration artifacts must provide every required config content")
+    missing = REQUIRED_CONFIGURATION_ARTIFACT_IDS - set(artifacts)
+    extra = set(artifacts) - REQUIRED_CONFIGURATION_ARTIFACT_IDS
+    if missing or extra:
+        raise ValueError(
+            "configuration artifact IDs must match the required set exactly; "
+            f"missing={sorted(missing)}, extra={sorted(extra)}")
     normalized = []
     for artifact_id in sorted(artifacts):
         content = artifacts[artifact_id]
