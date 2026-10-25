@@ -1821,9 +1821,15 @@ class MecoSupervisor:
             except (OSError, ValueError, KeyError, TypeError) as exc:
                 try:
                     self.diagnostic_monitor.fail_attempt(str(exc))
-                except ValueError:
-                    pass
-                self.last_monitor_error = f"{type(exc).__name__}: {exc}"
+                except Exception as recovery_exc:
+                    self.last_monitor_error = (
+                        f"{type(exc).__name__}: {exc}; attempt recovery failed: "
+                        f"{type(recovery_exc).__name__}: {recovery_exc}")
+                else:
+                    self.last_monitor_error = f"{type(exc).__name__}: {exc}"
+                # Failed diagnostic evidence must never retain the eval lane.
+                # Durable failure state can be retried after a later resume.
+                self.diagnostic_monitor = None
                 self.last_evaluation = {"cycle": job["cycle"],
                     "status": "failed", "diagnostic_only": True,
                     "qualification_eligible": False, "error": str(exc)}

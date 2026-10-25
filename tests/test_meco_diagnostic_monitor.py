@@ -1,5 +1,6 @@
 import copy
 import hashlib
+import io
 import json
 from types import SimpleNamespace
 from pathlib import Path
@@ -575,4 +576,36 @@ def test_launch_stage_failure_fails_attempt_and_releases_eval_lane(
     assert supervisor.diagnostic_monitor is None
     assert supervisor.last_monitor_error == expected_error
     assert monitor.pending["status"] == "failed"
+    assert supervisor._training_device_deferred_for_evaluation("cuda:1") is False
+
+
+def test_nonzero_monitor_evaluator_exit_releases_eval_lane(tmp_path):
+    from frc_defense import meco_supervisor as supervisor_api
+
+    monitor = _journal(tmp_path / "monitor")
+    frontier = _frontier(tmp_path, 1)
+    monitor.enqueue(frontier)
+    monitor.begin_attempt(tmp_path / "attempt.json")
+    supervisor = object.__new__(supervisor_api.MecoSupervisor)
+    supervisor.evaluator = SimpleNamespace(poll=lambda: 9)
+    supervisor.evaluator_log = io.BytesIO()
+    supervisor.evaluator_job = {"diagnostic_monitor": True, "cycle": 1,
+        "output": tmp_path / "missing-report.json"}
+    supervisor.evaluation_schedule_journal = None
+    supervisor.diagnostic_monitor = monitor
+    supervisor.diagnostic_monitor_config = {"enabled": True}
+    supervisor.evaluation_device = "cuda:1"
+    supervisor.pending_evaluations = []
+    supervisor.last_evaluation = None
+    supervisor.last_monitor_error = None
+    supervisor.request_stop = False
+    supervisor._observe_stop = lambda: None
+    supervisor._publish = lambda **_kwargs: None
+
+    supervisor._poll_evaluator(1, {})
+
+    assert supervisor.evaluator is None
+    assert supervisor.diagnostic_monitor is None
+    assert monitor.pending["status"] == "failed"
+    assert supervisor.last_evaluation["status"] == "failed"
     assert supervisor._training_device_deferred_for_evaluation("cuda:1") is False
