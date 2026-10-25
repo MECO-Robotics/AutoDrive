@@ -174,11 +174,13 @@ the existing dashboard validator.
 5. Restart the dashboard services on the updated checkout so backend modules
    and frontend files are current. Record service PID/invocation, working
    directory, UTC time, checkout/source identity, and endpoint responses.
-   Verify `/api/meco-status` reports
+   Verify `/api/curriculum-status` reports
    `three_pass_provenance.validation_status == "validated_summary_only"`,
-   all four new IDs, and no `untrusted_reason`; verify `/api/curriculum-status`
-   shows the current queue projection. Fetch `/`, `/meco`, and all referenced
-   JS/CSS assets, and compare served bytes/hashes with the same checkout.
+   all four new IDs, no `untrusted_reason`, and the current queue projection.
+   Verify `/api/meco-status` separately as the campaign-status endpoint; do not
+   expect it to return three-pass provenance. Fetch `/`, `/meco`, and all
+   referenced JS/CSS assets, and compare served bytes/hashes with the same
+   checkout.
 
 ## Acceptance and limits
 
