@@ -244,7 +244,7 @@ class CurriculumEnv(TensorThreeVsThreeEnv):
                     'objective_xy': torch.stack((
                         torch.full_like(own_xy[:, 0], self.field_length),
                         torch.full_like(own_xy[:, 1], self.field_width * .5)), dim=-1),
-                    'phase': self.match_elapsed + float(pressure['phase']) / 1.2,
+                    'phase': self.match_elapsed + self.phase4_pressure_phase / 1.2,
                 }
                 commands[:, slot, :2] = opponent_velocity_command(
                     policy_id, sensed, tick=self.steps,
@@ -272,7 +272,7 @@ class CurriculumEnv(TensorThreeVsThreeEnv):
                         self.phase4_runtime_metrics['feint_reversal_tick'] = int(tick)
                 else:
                     if factor['behavior_a'] == 'orbit':
-                        phase = self.match_elapsed * 1.2 + pressure['phase']
+                        phase = self.match_elapsed * 1.2 + self.phase4_pressure_phase
                         target = self.phase4_defender_anchor[:, slot, :2].clone()
                         target[:, 1] += torch.sin(phase) * .6
                         target[:, 0] += torch.cos(phase * .7 + slot) * .8
@@ -288,7 +288,7 @@ class CurriculumEnv(TensorThreeVsThreeEnv):
                         self.phase4_runtime_metrics['policy_change_tick'] = int(tick)
                 continue
             if level == 2 or (level == 5 and slot == 0) or pressure['family'] == 'orbiting_interceptor':
-                phase = self.match_elapsed * 1.2 + pressure['phase']
+                phase = self.match_elapsed * 1.2 + self.phase4_pressure_phase
                 target = self.policy_pose[:, slot, :2].clone()
                 target[:, 1] = self.phase4_pressure_anchor_y_m + torch.sin(phase) * .6
                 if pressure['family'] == 'orbiting_interceptor':
@@ -298,7 +298,7 @@ class CurriculumEnv(TensorThreeVsThreeEnv):
             elif pressure['family'] == 'split_chaser':
                 delta = self.opponent_pose[:, slot, :2] - self.policy_pose[:, slot, :2]
                 valid = self.opponent_valid[:, slot]
-                phase = self.match_elapsed * .65 + pressure['phase']
+                phase = self.match_elapsed * .65 + self.phase4_pressure_phase
                 offset = torch.stack((torch.cos(phase), torch.sin(phase)), -1) * .8
                 commands[:, slot, :2] = torch.where(valid[:, None],
                     (delta + offset).clamp(-1.5, 1.5), 0.)
@@ -523,6 +523,8 @@ def make_curriculum_env(scenario_id, category, num_envs, device, seed, *, horizo
         torch.cuda.set_device(requested_device)
     env = CurriculumEnv(**env_kwargs)
     env.phase4_pressure_anchor_y_m = torch.full((env.n,), 4.035,
+        device=env.device, dtype=env.sim.pose.dtype)
+    env.phase4_pressure_phase = torch.full((env.n,), float(pressure['phase']),
         device=env.device, dtype=env.sim.pose.dtype)
     env.phase4_factor_config = phase4_factor
     env.phase4_opponent_policy_id = phase4_opponent_policy_id
@@ -1152,14 +1154,9 @@ def reset_curriculum_scenario(env, seed, *, mask=None):
         write_rows(env.sim.pose[:, 3], env.sim.pose.new_tensor((13.3, blocked_y, math.pi)))
         write_rows(env.piece_pos[:, :count, 1], blocked_y)
         write_rows(env.piece_pos[:, :count, 0], 9.8 + (torch.arange(count, device=env.device)%6).float()*.3)
-    write_rows(env.phase4_pressure_anchor_y_m, env.sim.pose[:, 3, 1])
-    blocker_y = env.phase4_pressure_anchor_y_m
-    if pressure['style'] == 'level_3_trench':
-        blocker_y = torch.full_like(blocker_y, .8)
-    if pressure['style'] == 'level_3_bump':
-        blocker_y = torch.full_like(blocker_y, 2.5)
-    if pressure['style'] == 'level_3_seeded_choice':
-        blocker_y = torch.full_like(blocker_y, .8 if int(seed) % 2 else 2.5)
+    phase = torch.full((env.n,), float(pressure['phase']), device=env.device,
+                       dtype=env.phase4_pressure_phase.dtype)
+    write_rows(env.phase4_pressure_phase, phase)
     action_mask = torch.ones((env.n, 6, 8), device=env.device, dtype=torch.bool)
     action_mask[:, 3] = False
     action_mask[:, 3, list(config['allowed_actions'])] = True
@@ -1212,6 +1209,17 @@ def reset_curriculum_scenario(env, seed, *, mask=None):
             'runtime_profile_name': start_assignment['runtime_profile_name'],
             'profile_config_sha256': start_assignment['profile_config_sha256'],
             'assignment_sha256': start_assignment['assignment_sha256']}
+    # Capture the selected world's actual reset pose only after every registered
+    # contact/start profile has established it. Blockers consume this same
+    # rowwise anchor, so their placement and later scripted targets agree.
+    write_rows(env.phase4_pressure_anchor_y_m, env.sim.pose[:, 3, 1])
+    blocker_y = env.phase4_pressure_anchor_y_m
+    if pressure['style'] == 'level_3_trench':
+        blocker_y = torch.full_like(blocker_y, .8)
+    if pressure['style'] == 'level_3_bump':
+        blocker_y = torch.full_like(blocker_y, 2.5)
+    if pressure['style'] == 'level_3_seeded_choice':
+        blocker_y = torch.full_like(blocker_y, .8 if int(seed) % 2 else 2.5)
     for slot in pressure['slots']:
         blocker_x = 11.9 if pressure['level'] == 3 else (13.6 if active and route == 'open' else 9.8)
         blocker_pose = torch.stack((torch.full_like(blocker_y, blocker_x),
