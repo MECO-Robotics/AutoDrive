@@ -2507,6 +2507,10 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
         if (not isinstance(expected_trench_schedule, dict) or
                 trench_binding.get("schedule_sha256") !=
                     expected_trench_schedule.get("schedule_sha256") or
+                trench_binding.get("per_episode_assignment_sha256") !=
+                    expected_trench_schedule.get("per_episode_assignment_sha256") or
+                trench_binding.get("policy_config_sha256") !=
+                    expected_trench_schedule.get("policy_config_sha256") or
                 (phase4_opponent_schedule is not None and
                  phase4_opponent_schedule != expected_trench_schedule) or
                 (phase4_opponent_schedule is None and

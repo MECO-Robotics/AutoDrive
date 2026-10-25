@@ -303,6 +303,8 @@ def validate_trench_interception_record(record: dict, *, binding: dict,
         "protocol_sha256": binding.get("protocol_sha256"),
         "seed_manifest_sha256": binding.get("seed_manifest_sha256"),
         "schedule_sha256": binding.get("schedule_sha256"),
+        "assignment_identity_sha256": binding.get("per_episode_assignment_sha256"),
+        "policy_config_sha256": binding.get("policy_config_sha256"),
         "pair_binding_id": binding.get("pair_binding_id"),
         "policy_id": expected_policy_id, "seed": expected_seed,
         "condition": expected_condition,
@@ -345,7 +347,11 @@ class TrenchInterceptionEpisodeCapture:
             raise ValueError("trench capture requires an exact held-out assignment")
         schedule = binding.get("schedule")
         if (not isinstance(schedule, dict) or schedule.get("schedule_sha256") !=
-                binding.get("schedule_sha256") or schedule.get("configured_pressure_slots", {}).get(
+                binding.get("schedule_sha256") or schedule.get(
+                    "per_episode_assignment_sha256") != binding.get(
+                        "per_episode_assignment_sha256") or schedule.get(
+                    "policy_config_sha256") != binding.get("policy_config_sha256") or
+                schedule.get("configured_pressure_slots", {}).get(
                     binding.get("category")) != [0]):
             raise ValueError("trench binding must designate exactly pressure slot 0")
         pair_binding = binding.get("pair_binding")
@@ -585,6 +591,21 @@ def reduce_trench_interception_pair(control: dict, treatment: dict, *, binding: 
         policy_id: str, seed: int, source_identity_sha256: str,
         checkpoint_sha256: str, execution_device: dict) -> dict:
     """Validate one exact policy/seed pair and derive crossing contrasts."""
+    schedule = binding.get("schedule")
+    from .meco_phase4_opponents import validate_opponent_policy_schedule
+    validated_schedule = validate_opponent_policy_schedule(schedule,
+        scenario_id=binding.get("scenario_id"), categories=binding.get("categories", ()),
+        qualification_case=binding.get("qualification_case"),
+        seeds=binding.get("seed_list", ()), split=binding.get("split"),
+        factor_id="opponent.trench_interception",
+        protocol_id=binding.get("protocol_id"))
+    if (not isinstance(schedule, dict) or
+            validated_schedule != schedule or
+            binding.get("schedule_sha256") != schedule.get("schedule_sha256") or
+            binding.get("per_episode_assignment_sha256") !=
+                schedule.get("per_episode_assignment_sha256") or
+            binding.get("policy_config_sha256") != schedule.get("policy_config_sha256")):
+        raise ValueError("trench pair binding differs from its validated assignment schedule")
     rows = {}
     for condition, record in (("no_factor", control), ("factor_treatment", treatment)):
         rows[condition] = validate_trench_interception_record(record, binding=binding,
@@ -594,6 +615,11 @@ def reduce_trench_interception_pair(control: dict, treatment: dict, *, binding: 
             expected_device=execution_device)
     if control.get("pair_binding_id") != treatment.get("pair_binding_id"):
         raise ValueError("trench arms differ in stable pair binding")
+    for key, expected in (
+            ("assignment_identity_sha256", binding["per_episode_assignment_sha256"]),
+            ("policy_config_sha256", binding["policy_config_sha256"])):
+        if control.get(key) != expected or treatment.get(key) != expected:
+            raise ValueError(f"trench paired rows differ in {key}")
     if (not rows["no_factor"]["crossing_row_valid"] or
             not rows["factor_treatment"]["crossing_row_valid"]):
         raise ValueError("invalid trench rows cannot satisfy paired outcome gate")

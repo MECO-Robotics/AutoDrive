@@ -895,6 +895,10 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
             factor_id="opponent.trench_interception",
             protocol_id=qualification_provenance["protocol_id"])
         if (trench_binding.get("schedule_sha256") != validated_trench["schedule_sha256"] or
+                trench_binding.get("per_episode_assignment_sha256") !=
+                    validated_trench["per_episode_assignment_sha256"] or
+                trench_binding.get("policy_config_sha256") !=
+                    validated_trench["policy_config_sha256"] or
                 (phase4_opponent_schedule is not None and
                  phase4_opponent_schedule != validated_trench)):
             raise ValueError("trench treatment schedule differs from outcome binding")
