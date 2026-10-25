@@ -57,6 +57,9 @@ class DirectPursuitEpisodeCapture:
                 not self.checkpoint_bundle or any(not isinstance(value, str) or not value
                     for value in self.checkpoint_bundle.values())):
             raise ValueError("direct-pursuit binding lacks exact checkpoint bundle identity")
+        self.pair_binding_id = binding.get("pair_binding_id")
+        if not isinstance(self.pair_binding_id, str) or not self.pair_binding_id:
+            raise ValueError("direct-pursuit binding lacks stable paired-experiment identity")
         pair_binding = binding.get("pair_binding")
         if (not isinstance(pair_binding, dict)
                 or _sha(pair_binding) != self.pair_binding_id
@@ -80,9 +83,6 @@ class DirectPursuitEpisodeCapture:
         self.policy_id = policy_id
         self.device = execution_device
         self.condition_id = condition_id
-        self.pair_binding_id = binding.get("pair_binding_id")
-        if not isinstance(self.pair_binding_id, str) or not self.pair_binding_id:
-            raise ValueError("direct-pursuit binding lacks stable paired-experiment identity")
         self.slots = tuple(slots)
         self.sim = env.sim
         if (getattr(self.sim, "num_robots", None) != 6 or
