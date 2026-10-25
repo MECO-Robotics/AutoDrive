@@ -1278,8 +1278,24 @@ production gate. Device parity, support-digest comparison, profiling, and any
 dispatch decision remain deferred until the orchestrator confirms continuous
 training has released both exclusive WX9100 leases and schedules verification.
 
-## Plan C route-device provenance checkpoint E — candidate pending second review
+## Plan C route-device provenance and dashboard currentness — 2026-10-25
 
-The Plan C route-device source/code candidate C (`cdeb9391bf23e5c2460527959132008aee6f8eb1`) has a separate approved exact-head code review. Ledger candidate D (`8d64233d4573600321956c74391842e7623f18f7`) was independently approved for ledger correctness; E records that D approval separately from C's code review. E remains a finalizer candidate awaiting its second exact-head review and integration. No E SHA or second-review verdict is recorded in the digest-pinned ledger.
+Code candidate C (`cdeb9391bf23e5c2460527959132008aee6f8eb1`) received an
+independent source/code review. Ledger candidate D
+(`8d64233d4573600321956c74391842e7623f18f7`) received a separate exact-head
+ledger review. Finalizer E (`0ce905a77cd5d7ae92dea6917999cf034892a6ea`) passed
+its second exact-head review and was integrated at `8e0ad89aad4721d9f58bcfb50e27d8394f2f0fa0`.
 
-This status records code and ledger review only. It does not establish Plan C simulator behavior, a fresh replay, GPU/HIP parity or profiling, training, qualification, or whole-system GPU-only execution. See the [Plan C ledger candidate summary](implementation-provenance/plan-c-device-resident-selection-ledger-candidate-20261025.md), [D ledger review summary](implementation-provenance/plan-c-device-resident-selection-ledger-review-20261025.md), and [pending dashboard currentness note](implementation-provenance/plan-c-device-resident-selection-currentness-20261025.md). Dashboard service, API, and frontend asset currentness remain unverified; no service action was performed for E.
+After integration, `frc-defense-dashboard.service` was restarted from the
+integrated checkout. `/api/curriculum-status` and `/api/meco-status` returned
+HTTP 200; the curriculum API validated the 89-row ledger as
+`validated_summary_only`, with the Plan C requirement present once and no
+`untrusted_reason`. All eight dashboard frontend routes matched their checkout
+files byte-for-byte. The `/api/meco-status` response reported five unrelated
+errors in older campaign reports; details and hashes are recorded in the
+[Plan C dashboard currentness evidence](implementation-provenance/plan-c-device-resident-selection-currentness-20261025.md).
+
+This verifies provenance and dashboard currentness only. No replay was
+generated or reviewed. Plan C simulator behavior, GPU/HIP parity or profiling,
+training outcomes, qualification, and whole-system GPU-only execution remain
+unverified.
