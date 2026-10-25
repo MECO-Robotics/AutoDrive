@@ -68,6 +68,15 @@ from .meco_phase4_runtime_adapter import (phase4_factor_exposure,
 ROOT = Path(__file__).resolve().parents[1]
 OBSERVATION_DT = .02
 DEFAULT_CATEGORIES = {"pickup_simple": ("single", "cluster")}
+
+
+@dataclass(frozen=True)
+class PlanADeviceSelectionOutcome:
+    """Tensor-only selected index and fail-closed status for Plan A dispatch."""
+    action_index: torch.Tensor  # scalar; -1 means no action was selected
+    empty_support: torch.Tensor  # scalar bool; consumed at compact handoff
+
+
 CHUNK_RESET_POLICY = ("reset environment and GRU hidden state at each invocation chunk; "
     "shared scheduled task seed initializes the episode; subsequent episode seeds "
     "are task seed + global episode index")
@@ -1091,10 +1100,11 @@ def _plan_a_logits(track, raw, support, graph, raster, env, config, *,
         field_length=(float(env.sim.field_length) if env is not None else float(planner.length)),
         field_width=(float(env.sim.field_width) if env is not None else float(planner.width)))
     node_count = graph.node_count
-    eta = ((route_batch.distance_m.to(dtype=support.route_cost.dtype) /
-            max(float(env.sim.speed[0, 3]), .1)) if route_batch is not None else
-           support.route_cost / max(float(env.sim.speed[0, 3]), .1)
-           if env is not None else None)
+    speed = (env.sim.speed[0, 3].to(dtype=support.route_cost.dtype).clamp_min(.1)
+             if env is not None else None)
+    eta = ((route_batch.distance_m.to(dtype=support.route_cost.dtype) / speed)
+           if route_batch is not None else
+           support.route_cost / speed if speed is not None else None)
     route = (eta * float(config.route_cost_points_per_second) if route_nodes is None
              else route_nodes)
     risk = torch.zeros_like(route) if risk_nodes is None else risk_nodes
@@ -1102,14 +1112,10 @@ def _plan_a_logits(track, raw, support, graph, raster, env, config, *,
         risk, _ = _plan_a_prediction_risk(env, support, eta,
                                           config.prediction_mode)
     path_cost = torch.zeros_like(route)
-    if route_batch is not None and config.p_mode == "learned":
-        learned_integral = route_batch.learned_cost_grid_edges
-        if learned_integral is None:
-            raise RuntimeError("shared Plan A route batch omitted learned P integral")
-        path_cost = learned_integral.to(dtype=route.dtype) * (
-            config.p_cost_scale * config.p_points_per_grid_edge)
-    elif route_batch is None and config.p_mode == "learned":
+    if config.p_mode == "learned":
         if penalty_map is None:
+            if route_batch is not None:
+                raise RuntimeError("Plan A P scoring requires the frozen SE(2) graph integral")
             field_length = (float(env.sim.field_length) if env is not None
                             else float(planner.length))
             field_width = (float(env.sim.field_width) if env is not None
@@ -1483,8 +1489,8 @@ def _prepare_plan_a_decision(track, model, env, graph, episode_id, hidden, *,
                                        graph, raster, env, config,
                                        penalty_map=penalty_map,
                                        route_batch=route_batch)
-    eta = route_batch.distance_m.to(support.route_cost.dtype) / max(
-        float(env.sim.speed[0, 3]), .1)
+    speed = env.sim.speed[0, 3].to(dtype=support.route_cost.dtype).clamp_min(.1)
+    eta = route_batch.distance_m.to(support.route_cost.dtype) / speed
     route_nodes = eta * float(route_cost_points_per_second)
     risk_nodes, prediction_metadata = _plan_a_prediction_risk(
         env, support, eta, config.prediction_mode)
@@ -1531,8 +1537,8 @@ def _prepare_plan_a_decision(track, model, env, graph, episode_id, hidden, *,
                 safe.observation.snapshot_id, penalty_map, config)
             logits, path_cost = _plan_a_logits(track, raw, support, graph, raster,
                 env, config, penalty_map=penalty_map, route_batch=route_batch)
-            eta = route_batch.distance_m.to(support.route_cost.dtype) / max(
-                float(env.sim.speed[0, 3]), .1)
+            speed = env.sim.speed[0, 3].to(dtype=support.route_cost.dtype).clamp_min(.1)
+            eta = route_batch.distance_m.to(support.route_cost.dtype) / speed
             route_nodes = eta * float(route_cost_points_per_second)
             risk_nodes, prediction_metadata = _plan_a_prediction_risk(
                 env, support, eta, config.prediction_mode)
@@ -1559,27 +1565,32 @@ def _prepare_plan_a_decision(track, model, env, graph, episode_id, hidden, *,
     if production_inference_failed:
         decision_valid = decision_valid & torch.zeros((), device=env.device,
                                                        dtype=torch.bool)
-    fallback_available = support.valid_mask.gather(0,
-        support.fallback_pair_tensor.reshape(1)).reshape(())
-    torch._assert_async(fallback_available,
-        "Plan A route support has no feasible deterministic fallback")
+    has_legal_support = support.valid_mask.any()
     selection_logits = _plan_a_selection_logits(logits, support.valid_mask,
         support.fallback_pair_tensor, decision_valid)
-    action, logprob, entropy = sample_candidate_action(selection_logits[None],
+    # Empty support is carried as a typed status bit to the compact action
+    # boundary. A harmless finite distribution keeps categorical math defined;
+    # its sampled index is replaced by the -1 no-action sentinel below.
+    categorical_logits = torch.where(has_legal_support, selection_logits,
+                                      torch.zeros_like(selection_logits))
+    action, logprob, entropy = sample_candidate_action(categorical_logits[None],
         deterministic=(True if production_inference_failed else deterministic))
-    prediction_metadata = _materialize_plan_a_prediction_metadata(
-        prediction_metadata)
-    support = replace(support,
-        support_digest=plan_a_support_digest(support, graph))
-    selected_index = action.reshape(())
+    selected_index = torch.where(has_legal_support, action.reshape(()),
+                                 torch.full((), -1, device=action.device,
+                                            dtype=action.dtype))
+    logprob = torch.where(has_legal_support, logprob,
+                          torch.zeros_like(logprob))
+    entropy = torch.where(has_legal_support, entropy,
+                          torch.zeros_like(entropy))
+    safe_selected_index = selected_index.clamp_min(0)
     selected_node = support.pair_node_ids.index_select(0,
-        selected_index.reshape(1)).reshape(())
+        safe_selected_index.reshape(1)).reshape(())
     selected_behavior = support.behavior_ids.index_select(0,
-        selected_index.reshape(1)).reshape(())
+        safe_selected_index.reshape(1)).reshape(())
     selected_descriptor = support.descriptor_ids.index_select(0,
-        selected_index.reshape(1)).reshape(())
+        safe_selected_index.reshape(1)).reshape(())
     selected_action = support.action_ids.index_select(0,
-        selected_index.reshape(1)).reshape(())
+        safe_selected_index.reshape(1)).reshape(())
     safe_descriptor = selected_descriptor.clamp(0, 3)
     fuel_ids, _, _ = env._candidates()
     target_tracks = fuel_ids[0, 3]
@@ -1595,11 +1606,34 @@ def _prepare_plan_a_decision(track, model, env, graph, episode_id, hidden, *,
         selected_node.reshape(1)).reshape(-1)
     selected_heading = support.goal_heading.index_select(0,
         selected_node.reshape(1)).reshape(())
+    selected_target_track = torch.where(has_legal_support, selected_target_track,
+                                        torch.full_like(selected_target_track, -1))
+    selected_target_xy = torch.where(has_legal_support, selected_target_xy,
+                                     torch.zeros_like(selected_target_xy))
+    selected_goal_xy = torch.where(has_legal_support, selected_goal_xy,
+                                   torch.zeros_like(selected_goal_xy))
+    selected_heading = torch.where(has_legal_support, selected_heading,
+                                   torch.zeros_like(selected_heading))
+    selected_node = torch.where(has_legal_support, selected_node,
+                                torch.full_like(selected_node, -1))
+    selected_behavior = torch.where(has_legal_support, selected_behavior,
+                                    torch.full_like(selected_behavior, -1))
+    selected_descriptor = torch.where(has_legal_support, selected_descriptor,
+                                      torch.full_like(selected_descriptor, -1))
+    selected_action = torch.where(has_legal_support, selected_action,
+                                  torch.full_like(selected_action, -1))
     selected_action_payload = torch.stack((selected_index, selected_action,
         selected_target_track, selected_target_xy[0], selected_target_xy[1],
         selected_goal_xy[0], selected_goal_xy[1], selected_heading,
         selected_node, selected_behavior, selected_descriptor,
-        (~decision_valid).to(torch.long))).to(torch.float64)
+        (~decision_valid).to(torch.long),
+        (~has_legal_support).to(torch.long))).to(torch.float64)
+    # Content digests and readable prediction summaries are report artifacts;
+    # materialize them only after the compact selected-action payload exists.
+    support = replace(support,
+        support_digest=plan_a_support_digest(support, graph))
+    prediction_metadata = _materialize_plan_a_prediction_metadata(
+        prediction_metadata)
     fallback_used = production_inference_failed
     fallback_reason = "policy_inference_fallback" if production_inference_failed else None
     value = (_value(value_head, globals_, seed_decision["hidden"])
@@ -1610,8 +1644,11 @@ def _prepare_plan_a_decision(track, model, env, graph, episode_id, hidden, *,
         "tracking_available": tracking_available,
         "tracking_reset": tracking_reset,
         "graph": (graph_data or {}), "decision": {**seed_decision, "logits": selection_logits[None]},
-        "action": action, "logprob": logprob, "entropy": entropy,
+        "action": selected_index.reshape(1), "logprob": logprob, "entropy": entropy,
         "selected_action_payload": selected_action_payload,
+        "selection_outcome": PlanADeviceSelectionOutcome(
+            action_index=selected_index,
+            empty_support=~has_legal_support),
         "hidden_next": seed_decision["hidden"], "value": value,
         "route_cost": route_nodes[None], "risk_cost": risk_nodes[None],
         "route_batch": route_batch,
@@ -2357,7 +2394,8 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
         if rows and not rows[-1]["done"]:
             discarded_count += len(rows)
             rows.clear()
-        diagnostic = asdict(exc.diagnostic)
+        diagnostic = (asdict(exc.diagnostic) if is_dataclass(exc.diagnostic) else
+                      exc.diagnostic)
         next_episode = episode + 1
         event = {"track": config.track, "update": update_number,
                  "episode": episode, "episode_id": aborted_episode_id,
@@ -2418,6 +2456,10 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                     # device-resident Plan C dispatch path.
                     dispatch_payload = selected_payload.detach().to(
                         device="cpu").reshape(-1).tolist()
+                    if len(dispatch_payload) >= 13 and int(dispatch_payload[12]):
+                        abort_empty_support(PlanAEmptySupportError(None), rows,
+                                            update, update_empty_support_events)
+                        continue
                     action_index = int(dispatch_payload[0])
                     if len(dispatch_payload) >= 12:
                         prepared["fallback_used"] = bool(dispatch_payload[11])
@@ -2607,6 +2649,12 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                             tracking_was_available=tracking_was_available,
                             deterministic=True,
                             value_head=value_head)
+                    bootstrap_payload = bootstrap.get("selected_action_payload")
+                    if bootstrap_payload is not None:
+                        status = bootstrap_payload.detach().to(
+                            device="cpu").reshape(-1).tolist()
+                        if len(status) >= 13 and int(status[12]):
+                            raise PlanAEmptySupportError(None)
                     bootstrap_value = bootstrap["value"].detach().reshape(())
                 except PlanAEmptySupportError as exc:
                     abort_empty_support(exc, rows, update, update_empty_support_events)
@@ -3949,6 +3997,9 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                 if selected_payload is not None:
                                     device_dispatch_payload = selected_payload.detach().to(
                                         device="cpu").reshape(-1).tolist()
+                                    if (len(device_dispatch_payload) >= 13 and
+                                            int(device_dispatch_payload[12])):
+                                        raise PlanAEmptySupportError(None)
                                     choice = int(device_dispatch_payload[0])
                                 else:
                                     choice = int(prepared["action"].item())

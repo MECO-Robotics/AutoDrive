@@ -76,7 +76,7 @@ class PlanAEmptySupportDiagnostic:
 
 class PlanAEmptySupportError(RuntimeError):
     """No action is legal for this frozen Plan A observation."""
-    def __init__(self, diagnostic: PlanAEmptySupportDiagnostic):
+    def __init__(self, diagnostic: PlanAEmptySupportDiagnostic | None):
         self.diagnostic = diagnostic
         super().__init__("Plan A support contains no legal node/behavior pair")
 
@@ -90,6 +90,7 @@ def _plan_a_support_tensors(support: PlanAActionSupport, graph):
         "pair_node_ids": support.pair_node_ids,
         "descriptor_ids": support.descriptor_ids,
         "valid_mask": support.valid_mask,
+        "fallback_pair_tensor": support.fallback_pair_tensor,
         "distances_m": support.distances_m,
         "route_cost": support.route_cost,
         "parent_ids": support.parent_ids,
@@ -118,6 +119,9 @@ def plan_a_support_digest(support: PlanAActionSupport, graph) -> str:
                   f"fallback_pair={support.fallback_pair}".encode())
     digest.update(support.order_digest.encode())
     for name, tensor in _plan_a_support_tensors(support, graph).items():
+        if tensor is None:
+            digest.update(f"{name}=none".encode())
+            continue
         digest.update(name.encode())
         digest.update(tensor.detach().cpu().contiguous().numpy().tobytes())
     return digest.hexdigest()
@@ -299,37 +303,6 @@ def build_plan_a_support(env, graph, observation, snapshot_id: str, *,
         intake_mask[:, 0], intake_mask[:, 1], intake_mask[:, 2], intake_mask[:, 3],
         score_mask, ferry_mask, defense_mask), -1)
     valid = valid_matrix.reshape(-1) & reachable_rows.reshape(-1)
-    if not bool(valid.any()):
-        counts = valid_matrix.sum(dim=0).detach().cpu().tolist()
-        pose_values = tuple(float(value) for value in pose.detach().cpu().tolist())
-        legal_ids = tuple(int(value) for value in torch.nonzero(
-            action_mask, as_tuple=False).flatten().detach().cpu().tolist())
-        ferry_values = tuple(float(value) for value in ferry_target.detach().cpu().tolist())
-        if len(ferry_values) != 2 or not all(math.isfinite(value) for value in ferry_values):
-            raise RuntimeError("Plan A empty-support ferry target is not a finite XY pair")
-        curriculum = getattr(env, "curriculum", {})
-        diagnostic = PlanAEmptySupportDiagnostic(
-            snapshot_id=snapshot_id,
-            scenario_id=curriculum.get("scenario_id"),
-            category=curriculum.get("category"),
-            graph_node_count=n,
-            reachable_node_count=int(reachable.sum().item()),
-            root_node=int(root.item()),
-            root_connector_m=float(root_connector_m.item()),
-            learner_pose_m_rad=pose_values,
-            legal_action_ids=legal_ids,
-            action_mask=tuple(bool(value) for value in action_mask.detach().cpu().tolist()),
-            support_pair_count=int(valid.sum().item()),
-            valid_pair_counts_by_behavior=tuple(zip(
-                ("drive", "intake_0", "intake_1", "intake_2", "intake_3",
-                 "score", "ferry", "defense"), (int(value) for value in counts))),
-            available_fuel_targets=int(fuel_valid.sum().item()),
-            safe_score_points=int(score_clear.sum().item()),
-            possession_count=int(possession.item()),
-            dumper_with_fuel=bool(dumper_with_fuel.item()),
-            ferry_target_m=ferry_values,
-            opponent_valid=bool(opponent_valid.item()))
-        raise PlanAEmptySupportError(diagnostic)
     # Use the closest graph pose with any deterministic executable behavior,
     # then its first valid descriptor in canonical order.
     physical_tensor = (physical_distances.to(device=device, dtype=graph.xy.dtype)
