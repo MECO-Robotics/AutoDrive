@@ -123,6 +123,17 @@ PHASE4_REQUIREMENT_BINDINGS = {
                 "phase4_start_profile.profile_applied_before_observation"},
         "stimulus_supported": True,
         "required_signals": ("legal_start_validation_rate", "outcome_by_start_state"),
+        "authoritative_signals": ("legal_start_validation_rate", "outcome_by_start_state"),
+        "signal_sources": {
+            "legal_start_validation_rate":
+                "records[].phase4_start_profile.per_world_legal + validated_pose_world_count; recomputed across this profile cell as sum(legal booleans)/sum(world counts)",
+            "outcome_by_start_state":
+                "paired validation report metrics reconciled by exact policy/category/seed against scenario_defined and this assigned registry_profile_id only"},
+        "candidate_cell_gate": {
+            "profile_scope": "one registry_profile_id per candidate cell",
+            "every_expected_world_must_be_legal": True,
+            "required_state_ids": ("scenario_defined", "assigned_registry_profile_id"),
+            "qualification_eligible": False},
         "limitations": ("registered full-team poses are applied after reset and before perception; legal-start rate and stratified outcomes still lack authoritative simulator signals",)},
     "teammate_behaviors": {**_COMMON,
         "factor_ids": ("teammate.behavior_pool",),

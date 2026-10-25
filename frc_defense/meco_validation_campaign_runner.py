@@ -686,13 +686,17 @@ def _validate_phase4_start_profile_pair(case_dir: Path, assignment: dict, *,
             else:
                 legal_worlds = captured.get("per_world_legal")
                 world_count = captured.get("validated_pose_world_count")
+                world_indices = captured.get("validated_pose_world_indices")
                 rate = captured.get("legal_start_validation_rate")
                 if (type(world_count) is not int or world_count < 1 or
                         not isinstance(legal_worlds, list) or
                         len(legal_worlds) != world_count or
+                        world_indices != list(range(world_count)) or
                         any(type(value) is not bool for value in legal_worlds) or
-                        not all(legal_worlds) or type(rate) not in (int, float) or
-                        not math.isfinite(float(rate)) or float(rate) != 1.0):
+                        type(rate) not in (int, float) or
+                        not math.isfinite(float(rate)) or
+                        float(rate) != sum(legal_worlds) / world_count or
+                        not all(legal_worlds)):
                     raise ValueError(f"Phase 4 treatment row has missing or partial per-world legality: {key}")
                 outcome = captured.get("outcome_metrics")
                 metrics = row.get("metrics")
@@ -724,7 +728,8 @@ def _validate_phase4_start_profile_pair(case_dir: Path, assignment: dict, *,
         raise ValueError("Phase 4 start-profile arms do not have exact paired rows")
     metric_names = ("success", "scores", "useful_throughput", "completed_cycles")
     by_state = {}
-    treatment_legal_rates = []
+    legal_world_total = 0
+    legal_world_count_total = 0
     for state, arm in (("scenario_defined", "no_factor"),
                        (assignment["registry_profile_id"], "factor_treatment")):
         by_policy = {}
@@ -744,8 +749,10 @@ def _validate_phase4_start_profile_pair(case_dir: Path, assignment: dict, *,
                     values[name].append(float(value))
                 if arm == "factor_treatment":
                     captured = row["phase4_start_profile"]
-                    treatment_legal_rates.append(float(
-                        captured["legal_start_validation_rate"]))
+                    worlds = captured["per_world_legal"]
+                    count = captured["validated_pose_world_count"]
+                    legal_world_total += sum(worlds)
+                    legal_world_count_total += count
             by_policy[policy] = {"n": len(records), "metrics": {
                 "success_rate": sum(values["success"]) / len(records),
                 **{name: sum(values[name]) / len(records)
@@ -792,7 +799,9 @@ def _validate_phase4_start_profile_pair(case_dir: Path, assignment: dict, *,
         "checkpoint_sha256": expected_binding["checkpoint_sha256"],
         "source_identity_sha256": expected_binding["source_identity_sha256"],
         "execution_device": expected_binding["execution_device"],
-        "legal_start_validation_rate": sum(treatment_legal_rates) / len(treatment_legal_rates),
+        "legal_start_validation_rate": legal_world_total / legal_world_count_total,
+        "legal_world_count": legal_world_count_total,
+        "legal_world_legal_count": legal_world_total,
         "outcome_by_start_state": outcome_by_start_state,
         "coverage_digest_sha256": coverage_digest, "qualification_eligible": False}
 
