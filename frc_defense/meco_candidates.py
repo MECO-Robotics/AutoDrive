@@ -590,7 +590,7 @@ def _build_device_candidate_set(env, base, graph, specs, *,
         candidate_k, action_ticks, prediction_mode, active_commitment,
         continue_index, commitment_match_valid=None,
         extra_track_start=None, extra_track_indices=None,
-        extra_candidate_mask=None, extra_policy_count=0,
+        extra_candidate_mask=None,
         policy_offset_start=None,
         oracle_track_start=None, oracle_track_indices=None,
         oracle_variant_count=0, continue_action_tensor=None,
@@ -701,6 +701,13 @@ def _build_device_candidate_set(env, base, graph, specs, *,
         torch.arange(count, device=device) == continue_index,
         commitment_match_valid.to(device=device, dtype=torch.bool),
         torch.ones(count, device=device, dtype=torch.bool))
+    extra_rows = ((torch.arange(count, device=device) >= extra_track_start) &
+        (torch.arange(count, device=device) < extra_track_start +
+         extra_track_indices.numel()))
+    extra_eligible = torch.ones(count, device=device, dtype=torch.bool)
+    extra_eligible[extra_track_start:extra_track_start +
+                   extra_track_indices.numel()] = extra_candidate_mask
+    route_available = route_available & (~extra_rows | extra_eligible)
     distance = torch.where(route_available, route_full.distance_m.to(dtype),
                            torch.zeros(count, device=device, dtype=dtype))
     heading_delta = geometry["headings"] - env.policy_pose[0, 3, 2]
@@ -763,16 +770,13 @@ def _build_device_candidate_set(env, base, graph, specs, *,
     if (extra_candidate_mask is None or policy_offset_start is None
             or extra_track_start is None or extra_track_indices is None):
         raise RuntimeError("fixed-capacity policy ordering requires device expansion masks and offsets")
-    # Preserve the legacy policy prefix: base actions, eligible sensed goals
-    # in device distance order, then the fixed legacy approach-offset block.
-    # Eligibility count is host candidate-spec metadata supplied with the
-    # sorted identities, so no device-selected row indices cross to Python.
+    # Keep policy metadata in fixed spec order: base actions, distance-sorted
+    # extra target slots, then approach offsets. Device eligibility masks extra
+    # rows and never decides a host-side prefix or candidate index list.
     extra_count = extra_track_indices.numel()
     offset_count = 4 * 6
-    if not 0 <= extra_policy_count <= extra_count:
-        raise RuntimeError("host candidate-spec eligibility count is out of range")
     policy_indices = (list(range(8)) +
-        list(range(extra_track_start, extra_track_start + extra_policy_count)) +
+        list(range(extra_track_start, extra_track_start + extra_count)) +
         list(range(policy_offset_start, policy_offset_start + offset_count)))[:candidate_k]
     selected_policy = torch.tensor(policy_indices, device=device, dtype=torch.long)
     policy_indices.append(continue_index)
@@ -1196,13 +1200,16 @@ def _additional_sensed_target_specs(env, base: SafeActionCandidates):
     # copy below is only stable identity metadata after order is fixed.
     order = torch.argsort(distances.masked_fill(~eligible, float("inf")), stable=True)
     ordered_indices = order
+    # The source plan allows ordered host candidate identities/specs. This
+    # transfer maps stable row identities only; route/features/cost values and
+    # eligibility remain on the selected device.
     ordered = ordered_indices.detach().to(device="cpu").tolist()
     ordered_eligible = eligible.index_select(0, order)
-    # Candidate-spec eligibility is host metadata used only to preserve the
-    # stable policy prefix before numeric candidate batching.
-    eligible_count = int(ordered_eligible.sum().item())
+    # This host projection binds deterministic candidate-spec identities to
+    # route-query metadata. Numeric features, eligibility, and route scores
+    # remain tensors; the source plan explicitly allows ordered host identities.
     return ([(0, None, int(track)) for track in ordered], ordered_indices,
-            ordered_eligible, eligible_count)
+            ordered_eligible)
 
 
 @torch.no_grad()
@@ -1256,12 +1263,11 @@ def build_route_feasible_candidates(env, observation: torch.Tensor,
     specs = [(action, 0, 0., 0., None) for action in range(8)]
     additional_track_indices = None
     additional_candidate_mask = None
-    additional_policy_count = 0
     additional_track_start = None
     policy_offset_start = None
     if device_resident:
         (additional_targets, additional_track_indices,
-         additional_candidate_mask, additional_policy_count) = _additional_sensed_target_specs(env, base)
+         additional_candidate_mask) = _additional_sensed_target_specs(env, base)
         additional_track_start = len(specs)
     else:
         additional_targets = _additional_sensed_target_rows(env, base)
@@ -1424,7 +1430,6 @@ def build_route_feasible_candidates(env, observation: torch.Tensor,
             extra_track_start=additional_track_start,
             extra_track_indices=additional_track_indices,
             extra_candidate_mask=additional_candidate_mask,
-            extra_policy_count=additional_policy_count,
             policy_offset_start=policy_offset_start,
             oracle_track_start=oracle_start_index,
             oracle_track_indices=oracle_track_indices,

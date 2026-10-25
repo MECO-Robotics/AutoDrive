@@ -4262,6 +4262,15 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                 if device_dispatch_payload is not None:
                                     selected_goal_node = candidate_set.route_records[
                                         choice].get("legal_node_index")
+                                    route_provenance = (None if prepared is None else
+                                        prepared.get("inference_provenance") or
+                                        prepared.get("decision", {}).get(
+                                            "inference_provenance"))
+                                    routes_seen.append({
+                                        **candidate_set.route_records[choice],
+                                        "selected": True,
+                                        "action_source": action_source,
+                                        "inference_provenance": route_provenance})
                                 if prepared is not None and prepared.get(
                                         "candidate_set") is not None and prepared[
                                         "candidate_set"].device_batch is not None:
