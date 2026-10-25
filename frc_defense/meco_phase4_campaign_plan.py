@@ -1045,9 +1045,10 @@ def _start_profile_review_gate(rows: list[dict], *, protocol: dict,
                     item["policy"]) and
                 isinstance(outcomes.get("execution_device"), dict) and
                 set(outcomes["execution_device"]) == {"device", "accelerator_backend"} and
-                (item.get("device") == outcomes["execution_device"] or
-                 item.get("device") == outcomes["execution_device"]["device"] or
-                 item.get("simulation_device") == outcomes["execution_device"]["device"])
+                item.get("device") == outcomes["execution_device"] and
+                item.get("execution_device") == outcomes["execution_device"] and
+                item.get("simulation_device") ==
+                    outcomes["execution_device"]["device"]
                 for review_item, item in zip(replays, replay_payloads)))
     exact_review = (row.get("schema") ==
         "meco-phase4-start-profile-review-evidence-v1" and
