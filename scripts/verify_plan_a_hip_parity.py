@@ -25,25 +25,24 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", choices=("offline", "device"), default="offline")
     parser.add_argument("--device", choices=("cuda:0", "cuda:1"))
-    parser.add_argument("--lease-handoff", type=Path)
     parser.add_argument("--warmups", type=int, default=3)
     parser.add_argument("--repeats", type=int, default=10)
     parser.add_argument("--report-dir", type=Path,
         default=Path("artifacts/plan_a_hip_evidence"))
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
-    if args.mode == "offline" and (args.device or args.lease_handoff):
-        parser.error("offline mode does not accept device or lease arguments")
-    if args.mode == "device" and (not args.device or not args.lease_handoff):
-        parser.error("device mode requires --device and --lease-handoff")
+    if args.mode == "offline" and args.device:
+        parser.error("offline mode does not accept a device argument")
+    if args.mode == "device" and not args.device:
+        parser.error("device mode requires --device")
     evidence_class = ("offline_fixture_only" if args.mode == "offline" else
                       "hip_parity_profile_candidate")
     try:
         if args.mode == "offline":
             report = run_offline(root)
         else:
-            report = run_device(root, args.device, args.lease_handoff,
-                                warmups=args.warmups, repeats=args.repeats)
+            report = run_device(root, args.device, warmups=args.warmups,
+                                repeats=args.repeats)
     except Exception as exc:
         fixture_path = root / FIXTURE_RELATIVE
         try:
@@ -82,9 +81,6 @@ def main() -> int:
             "fixture_cases_reported": [], "cases": fixture_cases,
             "requested_device": args.device,
             "device_identity": "not recorded because the candidate invocation failed"}
-        if args.lease_handoff and args.lease_handoff.is_file():
-            report["lease_handoff_sha256"] = hashlib.sha256(
-                args.lease_handoff.read_bytes()).hexdigest()
     report["created_at_utc"] = datetime.now(timezone.utc).isoformat()
     report["requested_mode"] = args.mode
     if args.device:

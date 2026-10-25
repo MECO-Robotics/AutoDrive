@@ -25,6 +25,9 @@ PINNED_SOURCES = (
     "frc_defense/csrc/meco_plan_a_shortest_path_hip.cpp",
     "frc_defense/csrc/meco_plan_a_shortest_path_hip_kernel.cu",
     "frc_defense/meco_plan_a_shortest_path_hip.py",
+    "frc_defense/meco_device_lease.py",
+    "frc_defense/meco_gpu_attestation.py",
+    "frc_defense/meco_training_manifest.py",
     "frc_defense/meco_plan_a_hip_parity_harness.py",
     "scripts/verify_plan_a_hip_parity.py",
 )
@@ -308,23 +311,6 @@ def run_offline(root: Path | None = None) -> dict:
         "cases": results}
 
 
-def _load_lease_handoff(path: Path) -> dict:
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    required = ("schema_version", "authorization_id", "supervisor_id",
-                "training_leases_released", "exclusive_lease_id", "device_index",
-                "device_model", "device_uuid", "authorized_by", "authorized_at_utc")
-    missing = [key for key in required if key not in payload]
-    if missing or payload.get("schema_version") != 1 or \
-            payload.get("training_leases_released") is not True or \
-            not all(isinstance(payload.get(key), str) and payload[key]
-                    for key in required if key not in
-                    ("schema_version", "training_leases_released", "device_index")):
-        raise ValueError(f"invalid exclusive WX9100 lease handoff: {missing}")
-    if payload["device_index"] not in (0, 1):
-        raise ValueError("lease handoff must identify WX9100 index 0 or 1")
-    return payload
-
-
 def _device_inputs(graph: dict, kind: str, selected, torch, ext):
     route_inputs = _route_inputs(graph)[0]
     slots = max(1, max((len(row) for row in route_inputs["edge_dst"]), default=0))
@@ -391,15 +377,25 @@ def _compiler_metadata(torch) -> dict:
                 text=True, check=False).stdout.strip() else None)}
 
 
-def run_device(root: Path, device: str, lease_handoff_path: Path, *,
+def run_device(root: Path, device: str, *,
                warmups: int = 3, repeats: int = 10) -> dict:
-    """Post-lease candidate runner. This function is intentionally never used offline."""
+    """Run only while holding the repository lease and physical attestation."""
     if device not in ("cuda:0", "cuda:1"):
         raise ValueError("device verification requires explicit cuda:0 or cuda:1")
     if warmups < 1 or repeats < 3:
         raise ValueError("device profiling requires warmups >= 1 and repeats >= 3")
-    lease = _load_lease_handoff(lease_handoff_path)
     fixture, _ = _fixture_result(root)
+    from .meco_device_lease import lease_devices
+    from .meco_gpu_attestation import verify_post_lease_wx9100
+    lease = lease_devices((device,), owner="plan-a-hip-parity-profile")
+    with lease:
+        attestation = verify_post_lease_wx9100(lease, (device,))
+        return _run_device_under_lease(root, device, fixture, lease, attestation,
+                                       warmups=warmups, repeats=repeats)
+
+
+def _run_device_under_lease(root: Path, device: str, fixture: dict, lease,
+                            attestation: dict, *, warmups: int, repeats: int) -> dict:
     import torch
     from . import meco_plan_a_shortest_path as shortest
     selected = shortest._require_wx9100_device(device)
@@ -408,9 +404,11 @@ def run_device(root: Path, device: str, lease_handoff_path: Path, *,
     uuid = str(getattr(properties, "uuid", ""))
     if "wx9100" not in model.casefold().replace("-", "").replace("_", "").replace(" ", ""):
         raise RuntimeError("selected accelerator is not a WX9100")
-    if int(selected.index) != lease["device_index"] or model != lease["device_model"] or \
-            not uuid or uuid != lease["device_uuid"]:
-        raise RuntimeError("WX9100 identity does not match the authorized lease handoff")
+    attested = {row["device"]: row for row in attestation["devices"]}
+    if (device not in attested or int(selected.index) != int(device.split(":")[1]) or
+            model != attested[device]["model"] or not uuid or
+            uuid.casefold() != str(attested[device]["hip_uuid"]).casefold()):
+        raise RuntimeError("selected WX9100 identity does not match post-lease physical attestation")
     if shortest.PLAN_A_HIP_PARITY_PROFILE_GATE_PASSED is not False:
         raise RuntimeError("candidate harness must not run with production gate changed")
     # Import/compile is reached only after explicit device and lease checks.
@@ -623,7 +621,9 @@ def run_device(root: Path, device: str, lease_handoff_path: Path, *,
         "extension_was_already_loaded": extension_was_loaded,
         "extension_compile_boundary": "on-demand extension loader call; excludes device-specific fixture timings",
         "device": {"index": int(selected.index), "model": model, "uuid": uuid},
-        "lease_authorization": {**lease,
-            "sha256": hashlib.sha256(lease_handoff_path.read_bytes()).hexdigest()},
+        "lease_authorization": {"logical_lease_id": lease.lease_id,
+            "logical_lease_owner": lease.owner,
+            "logical_lease_devices": list(lease.devices),
+            "physical_attestation": attestation},
         "profile_scope": "single exact-heap route call only; no policy, simulator, training, deployment, or end-to-end claims",
         "cases": output}
