@@ -1354,9 +1354,18 @@ def _dashboard_summary_valid(payload, raw_sha256):
                             return None
                     elif (type(count) is not int or count < 0
                             or type(acquired) is not int or acquired < 0 or acquired > count
-                            or type(unsuccessful) not in (int, type(None))
-                            or (unsuccessful is not None and (unsuccessful < 0
-                                or unsuccessful > count or acquired + unsuccessful != count))
+                            or (summary["available_records"] == 0)
+                            or (summary["unsuccessful_collection_action_bouts_available_records"] == 0
+                                and unsuccessful is not None)
+                            or (summary["unsuccessful_collection_action_bouts_available_records"] > 0
+                                and (type(unsuccessful) is not int or unsuccessful < 0))
+                            or (unsuccessful is not None and (unsuccessful > count
+                                or (summary["unsuccessful_collection_action_bouts_available_records"]
+                                    == summary["available_records"]
+                                    and acquired + unsuccessful != count)
+                                or (summary["unsuccessful_collection_action_bouts_available_records"]
+                                    < summary["available_records"]
+                                    and acquired + unsuccessful > count)))
                             or (count == 0 and proportion is not None)
                             or (count > 0 and (not _finite_number(proportion)
                                 or not 0 <= proportion <= 1

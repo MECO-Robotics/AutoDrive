@@ -261,6 +261,47 @@ def test_incomplete_report_cannot_produce_dashboard_summary(tmp_path):
     assert not Path(str(source) + ".dashboard-summary.json").exists()
 
 
+def test_mixed_metric_ledger_versions_allow_partial_unsuccessful_coverage(tmp_path, monkeypatch):
+    import frc_defense.meco_dashboard as dashboard
+
+    monkeypatch.setattr(dashboard, "MAX_DASHBOARD_INLINE_REPORT_BYTES", 1)
+    report = _report(episodes=2)
+    rows = [row for row in report["records"]
+            if row["policy"] == "A1" and row["category"] == "open"]
+    rows[0]["meco_metric_ledger"] = {
+        "schema_version": 3, "availability": {"collection_action_bouts": True},
+        "collection_action_bouts": {"count": 2, "acquired_count": 1,
+                                     "acquired_proportion": .5}}
+    rows[1]["meco_metric_ledger"] = {
+        "schema_version": 4, "availability": {"collection_action_bouts": True},
+        "collection_action_bouts": {"count": 3, "acquired_count": 2,
+            "unsuccessful_collection_action_bouts": 1,
+            "acquired_proportion": 2 / 3}}
+    expected = dashboard._comparison(report)
+    assert expected["policy_metrics"]["A1"]["open"]["collection_action_bouts"] == {
+        "available_records": 2, "count": 5, "acquired_count": 3,
+        "unsuccessful_collection_action_bouts": 1,
+        "unsuccessful_collection_action_bouts_available_records": 1,
+        "unsuccessful_collection_action_bouts_total_records": 2,
+        "acquired_proportion": .6,
+        "semantics": "unsuccessful_collection_action_bouts counts finalized focal collection-action bouts with authoritative acquired quantity known to be zero; it is a descriptive bout outcome, not causal intake failure"}
+    source = tmp_path / "mixed-ledger.json"
+    source.write_text(json.dumps(report, separators=(",", ":")))
+    assert _write_dashboard_comparison_summary(source, report)
+    summary_bytes = Path(str(source) + ".dashboard-summary.json").read_bytes()
+    Path(str(source) + ".status.json").write_text(json.dumps({
+        "evaluation_id": report["evaluation_id"], "protocol_id": report["protocol_id"],
+        "split": report["split"], "status": "complete", "output_file": source.name,
+        "dashboard_summary_sha256": hashlib.sha256(summary_bytes).hexdigest()}))
+
+    actual, _, error, _ = _read_evaluation_comparison(
+        source, tmp_path, {"files": 0, "summary_bytes": 0,
+                           "raw_bytes": 0, "records": 0})
+
+    assert error is None
+    assert actual["policy_metrics"] == expected["policy_metrics"]
+
+
 def test_summary_writer_concurrency_is_bounded(tmp_path):
     import frc_defense.meco_dashboard as dashboard
 
