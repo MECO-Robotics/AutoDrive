@@ -524,8 +524,13 @@ def make_curriculum_env(scenario_id, category, num_envs, device, seed, *, horizo
     env = CurriculumEnv(**env_kwargs)
     env.phase4_pressure_anchor_y_m = torch.full((env.n,), 4.035,
         device=env.device, dtype=env.sim.pose.dtype)
-    env.phase4_pressure_phase = torch.full((env.n,), float(pressure['phase']),
+    env.phase4_pressure_phase = torch.full((env.n,), _pressure_phase(seed),
         device=env.device, dtype=env.sim.pose.dtype)
+    env.phase4_pressure_reset_seed = torch.full((env.n,), int(seed),
+        device=env.device, dtype=torch.long)
+    env.phase4_pressure_assigned_blocker_pose = torch.zeros_like(env.sim.pose)
+    env.phase4_pressure_assigned_blocker_mask = torch.zeros(
+        (env.n, 6), device=env.device, dtype=torch.bool)
     env.phase4_factor_config = phase4_factor
     env.phase4_opponent_policy_id = phase4_opponent_policy_id
     env.phase4_opponent_schedule = trench_schedule
@@ -825,7 +830,30 @@ def _effective_curriculum_snapshot(scenario_id, category, seed, definition,
         "tensor_owner": "CurriculumEnv.phase4_pressure_anchor_y_m",
         "capture_stages": ["pre_blocker_pose", "post_start_profile_pose"],
         "reset_mask_semantics": "selected_world_rows_only",
-        "static_snapshot_contains_numeric_values": False}}
+        "static_snapshot_contains_numeric_values": False},
+        "phase4_pressure_phase": {
+            "schema": "meco-phase4-pressure-phase-v1",
+            "shape": ["world"], "dtype": "same_as_sim_pose",
+            "device_owner": "CurriculumEnv.device",
+            "tensor_owner": "CurriculumEnv.phase4_pressure_phase",
+            "reset_mask_semantics": "selected_world_rows_only",
+            "static_snapshot_contains_numeric_values": False},
+        "phase4_pressure_reset_identity": {
+            "schema": "meco-phase4-reset-identity-v1",
+            "seed_shape": ["world"], "generation_shape": ["world"],
+            "seed_tensor_owner": "CurriculumEnv.phase4_pressure_reset_seed",
+            "generation_tensor_owner": "CurriculumEnv.curriculum_episode_generation",
+            "reset_mask_semantics": "selected_world_rows_only",
+            "static_snapshot_contains_numeric_values": False},
+        "phase4_assigned_blockers": {
+            "schema": "meco-phase4-assigned-blocker-reset-v1",
+            "pose_shape": ["world", "robot", 3],
+            "mask_shape": ["world", "robot"],
+            "pose_tensor_owner": "CurriculumEnv.phase4_pressure_assigned_blocker_pose",
+            "mask_tensor_owner": "CurriculumEnv.phase4_pressure_assigned_blocker_mask",
+            "capture_stage": "post_start_profile_pose_before_policy_execution",
+            "reset_mask_semantics": "selected_world_rows_only",
+            "static_snapshot_contains_numeric_values": False}}
     body = {"schema": EFFECTIVE_SNAPSHOT_SCHEMA, "producer": producer,
         "factory_arguments": factory_arguments,
         "resolved_fields": resolved_fields, "configuration_artifacts": artifacts,
@@ -841,8 +869,11 @@ def _pressure(category, seed, family='category_scripted'):
     if family in ('orbiting_interceptor', 'split_chaser'):
         level = max(level, 4)
     return {'level': level, 'style': marker, 'slots': (0, 1) if level == 5 else ((0,) if level else ()),
-            'phase': (int(seed) % 1000) / 1000 * 2 * math.pi,
             'family': family}
+
+
+def _pressure_phase(seed):
+    return (int(seed) % 1000) / 1000 * 2 * math.pi
 
 
 def replace_contact_opponent_action(actions, contact_actions):
@@ -1154,9 +1185,10 @@ def reset_curriculum_scenario(env, seed, *, mask=None):
         write_rows(env.sim.pose[:, 3], env.sim.pose.new_tensor((13.3, blocked_y, math.pi)))
         write_rows(env.piece_pos[:, :count, 1], blocked_y)
         write_rows(env.piece_pos[:, :count, 0], 9.8 + (torch.arange(count, device=env.device)%6).float()*.3)
-    phase = torch.full((env.n,), float(pressure['phase']), device=env.device,
+    phase = torch.full((env.n,), _pressure_phase(seed), device=env.device,
                        dtype=env.phase4_pressure_phase.dtype)
     write_rows(env.phase4_pressure_phase, phase)
+    write_rows(env.phase4_pressure_reset_seed, int(seed))
     action_mask = torch.ones((env.n, 6, 8), device=env.device, dtype=torch.bool)
     action_mask[:, 3] = False
     action_mask[:, 3, list(config['allowed_actions'])] = True
@@ -1186,6 +1218,8 @@ def reset_curriculum_scenario(env, seed, *, mask=None):
         (env.n,), device=env.device, dtype=torch.float32))
     reset_status('phase4_start_profile_validated_world_count', torch.zeros(
         (env.n,), device=env.device, dtype=torch.long))
+    write_rows(env.phase4_pressure_assigned_blocker_pose, 0.)
+    write_rows(env.phase4_pressure_assigned_blocker_mask, False)
     if env.contact_geometry_id is not None:
         contact_poses = contact_exposure_profile(env, env.contact_geometry_id,
             mask=reset_mask)
@@ -1225,6 +1259,8 @@ def reset_curriculum_scenario(env, seed, *, mask=None):
         blocker_pose = torch.stack((torch.full_like(blocker_y, blocker_x),
             blocker_y + slot * .9, torch.full_like(blocker_y, math.pi)), dim=-1)
         write_rows(env.sim.pose[:, slot], blocker_pose)
+        write_rows(env.phase4_pressure_assigned_blocker_pose[:, slot], blocker_pose)
+        write_rows(env.phase4_pressure_assigned_blocker_mask[:, slot], True)
     if (env.phase4_factor_config is not None and
             env.phase4_factor_config['kind'] == 'stationary_blockage'):
         factor = env.phase4_factor_config
@@ -1233,6 +1269,8 @@ def reset_curriculum_scenario(env, seed, *, mask=None):
         blocker_pose = torch.stack((torch.full_like(anchor_y, factor['blocker_x_m']),
             anchor_y, torch.full_like(anchor_y, math.pi)), dim=-1)
         write_rows(env.sim.pose[:, slot], blocker_pose)
+        write_rows(env.phase4_pressure_assigned_blocker_pose[:, slot], blocker_pose)
+        write_rows(env.phase4_pressure_assigned_blocker_mask[:, slot], True)
         assigned_pose = env.sim.pose[:, slot].clone()
         prior_assigned_pose = getattr(env, 'stationary_blockage_assigned_pose',
                                       torch.zeros_like(assigned_pose))

@@ -651,6 +651,34 @@ def _effective_snapshot_body(snapshot: Mapping[str, Any]) -> dict[str, Any]:
             "reset_mask_semantics": "selected_world_rows_only",
             "static_snapshot_contains_numeric_values": False,
         },
+        "phase4_pressure_phase": {
+            "schema": "meco-phase4-pressure-phase-v1",
+            "shape": ["world"],
+            "dtype": "same_as_sim_pose",
+            "device_owner": "CurriculumEnv.device",
+            "tensor_owner": "CurriculumEnv.phase4_pressure_phase",
+            "reset_mask_semantics": "selected_world_rows_only",
+            "static_snapshot_contains_numeric_values": False,
+        },
+        "phase4_pressure_reset_identity": {
+            "schema": "meco-phase4-reset-identity-v1",
+            "seed_shape": ["world"],
+            "generation_shape": ["world"],
+            "seed_tensor_owner": "CurriculumEnv.phase4_pressure_reset_seed",
+            "generation_tensor_owner": "CurriculumEnv.curriculum_episode_generation",
+            "reset_mask_semantics": "selected_world_rows_only",
+            "static_snapshot_contains_numeric_values": False,
+        },
+        "phase4_assigned_blockers": {
+            "schema": "meco-phase4-assigned-blocker-reset-v1",
+            "pose_shape": ["world", "robot", 3],
+            "mask_shape": ["world", "robot"],
+            "pose_tensor_owner": "CurriculumEnv.phase4_pressure_assigned_blocker_pose",
+            "mask_tensor_owner": "CurriculumEnv.phase4_pressure_assigned_blocker_mask",
+            "capture_stage": "post_start_profile_pose_before_policy_execution",
+            "reset_mask_semantics": "selected_world_rows_only",
+            "static_snapshot_contains_numeric_values": False,
+        },
     }
     if runtime_state != expected_runtime_state:
         raise ValueError("effective snapshot dynamic runtime-state contract mismatch")
