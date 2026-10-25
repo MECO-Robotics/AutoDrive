@@ -63,6 +63,7 @@ MECO_MAX_INFERENCE_AGE_S = 0.25
 MECO_INFERENCE_OUTCOME_CODES = MappingProxyType({
     "accepted": 0,
     "deterministic_fallback": 1,
+    "no_feasible_candidate": 2,
 })
 MECO_INPUT_NAMES = {
     "A1": ("raster", "globals_", "hidden"),
@@ -322,18 +323,24 @@ class ProductionMecoAdapter:
                 return None
             if any(t.device != self.device or t.device.type != "cuda" for t in tensors):
                 return None
-            # Dynamic CUDA predicates must not synchronize back to Python here.
-            # Carry validity as a tensor and sanitize before inference; the
-            # selector will choose its already-built deterministic fallback.
-            inference_valid = torch.isfinite(tensors[0]).all()
-            safe_tensors = []
-            for tensor in tensors:
-                if tensor.is_floating_point():
-                    inference_valid &= torch.isfinite(tensor).all()
-                    safe_tensors.append(torch.where(torch.isfinite(tensor), tensor,
-                                                    torch.zeros_like(tensor)))
-                else:
-                    safe_tensors.append(tensor)
+            device_validity_mode = self.track in ("C1", "C2")
+            inference_valid = None
+            if device_validity_mode:
+                # Plan C device-mask requests cannot synchronize dynamic CUDA
+                # predicates. Carry validity to its selector and sanitize.
+                inference_valid = torch.isfinite(tensors[0]).all()
+                safe_tensors = []
+                for tensor in tensors:
+                    if tensor.is_floating_point():
+                        inference_valid &= torch.isfinite(tensor).all()
+                        safe_tensors.append(torch.where(torch.isfinite(tensor), tensor,
+                                                        torch.zeros_like(tensor)))
+                    else:
+                        safe_tensors.append(tensor)
+            else:
+                # Preserve the established A1/A2/A3 adapter contract from
+                # mainline; Plan C's no-sync change does not modify Plan A.
+                safe_tensors = list(tensors)
             for name, tensor in zip(request.input_names, tensors):
                 if name in ("edge_mask", "coarse_edge_mask") and tensor.dtype != torch.bool:
                     return None
@@ -382,10 +389,12 @@ class ProductionMecoAdapter:
             values = {name: outputs[name] for name in expected}
             if any(not isinstance(value, torch.Tensor) or not value.is_floating_point()
                    or value.device != self.device or value.device.type != "cuda"
+                   or (not device_validity_mode and not bool(torch.isfinite(value).all()))
                    for value in values.values()):
                 return None
-            for value in values.values():
-                inference_valid &= torch.isfinite(value).all()
+            if device_validity_mode:
+                for value in values.values():
+                    inference_valid &= torch.isfinite(value).all()
             if values["hidden"].shape != (batch, HIDDEN):
                 return None
             if self.track.startswith("A"):
@@ -397,16 +406,20 @@ class ProductionMecoAdapter:
                 if (not utility_shape_ok or values["penalty"].shape != values["utility"].shape
                         or values["behavior_logits"].shape != (batch, 5)):
                     return None
-                inference_valid &= (values["penalty"] >= 0).all()
+                if device_validity_mode:
+                    inference_valid &= (values["penalty"] >= 0).all()
+                elif bool((values["penalty"] < 0).any()):
+                    return None
             elif (values["candidate_utility"].shape != (batch, len(request.candidate_ids))
                   or values["uncertainty"].shape != values["candidate_utility"].shape):
                 return None
             else:
                 inference_valid &= (values["uncertainty"] >= 0).all()
-            values = {name: torch.where(inference_valid, value,
-                                        torch.zeros_like(value))
-                      for name, value in values.items()}
-            values["__inference_valid"] = inference_valid
+            if device_validity_mode:
+                values = {name: torch.where(inference_valid, value,
+                                            torch.zeros_like(value))
+                          for name, value in values.items()}
+                values["__inference_valid"] = inference_valid
             done = time.monotonic()
             if (done - request.capture_monotonic > MECO_MAX_INFERENCE_AGE_S
                     or done > request.expires_monotonic):
@@ -1375,6 +1388,7 @@ def score_candidates(track: str, model: nn.Module, *, raster: torch.Tensor,
         if route_cost is not None or risk_cost is not None:
             fallback_logits = candidate_policy_logits(utility[None], valid, route_cost, risk_cost,
                 validate_inputs=candidate_batch is None)
+            fallback_available = valid.any(dim=-1)
         else:
             fallback = (inference_request.fallback_index if inference_request is not None else
                         next((i for i, ok in enumerate(table.valid_mask) if ok), -1))
@@ -1382,11 +1396,17 @@ def score_candidates(track: str, model: nn.Module, *, raster: torch.Tensor,
                                          device=utility.device, dtype=utility.dtype)
             if candidate_batch is not None:
                 fallback = candidate_batch.fallback_index
-                fallback_logits.scatter_(1, fallback.reshape(1, 1), 0.)
+                in_range = (fallback >= 0) & (fallback < len(table.candidate_ids))
+                support = torch.zeros_like(fallback_logits, dtype=torch.bool)
+                support.scatter_(1, fallback.clamp(0, len(table.candidate_ids) - 1).reshape(1, 1), True)
+                support = support & valid & in_range.reshape(1, 1)
+                fallback_logits = fallback_logits.masked_fill(support, 0.)
+                fallback_available = support.any(dim=-1)
             elif fallback < 0 or not table.valid_mask[fallback]:
                 raise ValueError("invalid deterministic fallback for failed inference")
             else:
                 fallback_logits[0, fallback] = 0.
+                fallback_available = torch.ones((1,), device=utility.device, dtype=torch.bool)
 
         if request_matches:
             response = model.poll_inference(inference_request, broker_handle)
@@ -1435,6 +1455,10 @@ def score_candidates(track: str, model: nn.Module, *, raster: torch.Tensor,
             return {"logits": fallback_logits, "utility": utility, "hidden": hidden,
                     "uncertainty": None, "raw": None,
                     "inference_status": "deterministic_fallback",
+                    "inference_status_code": torch.where(fallback_available,
+                        torch.ones((), device=utility.device, dtype=torch.uint8),
+                        torch.full((), 2, device=utility.device, dtype=torch.uint8)),
+                    "inference_status_codes": dict(MECO_INFERENCE_OUTCOME_CODES),
                     "inference_provenance": provenance}
         output = response.outputs
     else:
@@ -1463,14 +1487,36 @@ def score_candidates(track: str, model: nn.Module, *, raster: torch.Tensor,
         fallback_index = (candidate_batch.fallback_index if candidate_batch is not None
                           else torch.tensor(inference_request.fallback_index,
                               device=utility.device, dtype=torch.long))
-        numeric_fallback_logits = torch.full_like(logits, -torch.inf)
-        numeric_fallback_logits.scatter_(1, fallback_index.reshape(1, 1), 0.)
-        logits = torch.where(inference_valid.reshape(1, 1), logits,
-                             numeric_fallback_logits)
+        if candidate_batch is None:
+            # Keep the established table-mask fallback behavior used by
+            # A1/A2/A3, including route/risk-cost selection when supplied.
+            logits = torch.where(inference_valid.reshape(1, 1), logits,
+                                 fallback_logits)
+            inference_status_code = torch.where(inference_valid,
+                torch.zeros((), device=utility.device, dtype=torch.uint8),
+                torch.ones((), device=utility.device, dtype=torch.uint8))
+        else:
+            candidate_count = logits.shape[-1]
+            fallback_in_range = (fallback_index >= 0) & (fallback_index < candidate_count)
+            safe_fallback_index = fallback_index.clamp(0, candidate_count - 1)
+            fallback_support = torch.zeros_like(logits, dtype=torch.bool)
+            fallback_support.scatter_(1, safe_fallback_index.reshape(1, 1), True)
+            # A placeholder index (currently zero) may exist when route
+            # construction found no feasible candidate. It cannot become
+            # selectable unless the device feasibility mask authorizes it.
+            fallback_support = (fallback_support & valid_candidates &
+                                fallback_in_range.reshape(1, 1))
+            numeric_fallback_logits = torch.full_like(logits, -torch.inf)
+            numeric_fallback_logits = numeric_fallback_logits.masked_fill(fallback_support, 0.)
+            fallback_available = fallback_support.any(dim=-1, keepdim=True)
+            logits = torch.where(inference_valid.reshape(1, 1), logits,
+                                 numeric_fallback_logits)
+            inference_status_code = torch.where(inference_valid,
+                torch.zeros((), device=utility.device, dtype=torch.uint8),
+                torch.where(fallback_available.squeeze(-1),
+                    torch.ones((), device=utility.device, dtype=torch.uint8),
+                    torch.full((), 2, device=utility.device, dtype=torch.uint8)))
         output_hidden = torch.where(inference_valid, output["hidden"], hidden)
-        inference_status_code = torch.where(inference_valid,
-            torch.zeros((), device=utility.device, dtype=torch.uint8),
-            torch.ones((), device=utility.device, dtype=torch.uint8))
         inference_status = "device_validated"
     else:
         output_hidden = output["hidden"]

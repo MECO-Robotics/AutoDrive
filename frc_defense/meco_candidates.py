@@ -717,6 +717,9 @@ def _build_device_candidate_set(env, base, graph, specs, target_rows, *,
                        if candidate_id == "hold"), fallback_index)
     fallback = torch.where(fallback_valid, fallback,
         torch.where(valid[0, hold_index], torch.tensor(hold_index, device=device), cheapest))
+    # With no feasible route, ``cheapest`` is the argmin of all +inf and is
+    # only a structural placeholder. Consumers must intersect fallback support
+    # with ``valid`` before making it selectable; the inference adapter does so.
     feature_names = tuple(base.table.feature_names) + tuple(EXTRA_FEATURES)
     placeholders = tuple(tuple(None for _ in feature_names) for _ in policy_ids)
     table = CandidateTable(base.observation.snapshot_id, policy_ids, placeholders,

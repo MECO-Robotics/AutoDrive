@@ -24,6 +24,7 @@ from frc_defense.meco_tracks import (EXTRA_FEATURES, MECO_CANDIDATE_MODEL_INPUT_
                                      SAFE_ACTION_FEATURES,
                                      MecoInferenceResponse,
                                      ProductionMecoAdapter, SafeActionCandidates,
+                                     candidate_policy_logits,
                                      candidate_feature_tensor,
                                      build_safe_action_candidates,
                                      make_meco_track, sample_candidate_action,
@@ -284,7 +285,8 @@ def test_c2_context_matches_unmasked_all_query_baseline_for_empty_and_mixed_supp
         assert torch.equal(masked["hidden"], baseline["hidden"])
 
 
-def test_invalid_numeric_adapter_response_is_stochastic_one_hot_fallback():
+def test_invalid_numeric_adapter_response_is_stochastic_one_hot_fallback(monkeypatch):
+    monkeypatch.setattr(time, "monotonic", lambda: 100.)
     track = "C1"
     ids = ("fallback", "invalid", "cheap")
     names = tuple(SAFE_ACTION_FEATURES) + tuple(EXTRA_FEATURES)
@@ -347,6 +349,25 @@ def test_invalid_numeric_adapter_response_is_stochastic_one_hot_fallback():
     sampled = [sample_candidate_action(decision["logits"], deterministic=False)[0].item()
                for _ in range(32)]
     assert sampled == [1] * 32
+
+    # An all-infeasible batch may carry index zero as a structural placeholder.
+    # It must not become a finite one-hot fallback under a numeric model fault.
+    no_feasible_batch = SimpleNamespace(**{
+        **candidate_batch.__dict__,
+        "valid_mask": torch.zeros_like(valid_mask),
+        "fallback_index": torch.tensor(0),
+    })
+    no_feasible = score_candidates(track, adapter,
+        raster=torch.zeros((1, 6, 16, 16)), globals_=torch.zeros((1, 7)),
+        table=table, candidate_batch=no_feasible_batch,
+        route_cost=torch.zeros((1, 3)), risk_cost=torch.zeros((1, 3)),
+        observation_timestamp=1., capture_monotonic=time.monotonic() - .01)
+    assert no_feasible["inference_status_codes"]["no_feasible_candidate"] == 2
+    assert no_feasible["inference_status_code"].item() == 2
+    assert torch.isneginf(no_feasible["logits"]).all()
+    with pytest.raises((AssertionError, RuntimeError),
+                       match="finite candidate logit|each decision"):
+        sample_candidate_action(no_feasible["logits"], deterministic=False)
 
 
 @pytest.mark.parametrize("track", ("C1", "C2"))
@@ -581,6 +602,17 @@ def test_d1_d2_device_batch_scoring_keeps_route_and_risk_cost_on_device():
     assert torch.isneginf(invalid_scores[0, 1])
 
 
+def test_route_and_risk_cost_are_deducted_once_and_ties_choose_lowest_index():
+    utility = torch.tensor([[1., 1., 9.]])
+    valid = torch.tensor([[True, True, False]])
+    route = torch.tensor([[.2, .2, 0.]])
+    risk = torch.tensor([[.1, .1, 0.]])
+    logits = candidate_policy_logits(utility, valid, route, risk)
+    torch.testing.assert_close(logits, torch.tensor([[.7, .7, -torch.inf]]))
+    selected, _, _ = sample_candidate_action(logits, deterministic=True)
+    assert selected.item() == 0
+
+
 @pytest.mark.parametrize("policy", ("D1", "D2"))
 @pytest.mark.parametrize("count", (8, 16, 32))
 def test_d1_d2_device_scoring_matches_legacy_rows_across_capacities(policy, count):
@@ -679,7 +711,8 @@ def test_device_route_evaluator_matches_legacy_for_obstacle_and_invalid_rows():
     queries = tuple(RouteQuery(item, "route-parity:1", world, 3, goal)
         for item, world, goal in (
         ("clear", 0, (10.8, 4.)),
-        ("blocked", 0, tuple(blocked_goal.tolist())),
+        ("at-goal-clear", 0, (10., 4.)),
+        ("unreachable-goal", 0, tuple(blocked_goal.tolist())),
         ("footprint-collision", 0, (.1, .1)),
         ("endpoint-mismatch", 0, (10.73, 4.19)),
         ("duplicate", 0, (11., 4.)),
@@ -727,7 +760,15 @@ def test_device_route_evaluator_matches_legacy_for_obstacle_and_invalid_rows():
             expected_error = math.dist(endpoint, goal)
             assert batch.endpoint_error_m[index].item() == pytest.approx(
                 expected_error, abs=1e-6)
+    assert device[0].status == "feasible" and device[0].feasible
+    assert device[1].status == "at_goal" and device[1].feasible
+    assert device[2].status == "no_path" and not device[2].feasible
+    assert device[3].status == "no_path" and not device[3].feasible
+    assert batch.endpoint_error_m[4].item() > .01
     assert batch.path_xy.shape[1] == env.planner.max_points + 1
+    clear_path = batch.path_xy[0, :batch.path_length[0]]
+    grid_cells = torch.floor(clear_path / env.planner.resolution).to(torch.long)
+    assert (grid_cells[1:] != grid_cells[:-1]).any(), "route must cross a raster boundary"
 
     # Also check bump-only path integration without a learned raster.
     with _NoHostTensorProjection(), _NoHostScalarSync():
@@ -739,6 +780,20 @@ def test_device_route_evaluator_matches_legacy_for_obstacle_and_invalid_rows():
         assert left.feasible == right.feasible
         if left.weighted_cost is not None and right.weighted_cost is not None:
             assert left.weighted_cost == pytest.approx(right.weighted_cost, abs=1e-6)
+
+    # Target the center of a known bump so this fixture proves positive bump
+    # cost, instead of merely comparing two zero-bump routes.
+    bump_center = env.planner._bumps[0, :2].clone()
+    bump_goal_query = DeviceRouteQuery("bump-center", "route-parity:bump", 0, 3)
+    with _NoHostTensorProjection(), _NoHostScalarSync():
+        bump_center_batch = evaluate_device_routes(env, (bump_goal_query,),
+            bump_center[None])
+    bump_path = bump_center_batch.path_xy[0, :bump_center_batch.path_length[0]]
+    bump_cells = torch.floor(bump_path / env.planner.resolution).to(torch.long)
+    bump_cost = env.planner._bump_cost[bump_cells[:, 0], bump_cells[:, 1]]
+    assert (bump_cost > 1.).any(), "route must include a positive bump contribution"
+    assert bump_center_batch.weighted_cost_grid_edges[0] > (
+        bump_center_batch.distance_m[0] / env.planner.resolution)
 
     # A synthetic observed circle over the robot start exercises the planner's
     # blocked-start/escape contract and explicit endpoint collision checks.
@@ -761,6 +816,75 @@ def test_device_route_evaluator_matches_legacy_for_obstacle_and_invalid_rows():
     assert escape_device.feasible == escape_legacy.feasible
     assert escape_device.path_points_m == escape_legacy.path_points_m
     assert escape_device.weighted_cost == escape_legacy.weighted_cost
+    at_goal_blocked = RouteQuery("at-goal-blocked", "route-parity:escape",
+                                 0, 3, tuple(env.policy_pose[0, 3, :2].tolist()))
+    at_goal_blocked_device_query = DeviceRouteQuery(at_goal_blocked.candidate_id,
+        at_goal_blocked.snapshot_id, at_goal_blocked.world, at_goal_blocked.slot)
+    at_goal_blocked_xy = torch.tensor([at_goal_blocked.goal_xy],
+                                      dtype=env.policy_pose.dtype)
+    with _NoHostTensorProjection(), _NoHostScalarSync():
+        blocked_goal_batch = evaluate_device_routes(env,
+            (at_goal_blocked_device_query,), at_goal_blocked_xy)
+    blocked_goal_device, = blocked_goal_batch.project_results()
+    blocked_goal_legacy, = evaluate_routes(env, (at_goal_blocked,))
+    assert blocked_goal_device.status == blocked_goal_legacy.status == "no_path"
+    assert not blocked_goal_device.feasible and not blocked_goal_legacy.feasible
+    env._perceived_robot_obstacles = original_obstacles
+
+    # A full-height collider disconnects two field regions. This asserts a
+    # genuine unreachable case rather than a goal that is itself occupied.
+    original_colliders = env.sim.field_colliders
+    barrier = torch.tensor([11.5, env.sim.field_width * .5, .12,
+                            env.sim.field_width * .5 + 1.],
+                           dtype=env.policy_pose.dtype)
+    try:
+        env.sim.field_colliders = list(original_colliders) + [barrier]
+        unreachable_query = RouteQuery("disconnected", "route-parity:disconnected",
+                                       0, 3, (12.4, 4.))
+        unreachable_device_query = DeviceRouteQuery(unreachable_query.candidate_id,
+            unreachable_query.snapshot_id, unreachable_query.world, unreachable_query.slot)
+        unreachable_goal = torch.tensor([unreachable_query.goal_xy],
+                                        dtype=env.policy_pose.dtype)
+        with _NoHostTensorProjection(), _NoHostScalarSync():
+            unreachable_batch = evaluate_device_routes(env,
+                (unreachable_device_query,), unreachable_goal)
+        unreachable_device, = unreachable_batch.project_results()
+        unreachable_legacy, = evaluate_routes(env, (unreachable_query,))
+        assert unreachable_device.status == unreachable_legacy.status == "no_path"
+        assert not unreachable_device.feasible and not unreachable_legacy.feasible
+    finally:
+        env.sim.field_colliders = original_colliders
+
+    # A straight, grid-aligned, reachable route uses every actual planner path
+    # slot. A supplied zero learned map disables shortcutting on both paths.
+    original_max_points = env.planner.max_points
+    try:
+        env.planner.max_points = 4
+        start_cell = torch.floor(env.policy_pose[0, 3, :2] /
+                                 env.planner.resolution).to(torch.long)
+        max_goal_xy = ((int(start_cell[0].item()) + env.planner.max_points - 1 + .5)
+                       * env.planner.resolution,
+                       (int(start_cell[1].item()) + .5) * env.planner.resolution)
+        max_query = DeviceRouteQuery("max-length", "route-parity:max", 0, 3)
+        max_goal = torch.tensor([max_goal_xy], dtype=env.policy_pose.dtype)
+        zero_learned_cost = torch.zeros((env.planner.nx, env.planner.ny),
+                                        dtype=env.policy_pose.dtype)
+        with _NoHostTensorProjection(), _NoHostScalarSync():
+            max_batch = evaluate_device_routes(env, (max_query,), max_goal,
+                                               learned_traversal_cost=zero_learned_cost)
+        max_device, = max_batch.project_results()
+        max_legacy_query = RouteQuery("max-length", "route-parity:max", 0, 3,
+                                      max_goal_xy)
+        max_legacy, = evaluate_routes(env, (max_legacy_query,),
+                                      learned_traversal_cost=zero_learned_cost)
+        assert max_batch.path_length[0].item() == env.planner.max_points + 1
+        assert max_device.status == max_legacy.status == "feasible"
+        assert max_device.feasible and max_legacy.feasible
+        assert max_device.path_points_m == max_legacy.path_points_m
+        assert max_device.weighted_cost == pytest.approx(max_legacy.weighted_cost,
+                                                         abs=1e-6)
+    finally:
+        env.planner.max_points = original_max_points
 
     # Nonfinite robot state is rejected identically before route selection.
     original_x = env.policy_pose[0, 3, 0].clone()
