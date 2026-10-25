@@ -301,6 +301,7 @@ def validate_trench_interception_record(record: dict, *, binding: dict,
         "qualification_case": binding.get("qualification_case"),
         "protocol_id": binding.get("protocol_id"),
         "protocol_sha256": binding.get("protocol_sha256"),
+        "split": "validation",
         "seed_manifest_sha256": binding.get("seed_manifest_sha256"),
         "schedule_sha256": binding.get("schedule_sha256"),
         "assignment_identity_sha256": binding.get("per_episode_assignment_sha256"),
@@ -594,7 +595,7 @@ def reduce_trench_interception_pair(control: dict, treatment: dict, *, binding: 
     schedule = binding.get("schedule")
     from .meco_phase4_opponents import validate_opponent_policy_schedule
     validated_schedule = validate_opponent_policy_schedule(schedule,
-        scenario_id=binding.get("scenario_id"), categories=binding.get("categories", ()),
+        scenario_id=binding.get("scenario_id"), categories=[binding.get("category")],
         qualification_case=binding.get("qualification_case"),
         seeds=binding.get("seed_list", ()), split=binding.get("split"),
         factor_id="opponent.trench_interception",
