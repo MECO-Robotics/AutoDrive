@@ -1,9 +1,15 @@
+from pathlib import Path
+from runpy import run_path
 from types import SimpleNamespace
 
 import pytest
 
 from frc_defense import meco_deployment
 from frc_defense.meco_tracks import MECO_TRACKS
+
+_write_report_exclusive = run_path(str(
+    Path(__file__).resolve().parents[1] / "scripts/profile_meco_deployment.py"))[
+        "_write_report_exclusive"]
 
 
 def _capture_names(directory):
@@ -57,3 +63,32 @@ def test_profiler_source_identity_rejects_dirty_checkout(monkeypatch):
 
     with pytest.raises(RuntimeError, match="clean profiler checkout"):
         meco_deployment._profiler_source_identity()
+
+
+def test_report_publication_rejects_existing_file_without_replacing_it(tmp_path):
+    output = tmp_path / "profile.json"
+    output.write_text("prior report")
+
+    with pytest.raises(FileExistsError, match="refusing to overwrite"):
+        _write_report_exclusive(output, "new report")
+
+    assert output.read_text() == "prior report"
+
+
+@pytest.mark.parametrize("dangling", [False, True])
+def test_report_publication_rejects_symlink_without_following_or_replacing(
+        tmp_path, dangling):
+    target = tmp_path / "target.json"
+    if not dangling:
+        target.write_text("symlink target")
+    output = tmp_path / "profile.json"
+    output.symlink_to(target)
+
+    with pytest.raises(FileExistsError, match="refusing to overwrite"):
+        _write_report_exclusive(output, "new report")
+
+    assert output.is_symlink()
+    if not dangling:
+        assert target.read_text() == "symlink target"
+    else:
+        assert not target.exists()

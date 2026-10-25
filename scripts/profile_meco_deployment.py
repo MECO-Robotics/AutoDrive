@@ -4,12 +4,39 @@ import argparse
 from datetime import datetime, timezone
 import hashlib
 import json
+import os
 from pathlib import Path
 import sys
+import tempfile
 
 from frc_defense.meco_deployment import (profile_report,
     production_capture_profile_report)
 from frc_defense.meco_tracks import MECO_TRACKS
+
+
+def _write_report_exclusive(output: Path, payload: str) -> None:
+    """Publish a complete report atomically without following/replacing a target."""
+    output = Path(output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{output.name}.", suffix=".tmp", dir=output.parent)
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        try:
+            # Hard-link publication is atomic and fails if output is any
+            # existing directory entry, including a dangling or live symlink.
+            os.link(temporary, output, follow_symlinks=False)
+        except FileExistsError:
+            raise FileExistsError(f"refusing to overwrite existing report: {output}") from None
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def main():
@@ -32,8 +59,6 @@ def main():
             parser.error("production-capture mode requires the exact complete five-track set")
         if tuple(args.devices or ()) != ("cuda:0", "cuda:1"):
             parser.error("production-capture mode requires --device cuda:0 --device cuda:1")
-        if args.output.exists():
-            parser.error(f"refusing to overwrite existing production profile: {args.output}")
         try:
             report = production_capture_profile_report(args.checkpoint_root,
                 args.production_capture_dir, args.devices, args.iterations, args.warmup)
@@ -48,17 +73,16 @@ def main():
                 "profiler_source_identity": None,
                 "physical_device_attestation": None,
                 "deployment_qualification": False}
-            args.output.parent.mkdir(parents=True, exist_ok=True)
-            args.output.write_text(json.dumps(report, indent=2) + "\n")
+            _write_report_exclusive(args.output,
+                json.dumps(report, indent=2, allow_nan=False) + "\n")
             print(json.dumps(report, indent=2), file=sys.stderr)
             return 1
     else:
         if args.devices:
             parser.error("--device is only valid with --production-capture-dir")
         report = profile_report(args.tracks, args.checkpoint_root, args.iterations, args.warmup)
-    args.output.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(report, indent=2, allow_nan=False) + "\n"
-    args.output.write_text(payload)
+    _write_report_exclusive(args.output, payload)
     if args.production_capture_dir:
         print(f"profile_sha256={hashlib.sha256(payload.encode()).hexdigest()}")
     print(json.dumps(report, indent=2))
