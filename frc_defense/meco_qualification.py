@@ -747,7 +747,7 @@ def protocol_document(scenario_id: str | None = None, *, episodes: int = MIN_EPI
 def _gpu_statistics_implementation(runtime_identity):
     return {"implementation_id": GPU_BOOTSTRAP_IMPLEMENTATION_ID,
         "generator": "torch.Generator(device); torch.randint and float64 torch.rand",
-        "seed_derivation": "sha256(evaluation_id/category)[:16]; safety XOR 0x5AFE and 0xD00D",
+        "seed_derivation": "validation: sha256(evaluation_id/category)[:16], safety XOR 0x5AFE and 0xD00D; final test: sha256(evaluation_id/category/metric/ref|D0)[:16]",
         "cluster_order": "ascending (layout_id, defender_family)",
         "resampling": "same number of clusters; episodes sampled within each selected cluster using that cluster's original count; pooled episode mean with variable replicate denominator",
         "replicate_count": BOOTSTRAP_REPLICATES,
@@ -4192,14 +4192,17 @@ def run_validation_round(*, scenario_id: str, candidate_policy: str,
         device: str, output: str | Path, retention_reports=(), round_id: str | None = None,
         collect_only: bool = False, split: str = "validation"):
     """Run a full frozen split suite; diagnostics use `meco_track_training evaluate`."""
+    if split not in ("validation", "test"):
+        raise ValueError("qualification runs support validation or final test only")
+    if (split == "test" and protocol.get("protocol_version") !=
+            GPU_BOOTSTRAP_PROTOCOL_VERSION):
+        raise ValueError("historical host-bootstrap protocols cannot run final-test statistics")
     from .meco_track_training import evaluate_meco
     from .meco_device import require_indexed_cuda_device
     from .fuel_physics_hip import prepare_native_fuel_extension
     device = str(require_indexed_cuda_device(device,
         purpose="MECO qualification"))
     prepare_native_fuel_extension(device)
-    if split not in ("validation", "test"):
-        raise ValueError("qualification runs support validation or final test only")
     if candidate_policy not in POLICIES or set(checkpoints) != {candidate_policy}:
         raise ValueError("qualification needs exactly the selected candidate checkpoint")
     if scenario_id not in protocol.get("scenario_ids", ()):
@@ -4411,43 +4414,11 @@ def run_validation_round(*, scenario_id: str, candidate_policy: str,
                     "paired_reference_variant": protocol.get("paired_reference_variant"),
                     "safety_noninferiority": ci_row["safety_noninferiority"],
                     "paired_difference_95_ci": ci_row["paired_difference_95_ci"]}
-            else:
-                success = sum(bool(row["metrics"]["success"]) for row in cand)
-                grouped = {}
-                for (case, _), a, b in zip(keys, cand, ref):
-                    grouped.setdefault((case.layout_id, case.defender_family), []).append(
-                        float(a["metrics"]["useful_throughput"])
-                        - float(b["metrics"]["useful_throughput"]))
-                safety_summary = {}
-                for metric, margin in protocol.get("safety_noninferiority_margins", {}).items():
-                    reference_diffs = {}
-                    d0_diffs = {}
-                    for (case, _), candidate_row, reference_row, d0_row in zip(keys, cand, ref, d0):
-                        key = (case.layout_id, case.defender_family)
-                        reference_diffs.setdefault(key, []).append(
-                            candidate_row["metrics"][metric] - reference_row["metrics"][metric])
-                        d0_diffs.setdefault(key, []).append(
-                            candidate_row["metrics"][metric] - d0_row["metrics"][metric])
-                    safety_summary[metric] = {
-                        "candidate_minus_reference_95_ci": _cluster_bootstrap_ci(reference_diffs,
-                            seed=int(hashlib.sha256(f"{run_id}/{category}/{metric}/ref".encode()).hexdigest()[:16], 16)),
-                        "candidate_minus_D0_safety_floor_95_ci": _cluster_bootstrap_ci(d0_diffs,
-                            seed=int(hashlib.sha256(f"{run_id}/{category}/{metric}/D0".encode()).hexdigest()[:16], 16)),
-                        "noninferiority_margin": margin}
-                summary[category] = {"episodes": len(cand), "successes": success,
-                    "success_rate": success / len(cand),
-                    "candidate_useful_throughput": sum(row["metrics"]["useful_throughput"] for row in cand) / len(cand),
-                    "reference_useful_throughput": sum(row["metrics"]["useful_throughput"] for row in ref) / len(ref),
-                    "paired_reference_policy": reference_policy,
-                    "paired_reference_mode": protocol.get("paired_reference_mode"),
-                    "paired_reference_variant": protocol.get("paired_reference_variant"),
-                    "safety_noninferiority": safety_summary,
-                    "paired_difference_95_ci": _cluster_bootstrap_ci(grouped,
-                        seed=int(hashlib.sha256(f"{run_id}/{category}".encode()).hexdigest()[:16], 16))}
+            else:  # Defensive assertion; old protocols are rejected at entry.
+                raise ValueError("final-test statistics require the GPU bootstrap protocol")
         round_report["final_test_isolated"] = True
         round_report["final_test_results"] = summary
-        if protocol.get("protocol_version") == GPU_BOOTSTRAP_PROTOCOL_VERSION:
-            round_report["confidence_intervals"] = final_test_cis
+        round_report["confidence_intervals"] = final_test_cis
         round_report["evidence_sha256"] = _evidence_digest(round_report)
         _validate_evidence_digest(round_report)
         write_immutable_report(output, round_report)
