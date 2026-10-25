@@ -42,7 +42,7 @@ def _schedule(protocol, sha):
     ]
 
 
-def test_schedule_advances_by_cycle_and_repeated_selection_is_deterministic():
+def test_schedule_advances_by_cycle_without_wrapping_or_repeating():
     from frc_defense.meco_track_training import _EVALUATION_CASE_FIELDS
     assert manifest_api.EVALUATION_CASE_FIELDS == _EVALUATION_CASE_FIELDS
     protocol, sha = _protocol()
@@ -50,12 +50,12 @@ def test_schedule_advances_by_cycle_and_repeated_selection_is_deterministic():
         _schedule(protocol, sha), protocol, sha)
     assert [row["index"] for row in schedule] == [0, 1]
     assert [_scheduled_evaluation_case(schedule, cycle)["index"]
-        for cycle in (1, 2, 3, 4)] == [0, 1, 0, 1]
+        for cycle in (1, 2)] == [0, 1]
     # Repeating selection for the same cycle within one supervisor lifetime is stable.
     cycle_two = _scheduled_evaluation_case(schedule, 2)
     assert _scheduled_evaluation_case(schedule, 2) == cycle_two
-    assert _scheduled_evaluation_case(schedule, 3) == schedule[0]
-    assert _scheduled_evaluation_case(schedule, 4) == schedule[1]
+    with pytest.raises(ValueError, match="exceeds"):
+        _scheduled_evaluation_case(schedule, 3)
 
 
 def test_schedule_rejects_protocol_drift_and_split_leakage():
@@ -199,6 +199,18 @@ def test_transition_history_audit_binds_five_snapshots_to_queue_configuration(tm
     queue_path.write_text(json.dumps(queue))
     _, indexed, _ = meco_protocol_transition._evaluation_inventory(tmp_path, queue_path)
     assert len(indexed[0]["snapshot_inventory"]) == len(MECO_TRACKS)
+
+    queue["evaluation_schedule"] = {"schedule_sha256": "f" * 64,
+        "schedule_count": 1, "completed_count": 1}
+    queue["evaluation_schedule_sha256"] = "f" * 64
+    queue["campaign_manifest"]["evaluation_schedule_sha256"] = "f" * 64
+    queue_path.write_text(json.dumps(queue))
+    with pytest.raises(ValueError, match="completed cursor"):
+        meco_protocol_transition._evaluation_inventory(tmp_path, queue_path)
+    queue.pop("evaluation_schedule")
+    queue.pop("evaluation_schedule_sha256")
+    queue["campaign_manifest"].pop("evaluation_schedule_sha256")
+    queue_path.write_text(json.dumps(queue))
 
     history_path = tmp_path / "evaluation-history.json"
     history = json.loads(history_path.read_text())

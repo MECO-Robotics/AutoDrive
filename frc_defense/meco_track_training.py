@@ -2352,6 +2352,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                   phase4_start_profile_assignment: dict | None = None,
                   phase4_focal_pose_assignment: dict | None = None,
                   phase4_teammate_behavior_assignment: dict | None = None,
+                  schedule_case_binding: dict | None = None,
                   replay_output_dir: str | Path | None = None,
                   replay_seeds: tuple[int, ...] | None = None,
                   replay_selection: dict[str, list[int]] | None = None,
@@ -2387,6 +2388,19 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
         replay_seed_set = set().union(*replay_policy_seeds.values())
     if split not in ("validation", "test", "train", "calibration", "diagnostic"):
         raise ValueError("split must be train, validation, test, calibration, or diagnostic")
+    if schedule_case_binding is not None:
+        if (not isinstance(schedule_case_binding, dict) or
+                set(schedule_case_binding) != {"index", "scenario_id", "category", "seeds",
+                    "split", "protocol_id", "protocol_sha256", "qualification_case"} or
+                type(schedule_case_binding.get("index")) is not int or
+                schedule_case_binding["index"] < 0 or
+                schedule_case_binding.get("scenario_id") != scenario_id or
+                categories != (schedule_case_binding.get("category"),) or
+                schedule_case_binding.get("split") != split or
+                schedule_case_binding.get("seeds") != list(scored_seeds) or
+                not isinstance(schedule_case_binding.get("protocol_id"), str) or
+                not isinstance(schedule_case_binding.get("protocol_sha256"), str)):
+            raise ValueError("scheduled evaluation binding differs from evaluator arguments")
     evaluation_binding = None
     if split in ("validation", "test"):
         if evaluation_case is None:
@@ -2805,12 +2819,16 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
             "protocol_id": protocol,
             "qualification_protocol_id": qualification_protocol_id,
             "evaluation_protocol_id": (evaluation_binding["protocol_id"]
-                if evaluation_binding else None),
+                if evaluation_binding else schedule_case_binding["protocol_id"]
+                if schedule_case_binding else None),
             "evaluation_protocol_sha256": (evaluation_binding["protocol_sha256"]
-                if evaluation_binding else None),
+                if evaluation_binding else schedule_case_binding["protocol_sha256"]
+                if schedule_case_binding else None),
             "evaluation_case": evaluation_binding,
+            "schedule_case_binding": schedule_case_binding,
             "calibration_control_case_binding": calibration_control_case_binding,
-            "exact_episode_seeds": (evaluation_binding["seeds"] if evaluation_binding else None),
+            "exact_episode_seeds": (evaluation_binding["seeds"] if evaluation_binding else
+                schedule_case_binding["seeds"] if schedule_case_binding else None),
             "split": split, "status": status,
             "execution_device": execution_device,
             "pid": os.getpid(), "heartbeat_utc": datetime.now(timezone.utc).isoformat(),
@@ -3885,12 +3903,16 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
             "protocol_id": protocol,
             "qualification_protocol_id": qualification_protocol_id,
             "evaluation_protocol_id": (evaluation_binding["protocol_id"]
-                if evaluation_binding else None),
+                if evaluation_binding else schedule_case_binding["protocol_id"]
+                if schedule_case_binding else None),
             "evaluation_protocol_sha256": (evaluation_binding["protocol_sha256"]
-                if evaluation_binding else None),
+                if evaluation_binding else schedule_case_binding["protocol_sha256"]
+                if schedule_case_binding else None),
             "evaluation_case": evaluation_binding,
+            "schedule_case_binding": schedule_case_binding,
             "calibration_control_case_binding": calibration_control_case_binding,
-            "exact_episode_seeds": (evaluation_binding["seeds"] if evaluation_binding else None),
+            "exact_episode_seeds": (evaluation_binding["seeds"] if evaluation_binding else
+                schedule_case_binding["seeds"] if schedule_case_binding else None),
             "evaluation_design": ("frozen_protocol_held_out" if evaluation_binding
                 else "diagnostic_unbound"),
             "sources": sources,
@@ -4108,6 +4130,8 @@ def _parser():
         help="JSON object selecting the frozen layout/family/start/sensor stratum")
     ev.add_argument("--episode-seeds",
         help="comma-separated exact held-out seed list; required with --evaluation-protocol")
+    ev.add_argument("--schedule-case-binding-json",
+        help="frozen campaign schedule case binding for durable evaluations")
     ev.add_argument("--device", required=True,
         help="explicit indexed CUDA/ROCm device, for example cuda:0")
     ev.add_argument("--prediction-mode", choices=PREDICTION_MODES,
@@ -4170,6 +4194,8 @@ def main(argv=None):
         evaluation_protocol=args.evaluation_protocol,
         evaluation_case=(json.loads(args.evaluation_case_json)
             if args.evaluation_case_json else None),
+        schedule_case_binding=(json.loads(args.schedule_case_binding_json)
+            if args.schedule_case_binding_json else None),
         episode_seeds=(tuple(int(item) for item in args.episode_seeds.split(",") if item)
             if args.episode_seeds else None),
         output=args.output, prediction_mode=args.prediction_mode,

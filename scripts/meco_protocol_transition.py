@@ -28,6 +28,7 @@ from frc_defense.meco_candidates import CANDIDATE_BASE_FEATURE_COUNT
 from frc_defense.curriculum_training import source_identity
 from frc_defense.meco_supervised import _load_protocol
 from frc_defense.meco_tracks import MECO_TRACKS, make_meco_track
+from frc_defense.meco_evaluation_schedule import validate_history_indexes
 from frc_defense.meco_track_training import ValueHead
 from frc_defense.meco_track_training import load_evaluation_protocol
 from frc_defense.meco_qualification import TRAIN_SEED_POOL_SIZE, protocol_cases
@@ -453,6 +454,27 @@ def _evaluation_inventory(evaluation_root: Path, queue_status_path: Path):
     if (anchor.get("count") != len(history_rows)
             or anchor.get("head_sha256") != previous):
         raise ValueError("durable evaluation history differs from supervisor queue anchor")
+    schedule_summary = queue.get("evaluation_schedule")
+    if schedule_summary is not None:
+        if not isinstance(schedule_summary, dict):
+            raise ValueError("supervisor evaluation schedule summary is malformed")
+        schedule_count = schedule_summary.get("schedule_count")
+        completed_count = schedule_summary.get("completed_count")
+        schedule_sha256 = schedule_summary.get("schedule_sha256")
+        manifest_schedule_sha256 = campaign_manifest.get("evaluation_schedule_sha256")
+        if (type(schedule_count) is not int or type(completed_count) is not int or
+                not 0 <= completed_count <= schedule_count or
+                not isinstance(schedule_sha256, str) or
+                schedule_sha256 != queue.get("evaluation_schedule_sha256") or
+                schedule_sha256 != manifest_schedule_sha256):
+            raise ValueError("supervisor evaluation schedule counts are malformed")
+        indexes = validate_history_indexes(history_rows,
+            schedule_count=schedule_count,
+            expected_schedule_sha256=schedule_sha256)
+        if len(indexes) != completed_count:
+            raise ValueError("scheduled evaluation history does not match completed cursor")
+    else:
+        validate_history_indexes(history_rows)
     if set(indexed) != {path.name for path in reports}:
         raise ValueError("durable evaluation history does not cover the complete report inventory")
     entries = []

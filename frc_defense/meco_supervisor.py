@@ -28,6 +28,8 @@ import torch
 
 from .curriculum_training import source_identity
 from .meco_final_test_ledger import assert_training_not_released_after_final_test
+from .meco_evaluation_schedule import (MecoEvaluationSchedule,
+    validate_history_indexes, verify_evaluation_artifacts)
 from .meco_candidates import CANDIDATE_BOUNDARY
 from .meco_track_training import (CHUNK_RESET_POLICY, MecoTrainConfig, ROOT,
     resolve_evaluation_case, resolve_evaluation_protocol)
@@ -100,6 +102,11 @@ def _atomic_json(path: Path, payload):
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, path)
+        directory_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
@@ -182,6 +189,11 @@ def _append_evaluation_history(evaluation_root: Path, *, cycle: int, output: Pat
             "campaign_binding": campaign_binding})
     if [row["track"] for row in snapshot_rows] != sorted(MECO_TRACKS):
         raise ValueError("evaluation history must pin exactly one checkpoint for all five tracks")
+    schedule_index = completion.get("schedule_index")
+    if schedule_index is not None:
+        if type(schedule_index) is not int or schedule_index != len(
+                validate_history_indexes(entries)):
+            raise ValueError("evaluation history schedule index would skip or duplicate a case")
     status_path = Path(str(output) + ".status.json")
     row = {"sequence": len(entries) + 1, "previous_entry_sha256": prior,
         "cycle": cycle, "output_file": output.name,
@@ -189,6 +201,7 @@ def _append_evaluation_history(evaluation_root: Path, *, cycle: int, output: Pat
         "evaluation_id": completion.get("evaluation_id"),
         "protocol_id": completion.get("protocol_id"),
         "schedule_case": completion.get("schedule_case"),
+        "schedule_index": schedule_index,
         "evaluation_schedule_sha256": completion.get("evaluation_schedule_sha256"),
         "return_code": completion.get("return_code"),
         "report_sha256": (hashlib.sha256(output.read_bytes()).hexdigest()
@@ -212,16 +225,14 @@ def _checkpoint_info(path: Path):
 
 
 def _scheduled_evaluation_case(schedule, cycle):
-    """Select a frozen case by cycle; this does not persist a restart cursor.
-
-    Manifest campaigns require fresh output roots, so campaign-level restart and
-    persisted schedule continuation are unsupported.
-    """
+    """Select a frozen schedule case without wrapping or repeating exhausted cases."""
     if not isinstance(schedule, list) or not schedule:
         raise ValueError("frozen evaluation schedule must be a nonempty list")
     if type(cycle) is not int or cycle < 1:
         raise ValueError("scheduled evaluation cycle must be a positive integer")
-    return schedule[(cycle - 1) % len(schedule)]
+    if cycle > len(schedule):
+        raise ValueError("scheduled evaluation cycle exceeds the frozen schedule")
+    return schedule[cycle - 1]
 
 
 def _reap_worker_groups(processes, *, graceful_seconds=1800., term_seconds=10.,
@@ -315,7 +326,7 @@ def _train_command(*, config: MecoTrainConfig, output: Path, run_id: str,
 def _evaluation_command(*, checkpoints, scenario, categories, episodes, seed,
                         device, output, prediction_mode=None, split="diagnostic",
                         evaluation_protocol=None, evaluation_case=None,
-                        episode_seeds=None):
+                        episode_seeds=None, schedule_case_binding=None):
     command = [sys.executable, "-m", "frc_defense.meco_track_training", "evaluate",
         "--scenario", scenario, "--categories", ",".join(categories),
         "--episodes", str(episodes), "--seed", str(seed), "--device", device,
@@ -326,6 +337,9 @@ def _evaluation_command(*, checkpoints, scenario, categories, episodes, seed,
                             sort_keys=True, allow_nan=False)))
     if episode_seeds is not None:
         command.extend(("--episode-seeds", ",".join(str(value) for value in episode_seeds)))
+    if schedule_case_binding is not None:
+        command.extend(("--schedule-case-binding-json", json.dumps(
+            schedule_case_binding, sort_keys=True, allow_nan=False)))
     if prediction_mode is not None:
         command.extend(("--prediction-mode", prediction_mode))
     for track in MECO_TRACKS:
@@ -372,7 +386,11 @@ class MecoSupervisor:
                  evaluation_split: str = "diagnostic",
                  evaluation_case: dict | None = None,
                  phase4_train_exposure: bool = False,
-                 campaign_manifest: dict | None = None):
+                 campaign_manifest: dict | None = None,
+                 resume_campaign: bool = False):
+        if type(resume_campaign) is not bool:
+            raise ValueError("resume_campaign must be boolean")
+        self.resume_campaign = resume_campaign
         self.manifest = None
         self.manifest_validation = None
         self.manifest_digest = None
@@ -395,11 +413,17 @@ class MecoSupervisor:
             campaign = campaign_manifest["campaign"]
             output = campaign["root"]
             evaluation_output = campaign["evaluation_output"]
-            if Path(output).exists() or Path(evaluation_output).exists():
+            roots_exist = Path(output).exists() and Path(evaluation_output).exists()
+            if resume_campaign:
+                if not roots_exist:
+                    raise ValueError("manifest campaign resume requires both existing campaign roots")
+            elif Path(output).exists() or Path(evaluation_output).exists():
                 raise ValueError("manifest diagnostic launch requires fresh, absent campaign output roots")
             self.manifest_configs = {track: MecoTrainConfig(**campaign_manifest["tracks"][track]["config"])
                                      for track in MECO_TRACKS}
             self.evaluation_schedule = campaign_manifest.get("evaluation_schedule")
+            if resume_campaign and self.evaluation_schedule is None:
+                raise ValueError("campaign resume requires a frozen evaluation schedule for durable resume")
             if self.evaluation_schedule is not None:
                 self.evaluation_schedule_sha256 = _hash(self.evaluation_schedule)
                 self.schedule_evaluation_protocol_path = Path(
@@ -413,6 +437,8 @@ class MecoSupervisor:
                     self.manifest_configs[MECO_TRACKS[0]].seed != seed or
                     self.manifest_configs[MECO_TRACKS[0]].updates != chunk_updates):
                 raise ValueError("runtime training arguments conflict with validated campaign manifest")
+        elif resume_campaign:
+            raise ValueError("campaign resume requires a validated campaign manifest")
         from .meco_device import require_indexed_cuda_device
         if not devices or len(set(devices)) != len(devices):
             raise ValueError("devices must be a nonempty list without duplicates")
@@ -516,11 +542,13 @@ class MecoSupervisor:
         self.stop_file = Path(stop_file).expanduser().resolve() if stop_file else self.output / "STOP"
         self.queue_path = self.output / "queue-status.json"
         self.status_path = self.output / "supervisor-status.json"
+        self.runtime_binding_path = self.output / "campaign-runtime-binding.json"
         self.request_stop = False
         self.evaluator = None
         self.evaluator_log = None
         self.evaluator_job = None
         self.pending_evaluations = []
+        self.evaluation_schedule_journal = None
         self.last_evaluation = None
         self.current_assignment = None
         self.run_ids = {}
@@ -656,7 +684,10 @@ class MecoSupervisor:
             "exact_episode_seeds": self.evaluation_episode_seeds,
             "evaluation_schedule_sha256": self.evaluation_schedule_sha256,
             "scheduled_case_for_cycle": (_scheduled_evaluation_case(
-                self.evaluation_schedule, cycle) if self.evaluation_schedule and cycle > 0 else None),
+                self.evaluation_schedule, cycle) if self.evaluation_schedule and
+                    1 <= cycle <= len(self.evaluation_schedule) else None),
+            "evaluation_schedule": (self.evaluation_schedule_journal.summary()
+                if self.evaluation_schedule_journal is not None else None),
             "evaluation_history": {"count": len(history_entries),
                 "head_sha256": (history_entries[-1].get("entry_sha256")
                     if history_entries else None)},
@@ -687,6 +718,8 @@ class MecoSupervisor:
             "task_scheduler": self._task_scheduler_status(),
             "evaluation_case": self.evaluation_binding,
             "evaluation_schedule_sha256": self.evaluation_schedule_sha256,
+            "evaluation_schedule": (self.evaluation_schedule_journal.summary()
+                if self.evaluation_schedule_journal is not None else None),
             "exact_episode_seeds": self.evaluation_episode_seeds,
             "evaluation": evaluation, "error": error,
             "stop_requested": self.request_stop,
@@ -723,8 +756,12 @@ class MecoSupervisor:
             detail = json.loads(status_path.read_text()) if status_path else None
         except (OSError, json.JSONDecodeError):
             detail = None
+        schedule_summary = (self.evaluation_schedule_journal.summary()
+            if self.evaluation_schedule_journal is not None else None)
         return {"active": self.evaluator is not None,
-            "pending": len(self.pending_evaluations),
+            "pending": (schedule_summary["pending_count"] if schedule_summary
+                else len(self.pending_evaluations)),
+            "schedule": schedule_summary,
             "evaluation_id": detail.get("evaluation_id") if detail else (
                 self.last_evaluation.get("evaluation_id") if self.last_evaluation else None),
             "protocol_id": detail.get("protocol_id") if detail else (
@@ -750,7 +787,7 @@ class MecoSupervisor:
     def _read_or_create_runs(self):
         self.output.mkdir(parents=True, exist_ok=True)
         self.evaluation_output.mkdir(parents=True, exist_ok=True)
-        if self.stop_file.exists():
+        if self.stop_file.exists() and not self.resume_campaign:
             raise RuntimeError(f"stop file already exists: {self.stop_file}; remove it to resume")
         for track in MECO_TRACKS:
             run_dir = self.track_dirs[track]
@@ -806,6 +843,24 @@ class MecoSupervisor:
                 if self.phase4_train_exposure else None),
             "candidate_boundary": CANDIDATE_BOUNDARY}
         self.configuration_hash = _hash(self.configuration)
+        runtime_binding = {"schema_version": 1,
+            "campaign_manifest_sha256": self.manifest_digest,
+            "configuration_sha256": self.configuration_hash,
+            "source_identity_sha256": self.source_hash,
+            "evaluation_schedule_sha256": self.evaluation_schedule_sha256,
+            "evaluation_protocol_sha256": (self.manifest["evaluation_protocol"]["sha256"]
+                if self.manifest is not None else None)}
+        if self.resume_campaign:
+            try:
+                persisted_binding = json.loads(self.runtime_binding_path.read_text())
+            except (OSError, json.JSONDecodeError) as exc:
+                raise ValueError("campaign resume lacks a valid runtime binding") from exc
+            if persisted_binding != runtime_binding:
+                raise ValueError("campaign resume manifest/config/source binding mismatch")
+        else:
+            if self.runtime_binding_path.exists():
+                raise ValueError("fresh campaign runtime binding already exists")
+            _atomic_json(self.runtime_binding_path, runtime_binding)
         self.scheduler_path = self.output / "task-scheduler-state.json"
         if self.scheduler_path.is_file():
             scheduler_state = json.loads(self.scheduler_path.read_text())
@@ -817,6 +872,24 @@ class MecoSupervisor:
                 self.stage_exposure_chunks,
                 phase4_train_exposure=self.phase4_train_exposure)
             _atomic_json(self.scheduler_path, self.task_scheduler.state)
+        if self.evaluation_schedule is not None:
+            self.evaluation_schedule_journal = MecoEvaluationSchedule(
+                self.evaluation_output / "evaluation-schedule-state.json",
+                manifest_sha256=self.manifest_digest,
+                configuration_sha256=self.configuration_hash,
+                schedule=self.evaluation_schedule,
+                schedule_sha256=self.evaluation_schedule_sha256,
+                protocol_sha256=self.manifest["evaluation_protocol"]["sha256"],
+                resume=self.resume_campaign)
+            history = _validate_evaluation_history(
+                self.evaluation_output / "evaluation-history.json",
+                expected_campaign_binding={
+                    "campaign_manifest_sha256": self.manifest_digest,
+                    "configuration_sha256": self.configuration_hash,
+                    "phase4_train_exposure": self.phase4_train_exposure})
+            self.evaluation_schedule_journal.reconcile_history(history["entries"])
+        if self.resume_campaign and self.stop_file.exists():
+            self.stop_file.unlink()
 
     def _task_for_cycle(self, cycle, target_update):
         assignment = self.task_scheduler.schedule(cycle, target_update)
@@ -1244,11 +1317,46 @@ class MecoSupervisor:
         if self.evaluation_schedule is not None:
             if _hash(self.evaluation_schedule) != self.evaluation_schedule_sha256:
                 raise RuntimeError("frozen evaluation schedule drifted after campaign validation")
+            if self.evaluation_schedule_journal is None:
+                raise RuntimeError("durable evaluation schedule journal is unavailable")
+            index = cycle - 1
+            if index >= len(self.evaluation_schedule):
+                return
             schedule_case = _scheduled_evaluation_case(self.evaluation_schedule, cycle)
             frozen_protocol = self.manifest["evaluation_protocol"]
             if (schedule_case.get("protocol_id") != frozen_protocol["protocol_id"] or
                     schedule_case.get("protocol_sha256") != frozen_protocol["sha256"]):
                 raise RuntimeError("scheduled evaluation case no longer matches bound protocol")
+            journal_state = self.evaluation_schedule_journal.state
+            if index < journal_state["next_enqueue_index"]:
+                self.evaluation_schedule_journal.enqueue(index, cycle,
+                    schedule_case, journal_state["items"][index]["checkpoint_snapshots"])
+                return
+            if index != journal_state["next_enqueue_index"]:
+                raise RuntimeError("training cycle would skip a frozen evaluation schedule index")
+            if source_identity() != self.sources:
+                raise RuntimeError("source identity changed before paired evaluation")
+            suffix = f"schedule-{index:04d}-cycle-{cycle:06d}"
+            snapshot_dir = self.evaluation_output / "checkpoint-snapshots" / suffix
+            snapshot_dir.mkdir(parents=True, exist_ok=True)
+            latest = {track: self.track_dirs[track] / "latest.pt" for track in MECO_TRACKS}
+            if any(not path.is_file() for path in latest.values()):
+                raise RuntimeError("all five learned tracks need a checkpoint before evaluation")
+            snapshot_rows = []
+            for track, source in latest.items():
+                destination = snapshot_dir / f"{track}.pt"
+                if not destination.is_file():
+                    temporary = snapshot_dir / f".{track}.pt.tmp"
+                    try:
+                        os.link(source, temporary)
+                    except OSError:
+                        shutil.copyfile(source, temporary)
+                    os.replace(temporary, destination)
+                snapshot_rows.append({"track": track, "path": str(destination.resolve()),
+                    "sha256": hashlib.sha256(destination.read_bytes()).hexdigest()})
+            self.evaluation_schedule_journal.enqueue(index, cycle,
+                schedule_case, snapshot_rows)
+            return
         else:
             schedule_case = None
         if source_identity() != self.sources:
@@ -1288,12 +1396,60 @@ class MecoSupervisor:
                           ignore_errors=True)
         self.pending_evaluations = [job]
 
+    def _reconcile_completed_schedule_cycles(self):
+        """Recover the one cycle-complete / journal-enqueue crash window."""
+        if self.evaluation_schedule_journal is None:
+            return
+        completed = min(self.completed_cycles, len(self.evaluation_schedule))
+        enqueued = self.evaluation_schedule_journal.state["next_enqueue_index"]
+        missing = completed - enqueued
+        if missing <= 0:
+            return
+        if missing != 1 or enqueued != completed - 1:
+            raise RuntimeError("completed training cycles are missing durable evaluation snapshots; "
+                "schedule recovery cannot safely reconstruct older checkpoints")
+        target_update = completed * self.chunk_updates
+        if any(self._completed_updates(track) != target_update for track in MECO_TRACKS):
+            raise RuntimeError("cannot recover scheduled evaluation for an unmatched training cycle")
+        self._queue_evaluation(completed)
+
     def _start_next_evaluation(self, *, occupied_devices=()):
-        if self.evaluator is not None or not self.pending_evaluations or self.request_stop:
+        if self.evaluator is not None or self.request_stop:
             return
         if self.evaluation_device in occupied_devices:
             return
-        job = self.pending_evaluations.pop(0)
+        if self.evaluation_schedule_journal is not None:
+            item = self.evaluation_schedule_journal.head()
+            if item is None:
+                return
+            if item["status"] == "verified":
+                self._commit_scheduled_evaluation(item)
+                self._start_next_evaluation(occupied_devices=occupied_devices)
+                return
+            if item["status"] == "running":
+                raise RuntimeError("scheduled evaluator is marked running without a process handle")
+            schedule_case = item["schedule_case"]
+            checkpoints = {row["track"]: Path(row["path"])
+                for row in item["checkpoint_snapshots"]}
+            attempt_number = len(item["attempts"]) + 1
+            attempt_dir = self.evaluation_output / ".schedule-attempts"
+            attempt_dir.mkdir(parents=True, exist_ok=True)
+            output = attempt_dir / f"case-{item['index']:04d}-attempt-{attempt_number:04d}.json"
+            final_output = self.evaluation_output / (
+                f"schedule-{item['index']:04d}-cycle-{item['cycle']:06d}.json")
+            job = {"cycle": item["cycle"], "output": output,
+                "final_output": final_output, "checkpoints": checkpoints,
+                "seed": schedule_case["seeds"][0],
+                "episode_seeds": schedule_case["seeds"],
+                "evaluation_binding": schedule_case,
+                "schedule_case": schedule_case,
+                "schedule_index": item["index"]}
+            self.evaluation_schedule_journal.begin_attempt(output)
+        else:
+            if not self.pending_evaluations:
+                return
+            job = self.pending_evaluations.pop(0)
+            schedule_case = job.get("schedule_case")
         command = _evaluation_command(checkpoints=job["checkpoints"],
             scenario=(job["schedule_case"]["scenario_id"]
                 if job.get("schedule_case") else self.scenario),
@@ -1310,7 +1466,9 @@ class MecoSupervisor:
                 else self.evaluation_protocol_path if not job.get("schedule_case") else None),
             evaluation_case=(job["schedule_case"].get("qualification_case")
                 if job.get("schedule_case") else self.evaluation_case),
-            episode_seeds=job["episode_seeds"])
+            episode_seeds=job["episode_seeds"],
+            schedule_case_binding=(schedule_case
+                if self.evaluation_schedule_journal is not None else None))
         try:
             self.evaluator_job = job
             self.evaluator_log = job["output"].with_suffix(".log").open("ab")
@@ -1318,6 +1476,9 @@ class MecoSupervisor:
                 stdout=self.evaluator_log, stderr=subprocess.STDOUT,
                 start_new_session=True)
         except OSError as exc:
+            if self.evaluation_schedule_journal is not None:
+                self.evaluation_schedule_journal.fail_attempt(
+                    f"evaluator spawn failed: {type(exc).__name__}: {exc}")
             if self.evaluator_log is not None:
                 self.evaluator_log.close()
             self.evaluator = None
@@ -1330,7 +1491,8 @@ class MecoSupervisor:
     def _poll_evaluator(self, cycle, statuses, *, occupied_devices=()):
         self._observe_stop()
         if self.evaluator is None:
-            self._start_next_evaluation(occupied_devices=occupied_devices)
+            if self.last_evaluation["status"] == "complete":
+                self._start_next_evaluation(occupied_devices=occupied_devices)
         if self.evaluator is None:
             return
         result = self.evaluator.poll()
@@ -1339,6 +1501,34 @@ class MecoSupervisor:
         self.evaluator_log.close()
         job = self.evaluator_job
         output = job["output"]
+        if self.evaluation_schedule_journal is not None:
+            try:
+                if result != 0:
+                    raise ValueError(f"evaluator exited with status {result}")
+                artifact = verify_evaluation_artifacts(job["schedule_case"], output,
+                    result, job["checkpoints"])
+                self.evaluation_schedule_journal.verify_attempt(artifact)
+                item = self.evaluation_schedule_journal.head()
+                self._commit_scheduled_evaluation(item)
+                self.last_evaluation = {"cycle": job["cycle"],
+                    "output_file": job["final_output"].name,
+                    "status": "complete", "return_code": 0,
+                    "schedule_index": job["schedule_index"]}
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                self.evaluation_schedule_journal.fail_attempt(str(exc))
+                self.last_evaluation = {"cycle": job["cycle"],
+                    "output_file": output.name, "status": "failed",
+                    "return_code": result, "schedule_index": job["schedule_index"],
+                    "error": str(exc)}
+            finally:
+                self.evaluator = None
+                self.evaluator_log = None
+                self.evaluator_job = None
+            self._start_next_evaluation(occupied_devices=occupied_devices)
+            self._publish(cycle=cycle,
+                phase="stopping" if self.request_stop else "training",
+                statuses=statuses, evaluation=self.last_evaluation)
+            return
         try:
             evaluator_status = json.loads(Path(str(output) + ".status.json").read_text())
         except (OSError, json.JSONDecodeError):
@@ -1378,7 +1568,8 @@ class MecoSupervisor:
 
     def _drain_evaluations(self, cycle, statuses):
         if self.request_stop:
-            self.pending_evaluations.clear()
+            if self.evaluation_schedule_journal is None:
+                self.pending_evaluations.clear()
         while self.evaluator is not None:
             self._poll_evaluator(cycle, statuses)
             self._publish(cycle=cycle, phase="stopping" if self.request_stop else "evaluation",
@@ -1386,11 +1577,45 @@ class MecoSupervisor:
             if self.evaluator is not None:
                 time.sleep(.5)
         if not self.request_stop:
-            self._start_next_evaluation()
+            if not (self.last_evaluation and self.last_evaluation.get("status") in
+                    ("failed", "failed_to_start")):
+                self._start_next_evaluation()
             while self.evaluator is not None:
                 self._poll_evaluator(cycle, statuses)
                 if self.evaluator is not None:
                     time.sleep(.5)
+
+    def _commit_scheduled_evaluation(self, item):
+        """Publish a verified report and durable history row before advancing."""
+        if item is None or item.get("status") != "verified":
+            raise ValueError("scheduled evaluation is not verified")
+        attempt = item["attempts"][-1]
+        artifact = attempt["artifact"]
+        source = Path(artifact["output_path"])
+        status_source = Path(artifact["status_path"])
+        final_output = self.evaluation_output / (
+            f"schedule-{item['index']:04d}-cycle-{item['cycle']:06d}.json")
+        final_status = Path(str(final_output) + ".status.json")
+        if source != final_output:
+            shutil.copyfile(source, final_output)
+        status = json.loads(status_source.read_text())
+        status["output_file"] = final_output.name
+        _atomic_json(final_status, status)
+        checkpoints = {row["track"]: Path(row["path"])
+            for row in item["checkpoint_snapshots"]}
+        completion = {"status": "complete", "return_code": 0,
+            "evaluation_id": artifact["evaluation_id"],
+            "protocol_id": item["schedule_case"]["protocol_id"],
+            "schedule_case": item["schedule_case"],
+            "schedule_index": item["index"],
+            "evaluation_schedule_sha256": self.evaluation_schedule_sha256}
+        result = _append_evaluation_history(self.evaluation_output,
+            cycle=item["cycle"], output=final_output, completion=completion,
+            checkpoints=checkpoints,
+            campaign_manifest_sha256=self.manifest_digest,
+            configuration_sha256=self.configuration_hash,
+            phase4_train_exposure=self.phase4_train_exposure)
+        self.evaluation_schedule_journal.complete(result["head_sha256"])
 
     def _mark_queued_stopped(self, statuses):
         for track in MECO_TRACKS:
@@ -1430,6 +1655,10 @@ class MecoSupervisor:
     def _claim_fresh_manifest_roots(self):
         if self.manifest is None:
             self.output.mkdir(parents=True, exist_ok=True)
+            return
+        if self.resume_campaign:
+            if not self.output.is_dir() or not self.evaluation_output.is_dir():
+                raise ValueError("manifest campaign resume roots are missing")
             return
         if self.output.exists() or self.evaluation_output.exists():
             raise ValueError("manifest campaign roots must remain absent until device leases are acquired")
@@ -1534,6 +1763,8 @@ class MecoSupervisor:
                     self.completed_cycles = cycle
                     self._queue_evaluation(cycle)
                     self._start_next_evaluation()
+            self._reconcile_completed_schedule_cycles()
+            self._start_next_evaluation()
             cycles_run = 0
             while not self.request_stop and (self.cycles == 0 or cycles_run < self.cycles):
                 self._observe_stop()
@@ -1569,7 +1800,10 @@ class MecoSupervisor:
             if self.request_stop:
                 self.pending_evaluations.clear()
                 self._mark_queued_stopped(statuses)
-            final_state = "stopped" if self.request_stop else "complete"
+            schedule_pending = (self.evaluation_schedule_journal is not None and
+                self.evaluation_schedule_journal.summary()["pending_count"] > 0)
+            final_state = ("stopped" if self.request_stop else
+                "evaluation_pending" if schedule_pending else "complete")
             self._publish(cycle=cycle, phase=final_state, statuses=statuses,
                           evaluation=evaluation)
             return {"status": final_state, "cycle": cycle,
@@ -1608,6 +1842,8 @@ def _parser():
     parser.add_argument("--campaign-manifest", help="source-bound isolated campaign manifest")
     parser.add_argument("--diagnostic-launch", action="store_true",
         help="explicitly start a fresh diagnostic campaign from a validated manifest; never qualifies")
+    parser.add_argument("--resume-campaign", action="store_true",
+        help="resume an existing campaign only after validating frozen manifest/runtime bindings")
     parser.add_argument("--evaluation-output", default=str(ROOT / "evaluations" / "meco-five"))
     parser.add_argument("--devices", required=True,
         help="comma-separated explicit indexed CUDA/ROCm devices; at most one trainer runs on each device")
@@ -1664,14 +1900,17 @@ def main(argv=None):
     import sys
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     if "--campaign-manifest" in raw_argv:
-        allowed = {"--campaign-manifest", "--diagnostic-launch"}
+        allowed = {"--campaign-manifest", "--diagnostic-launch", "--resume-campaign"}
         flags = [item for item in raw_argv if item.startswith("--")]
         if any(item not in allowed for item in flags):
             raise ValueError("manifest mode derives all configuration; CLI overrides are forbidden")
         parser = argparse.ArgumentParser(description="Launch a source-bound MECO diagnostic campaign")
         parser.add_argument("--campaign-manifest", required=True)
         parser.add_argument("--diagnostic-launch", action="store_true")
+        parser.add_argument("--resume-campaign", action="store_true")
         args = parser.parse_args(raw_argv)
+        if args.resume_campaign and not args.diagnostic_launch:
+            raise ValueError("--resume-campaign requires --diagnostic-launch")
         manifest_path = Path(args.campaign_manifest).expanduser().resolve()
         manifest = json.loads(manifest_path.read_text())
         from .meco_training_manifest import validate_campaign_manifest
@@ -1683,6 +1922,7 @@ def main(argv=None):
             "phase2_ready": validation["phase2_ready"], "phase2_complete": False,
             "qualification_eligible": False,
             "diagnostic_launch_requested": args.diagnostic_launch,
+            "resume_requested": args.resume_campaign,
             "launch_ready": False}
         if not args.diagnostic_launch:
             status["blocker"] = "pass --diagnostic-launch to start an isolated fresh diagnostic campaign"
@@ -1716,7 +1956,7 @@ def main(argv=None):
             evaluation_protocol=(None if ev["split"] == "diagnostic" else ev["path"]),
             evaluation_split=ev["split"],
             phase4_train_exposure=campaign.get("phase4_train_exposure", False),
-            campaign_manifest=manifest)
+            campaign_manifest=manifest, resume_campaign=args.resume_campaign)
         result = supervisor.run()
         print(json.dumps(result, indent=2))
         return result

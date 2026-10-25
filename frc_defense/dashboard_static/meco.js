@@ -40,10 +40,13 @@
       return `${track} ${status} ${hasKnownUpdates ? updates : "—"}${target === null || !hasKnownUpdates ? "" : `/${target}`}`;
     });
     const queueEval = data.queue?.evaluation || {};
+    const evalSchedule = data.queue?.evaluation_schedule || {};
     document.querySelector("#queue").textContent =
       `Queue file: ${data.queue?.state || "unavailable"} · workers ${data.queue?.worker_state || "unknown"} · ${queuePhase || "no phase"} · cycle ${data.queue?.cycle ?? "—"}`+
       `${activeLanes.length ? ` · workers ${activeLanes.join(", ")}` : ""}`+
-      ` · evaluator ${queueEval.status || "idle"}${queueEval.pid ? ` pid ${queueEval.pid}` : ""} (queue is separate from worker liveness)`;
+      ` · evaluator ${queueEval.status || "idle"}${queueEval.pid ? ` pid ${queueEval.pid}` : ""}`+
+      `${Number.isInteger(evalSchedule.schedule_count) ? ` · scheduled evals ${evalSchedule.completed_count ?? 0}/${evalSchedule.schedule_count} complete, ${evalSchedule.pending_count ?? 0} pending, ${evalSchedule.failed_count ?? 0} failed attempts` : ""}`+
+      ` (queue is separate from worker liveness)`;
     document.querySelector("#lane-queue").textContent = laneSummary.length
       ? `Tracks: ${laneSummary.join(" · ")}` : "No track queue data";
     document.querySelector("#policies").innerHTML = (data.policies || []).map(p => {

@@ -459,6 +459,8 @@ def _queue_state(root: Path, now: float, data_root: Path):
             "phase": payload.get("phase") if isinstance(payload.get("phase"), str) else None,
             "cycle": payload.get("cycle") if type(payload.get("cycle")) is int else None,
             "evaluation": payload.get("evaluation") if isinstance(payload.get("evaluation"), dict) else None,
+            "evaluation_schedule": payload.get("evaluation_schedule")
+                if isinstance(payload.get("evaluation_schedule"), dict) else None,
             "supervisor_id": payload.get("supervisor_id")
                 if isinstance(payload.get("supervisor_id"), str) else None,
             "error": error if not fresh else None}
