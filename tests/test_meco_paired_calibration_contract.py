@@ -258,6 +258,11 @@ def test_paired_campaign_binds_all_controls_and_complete_calibration_schedule(mo
             multi_model["control_binding_sha256"]
         assert shard["control_binding_sha256"] == q._canonical_sha256(
             shard["control_bindings"])
+        assert shard["controls"] == campaign["controls"]
+        assert shard["controls_sha256"] == q._canonical_sha256(campaign["controls"])
+        assert next(control for control in shard["controls"]
+            if control["control_id"] == "D2/multi_model_v1")["prediction_contract"] == \
+                multi_model["prediction_contract"]
     assert {unit["control_id"] for unit in units} == set(q.PAIRED_CALIBRATION_CONTROLS)
     assert len(units) == campaign["work_unit_count"] == 4 * 2 * 3
     assert {unit["tuple_id"] for unit in units} == {
@@ -300,6 +305,11 @@ def test_paired_campaign_rejects_schedule_or_binding_mutation(monkeypatch):
     altered = copy.deepcopy(campaign)
     altered["controls"][2]["prediction_contract"]["max_speed_mps"] = 999.
     with pytest.raises(ValueError, match="predictor identity"):
+        q.validate_paired_calibration_campaign(altered)
+
+    altered = copy.deepcopy(campaign)
+    altered["shards"][0].pop("controls")
+    with pytest.raises(ValueError, match="shard assignment"):
         q.validate_paired_calibration_campaign(altered)
 
 
@@ -466,6 +476,15 @@ def test_paired_control_bundle_is_individually_digest_bound_and_nonqualifying(mo
     assert bundle["final_shard_sha256"] == ["a" * 64, "b" * 64]
     assert bundle["official_match_points"] is None
     assert bundle["qualification_eligible"] is False
+    assert bundle["control"] == next(control for control in campaign["controls"]
+        if control["control_id"] == "D1/current")
+    assert q.validate_paired_calibration_control_bundle(campaign, bundle) == bundle
+    altered_bundle = copy.deepcopy(bundle)
+    altered_bundle["control"].pop("prediction_contract", None)
+    altered_bundle["bundle_id"] = q._canonical_sha256({key: value
+        for key, value in altered_bundle.items() if key != "bundle_id"})
+    with pytest.raises(ValueError, match="full control contract"):
+        q.validate_paired_calibration_control_bundle(campaign, altered_bundle)
 
     changed, changed_sha = q._build_paired_control_bundle(campaign,
         {**summary, "pair_count": 4}, ["a" * 64, "b" * 64])
@@ -565,20 +584,40 @@ def test_multimodel_contract_digest_survives_final_shard_and_merged_bundle(monke
             for control in campaign["controls"]
             if control["control_id"] == "D2/multi_model_v1")
         assert final["control_bindings"]["D2/multi_model_v1"] == expected_binding
+        assert final["controls"] == campaign["controls"]
+        assert final["controls_sha256"] == q._canonical_sha256(campaign["controls"])
         assert all(row["control_binding_sha256"] == expected_binding
             for row in final["completed_rows"]
             if row["control_id"] == "D2/multi_model_v1")
         finals.append(json.dumps(final, sort_keys=True, separators=(",", ":")).encode())
+
+    changed_final = json.loads(finals[0])
+    changed_control = next(control for control in changed_final["controls"]
+        if control["control_id"] == "D2/multi_model_v1")
+    changed_control.pop("prediction_contract")
+    changed_body = {key: value for key, value in changed_final.items()
+        if key != "final_shard_id"}
+    changed_final["final_shard_id"] = q._canonical_sha256(changed_body)
+    changed_finals = [json.dumps(changed_final, sort_keys=True,
+        separators=(",", ":")).encode(), *finals[1:]]
+    with pytest.raises(ValueError, match="identity or bindings changed"):
+        q.build_paired_calibration_merged_report(campaign, changed_finals,
+            replay_root=tmp_path, approval=approval)
 
     report = q.build_paired_calibration_merged_report(campaign, finals,
         replay_root=tmp_path, approval=approval)
     bundle = next(bundle for bundle in report["_control_bundle_artifacts"]
         if bundle["control_id"] == "D2/multi_model_v1")
     assert bundle["control_binding_sha256"] == expected_binding
+    assert bundle["control"] == next(control for control in campaign["controls"]
+        if control["control_id"] == "D2/multi_model_v1")
+    assert bundle["controls_sha256"] == q._canonical_sha256(campaign["controls"])
     expected_tuple_ids = sorted(row["tuple_id"] for row in campaign["calibration_tuples"])
     assert report["tuple_ids"] == expected_tuple_ids
     assert bundle["tuple_ids"] == expected_tuple_ids
     assert report["phase0_binding"] == campaign["phase0_binding"]
+    assert report["controls"] == campaign["controls"]
+    assert report["controls_sha256"] == q._canonical_sha256(campaign["controls"])
     assert all(final_artifact["phase0_binding_sha256"] ==
         q._canonical_sha256(campaign["phase0_binding"])
         for final_artifact in map(json.loads, finals))

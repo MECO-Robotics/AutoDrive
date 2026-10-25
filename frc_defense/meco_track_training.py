@@ -436,11 +436,16 @@ def _validate_paired_calibration_replay_binding(binding, worker, *, device,
     """Check replay bindings before permitting paired calibration export."""
     binding_fields = {"campaign_id", "shard_index", "shard_manifest_id",
         "work_unit_id", "work_unit", "pair_id", "control_id", "source_binding",
-        "baseline_freeze_sha256", "partition_sha256",
+        "phase0_binding", "phase0_binding_sha256", "tuple_id",
         "estimand_approval_sha256", "scoring", "control_binding",
         "control_binding_sha256"}
     worker_fields = {"worker_id", "device", "device_index", "device_model",
         "device_uuid", "backend", "backend_version", "torch_version"}
+    phase0_digest_fields = {
+        "capture_receipt_sha256", "baseline_freeze_sha256", "partition_sha256",
+        "tuple_registry_sha256", "assignment_table_sha256"}
+    phase0_fields = phase0_digest_fields | {
+        "bundle_sha256", "source_commit", "source_tree", "dependency_lock_sha256"}
     if not isinstance(binding, dict) or set(binding) != binding_fields:
         raise ValueError("paired calibration binding has an invalid schema")
     if not isinstance(worker, dict) or set(worker) != worker_fields:
@@ -448,14 +453,33 @@ def _validate_paired_calibration_replay_binding(binding, worker, *, device,
     if (type(binding["shard_index"]) is not int or binding["shard_index"] < 0
             or not all(isinstance(binding[key], str) and binding[key]
                 for key in ("campaign_id", "shard_manifest_id", "work_unit_id",
-                    "pair_id", "control_id", "baseline_freeze_sha256",
-                    "partition_sha256", "estimand_approval_sha256"))
+                    "pair_id", "control_id", "tuple_id",
+                    "phase0_binding_sha256", "estimand_approval_sha256"))
             or not isinstance(binding["work_unit"], dict)
             or _canonical_digest(binding["work_unit"]) != binding["work_unit_id"]
+            or not isinstance(binding["phase0_binding"], dict)
+            or set(binding["phase0_binding"]) != phase0_fields
+            or any(not isinstance(binding["phase0_binding"].get(key), str)
+                or len(binding["phase0_binding"][key]) != 64
+                or any(char not in "0123456789abcdef"
+                    for char in binding["phase0_binding"][key])
+                for key in phase0_digest_fields | {"bundle_sha256", "dependency_lock_sha256"})
+            or any(not isinstance(binding["phase0_binding"].get(key), str)
+                or len(binding["phase0_binding"][key]) != 40
+                or any(char not in "0123456789abcdef"
+                    for char in binding["phase0_binding"][key])
+                for key in ("source_commit", "source_tree"))
+            or _canonical_digest(binding["phase0_binding"]) != binding["phase0_binding_sha256"]
+            or binding["work_unit"].get("tuple_id") != binding["tuple_id"]
+            or binding["tuple_id"] != _canonical_digest({key: binding["work_unit"].get(key)
+                for key in ("scenario_id", "case_id", "category", "defender_family",
+                    "layout_id", "start_condition", "sensor_profile", "seed",
+                    "repetition", "evaluation_phase")})
             or binding["work_unit"].get("pair_id") != binding["pair_id"]
             or binding["work_unit"].get("control_id") != binding["control_id"]
             or binding["work_unit"].get("seed") != seed
             or binding["work_unit"].get("split") != split
+            or binding["work_unit"].get("evaluation_phase") != split
             or binding["work_unit"].get("scenario_id") != scenario_id
             or not isinstance(binding["scoring"], dict)
             or binding["scoring"].get("replay_contract_schema") !=
@@ -542,8 +566,12 @@ def _validate_paired_calibration_replay_bindings(bindings, seeds, worker, *,
                 values[0]["work_unit"].get("scenario_id")
             or binding["work_unit"].get("category") !=
                 values[0]["work_unit"].get("category")
+            or binding["work_unit"].get("case_id") !=
+                values[0]["work_unit"].get("case_id")
             or binding["work_unit"].get("repetition") !=
                 values[0]["work_unit"].get("repetition")
+            or binding["work_unit"].get("evaluation_phase") !=
+                values[0]["work_unit"].get("evaluation_phase")
             or any(binding["work_unit"].get(key) != values[0]["work_unit"].get(key)
                 for key in ("layout_id", "defender_family", "start_condition", "sensor_profile"))
             for binding in values[1:]):
@@ -553,13 +581,20 @@ def _validate_paired_calibration_replay_bindings(bindings, seeds, worker, *,
 def _validate_paired_calibration_campaign_inputs(campaign, shard_index, bindings,
         worker, seeds, *, device, repo_root, configuration_artifacts, policy,
         calibration_control_policy, candidate_k, route_cost_weight,
-        prediction_mode):
+        prediction_mode, phase0_bundle):
     """Resolve all replay claims against the frozen campaign before simulation."""
     from . import meco_qualification as qualification
 
     gate = qualification.validate_paired_calibration_gate_artifacts(campaign,
-        repo_root=repo_root, configuration_artifacts=configuration_artifacts)
+        repo_root=repo_root, phase0_bundle=phase0_bundle,
+        configuration_artifacts=configuration_artifacts)
     shard = qualification._paired_shard_for_index(campaign, shard_index)
+    phase0_sha256 = qualification._canonical_sha256(campaign["phase0_binding"])
+    if (gate.get("phase0_binding") != campaign["phase0_binding"]
+            or shard.get("phase0_binding_sha256") != phase0_sha256
+            or shard.get("tuple_ids") != sorted({unit["tuple_id"]
+                for unit in shard["work_units"]})):
+        raise ValueError("paired calibration Phase 0 digest or tuple assignment changed")
     if not isinstance(bindings, dict) or not bindings:
         raise ValueError("paired calibration campaign requires per-seed bindings")
     first_binding = next(iter(bindings.values()))
@@ -571,7 +606,8 @@ def _validate_paired_calibration_campaign_inputs(campaign, shard_index, bindings
             or device != expected_worker["device"]):
         raise ValueError("paired calibration worker identity differs from exact shard assignment")
     first_unit = first_binding.get("work_unit", {})
-    group_fields = ("scenario_id", "category", "split", "repetition",
+    group_fields = ("scenario_id", "case_id", "category", "split", "repetition",
+        "evaluation_phase",
         "paired_control_id", "layout_id", "defender_family", "start_condition",
         "sensor_profile")
     units = {unit["seed"]: unit for unit in shard["work_units"]
@@ -2682,6 +2718,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                   paired_calibration_worker_identity: dict | None = None,
                   paired_calibration_campaign: dict | None = None,
                   paired_calibration_shard_index: int | None = None,
+                  paired_calibration_phase0_bundle: dict | None = None,
                   paired_calibration_configuration_artifacts: dict | None = None):
     """Paired seeded simulator evaluation for D0/D1/D2 and five checkpoints."""
     if type(episodes) is not int or episodes < 1:
@@ -2715,10 +2752,12 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
     paired_replay_requested = any(value is not None for value in (
         paired_calibration_bindings, paired_calibration_worker_identity,
         paired_calibration_campaign, paired_calibration_shard_index,
+        paired_calibration_phase0_bundle,
         paired_calibration_configuration_artifacts))
     if paired_replay_requested and any(value is None for value in (
             paired_calibration_bindings, paired_calibration_worker_identity,
             paired_calibration_campaign, paired_calibration_shard_index,
+            paired_calibration_phase0_bundle,
             paired_calibration_configuration_artifacts)):
         raise ValueError("paired calibration replay requires trusted campaign, shard, artifact, worker, and per-seed bindings")
     if paired_replay_requested and (split != "calibration" or
@@ -2742,7 +2781,8 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
             policy=trusted_policy, calibration_control_policy=calibration_control_policy,
             candidate_k=candidate_k_override,
             route_cost_weight=calibration_route_cost_points_per_second,
-            prediction_mode=trusted_mode)
+            prediction_mode=trusted_mode,
+            phase0_bundle=paired_calibration_phase0_bundle)
     if simulated_score_estimand is not None:
         if (replay_output_dir is None or
                 (replay_selection is not None and not paired_replay_requested)

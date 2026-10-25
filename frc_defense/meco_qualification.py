@@ -1922,6 +1922,10 @@ def _paired_shard_control_bindings(controls):
         for control in controls}
 
 
+def _paired_control_contracts_sha256(controls):
+    return _canonical_sha256(controls)
+
+
 def _validate_effective_phase0_bundle(bundle, repo_root):
     """Narrow dependency boundary for the separately reviewed effective-freeze API."""
     try:
@@ -2162,6 +2166,8 @@ def build_paired_calibration_campaign(*, shard_count, source_binding,
             "control_binding_sha256": _canonical_sha256(
                 _paired_shard_control_bindings(controls)),
             "control_bindings": _paired_shard_control_bindings(controls),
+            "controls": controls,
+            "controls_sha256": _paired_control_contracts_sha256(controls),
             "work_units": assigned}
         shards.append({**shard_body, "manifest_id": _canonical_sha256(shard_body)})
     campaign = {**body, "campaign_id": campaign_identity, "shards": shards}
@@ -2260,7 +2266,10 @@ def validate_paired_calibration_campaign(campaign):
                 or shard.get("work_units") != expected_units
                 or shard.get("control_bindings") != expected_control_bindings
                 or shard.get("control_binding_sha256")
-                    != _canonical_sha256(expected_control_bindings)):
+                    != _canonical_sha256(expected_control_bindings)
+                or shard.get("controls") != campaign["controls"]
+                or shard.get("controls_sha256")
+                    != _paired_control_contracts_sha256(campaign["controls"])):
             raise ValueError("paired calibration shard assignment is invalid")
         worker = workers[index % len(workers)]
         body = {key: value for key, value in shard.items() if key != "manifest_id"}
@@ -2468,6 +2477,7 @@ def run_paired_calibration_shard(campaign, shard_index, *, repo_root,
                 paired_calibration_worker_identity=worker,
                 paired_calibration_campaign=campaign,
                 paired_calibration_shard_index=shard_index,
+                paired_calibration_phase0_bundle=phase0_bundle,
                 paired_calibration_configuration_artifacts=configuration_artifacts)
             records = result.get("records") if isinstance(result, dict) else None
             selected_records = {}
@@ -2625,6 +2635,8 @@ def build_paired_calibration_final_shard(campaign, shard_index, progress, *,
         "scoring": campaign["scoring"],
         "control_bindings": shard["control_bindings"],
         "control_binding_sha256": shard["control_binding_sha256"],
+        "controls": campaign["controls"],
+        "controls_sha256": shard["controls_sha256"],
         "progress_id": progress["progress_id"],
         "release_observation": release_observation,
         "release_observation_sha256": release_observation_sha256,
@@ -2763,15 +2775,52 @@ def _build_paired_control_bundle(campaign, summary, final_shard_sha256):
         "phase0_binding_sha256": _canonical_sha256(campaign["phase0_binding"]),
         "tuple_ids": sorted({row["tuple_id"] for row in campaign["calibration_tuples"]}),
         "control_id": summary["control_id"],
+        "control": control,
+        "controls_sha256": _paired_control_contracts_sha256(campaign["controls"]),
         "control_binding_sha256": control["control_binding_sha256"],
         "final_shard_sha256": list(final_shard_sha256),
         "summary": summary, "official_match_points": None,
         "qualification_eligible": False,
         "interpretation": "descriptive simulated outcome calibration; not official match points, qualification, or margin approval"}
     bundle = {**body, "bundle_id": _canonical_sha256(body)}
+    validate_paired_calibration_control_bundle(campaign, bundle)
     raw = json.dumps(bundle, sort_keys=True, separators=(",", ":"),
         allow_nan=False).encode("utf-8")
     return bundle, hashlib.sha256(raw).hexdigest()
+
+
+def validate_paired_calibration_control_bundle(campaign, bundle):
+    """Verify a published per-control bundle retains its complete frozen control."""
+    if (not isinstance(campaign, dict) or not isinstance(bundle, dict)
+            or not isinstance(campaign.get("controls"), list)
+            or not isinstance(campaign.get("calibration_tuples"), list)
+            or not isinstance(campaign.get("phase0_binding"), dict)):
+        raise ValueError("paired control bundle is malformed")
+    control = next((row for row in campaign["controls"]
+        if row["control_id"] == bundle.get("control_id")), None)
+    body = {key: value for key, value in bundle.items() if key != "bundle_id"}
+    expected_fields = {"schema", "campaign_id", "phase0_binding",
+        "phase0_binding_sha256", "tuple_ids", "control_id", "control",
+        "controls_sha256", "control_binding_sha256", "final_shard_sha256",
+        "summary", "official_match_points", "qualification_eligible",
+        "interpretation", "bundle_id"}
+    if (control is None or set(bundle) != expected_fields
+            or bundle.get("controls_sha256") != _paired_control_contracts_sha256(campaign["controls"])
+            or control.get("control_binding_sha256") != _canonical_sha256({key: value
+                for key, value in control.items() if key != "control_binding_sha256"})
+            or bundle.get("schema") != "meco-paired-calibration-control-bundle-v2"
+            or bundle.get("campaign_id") != campaign["campaign_id"]
+            or bundle.get("phase0_binding") != campaign["phase0_binding"]
+            or bundle.get("phase0_binding_sha256") != _canonical_sha256(campaign["phase0_binding"])
+            or bundle.get("tuple_ids") != sorted(row["tuple_id"] for row in campaign["calibration_tuples"])
+            or bundle.get("control") != control
+            or bundle.get("controls_sha256") != _paired_control_contracts_sha256(campaign["controls"])
+            or bundle.get("control_binding_sha256") != control["control_binding_sha256"]
+            or bundle.get("official_match_points") is not None
+            or bundle.get("qualification_eligible") is not False
+            or bundle.get("bundle_id") != _canonical_sha256(body)):
+        raise ValueError("paired control bundle identity or full control contract changed")
+    return bundle
 
 
 def build_paired_calibration_merged_report(campaign, final_shard_raws, *,
@@ -2806,7 +2855,7 @@ def build_paired_calibration_merged_report(campaign, final_shard_raws, *,
             "shard_manifest_id", "worker_id", "worker_assignment_sha256",
             "source_binding", "phase0_binding", "phase0_binding_sha256", "tuple_ids",
             "estimand_approval_sha256", "scoring", "control_bindings",
-            "control_binding_sha256", "progress_id",
+            "control_binding_sha256", "controls", "controls_sha256", "progress_id",
             "release_observation", "release_observation_sha256",
             "completed_work_unit_ids", "completed_rows", "complete", "final_shard_id"}
         from .meco_external_release_gate import validate_persisted_release_observation_record
@@ -2830,6 +2879,9 @@ def build_paired_calibration_merged_report(campaign, final_shard_raws, *,
                 or artifact.get("scoring") != campaign["scoring"]
                 or artifact.get("control_bindings") != shard["control_bindings"]
                 or artifact.get("control_binding_sha256") != shard["control_binding_sha256"]
+                or artifact.get("controls") != campaign["controls"]
+                or artifact.get("controls_sha256")
+                    != _paired_control_contracts_sha256(campaign["controls"])
                 or artifact.get("release_observation_sha256") != release_observation_sha256
                 or artifact.get("complete") is not True):
             raise ValueError("paired calibration final shard identity or bindings changed")
@@ -2884,6 +2936,8 @@ def build_paired_calibration_merged_report(campaign, final_shard_raws, *,
         "tuple_ids": sorted({unit["tuple_id"] for unit in expected_units}),
         "control_binding_sha256": _canonical_sha256(
             _paired_shard_control_bindings(campaign["controls"])),
+        "controls": campaign["controls"],
+        "controls_sha256": _paired_control_contracts_sha256(campaign["controls"]),
         "final_shard_sha256": [final_hashes[index]
             for index in range(len(campaign["shards"]))],
         "work_unit_count": len(all_rows), "control_bundles": bundle_refs,
