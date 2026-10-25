@@ -560,7 +560,7 @@ def _discover_effective_runtime_identity(device, repo_root=None):
     """Collect runtime identity from loaded Python/Torch and the selected accelerator."""
     import importlib.metadata
     import platform
-    import tomllib
+    import re
     from pathlib import Path
     selected = torch.device(device)
     if selected.type != 'cuda' or selected.index is None:
@@ -578,12 +578,22 @@ def _discover_effective_runtime_identity(device, repo_root=None):
         'frc_defense/tensor_physics.py')
     simulator_hashes = {path: hashlib.sha256((root / path).read_bytes()).hexdigest()
         for path in simulator_paths}
-    with (root / 'pyproject.toml').open('rb') as stream:
-        project = tomllib.load(stream)
+    pyproject_bytes = (root / 'pyproject.toml').read_bytes()
+    project_match = re.search(r"^version\s*=\s*['\"]([^'\"]+)['\"]\s*$",
+        pyproject_bytes.decode('utf-8'), re.MULTILINE)
+    if project_match is None:
+        raise ValueError('effective capture cannot resolve the simulator project version')
+    simulator_version = project_match.group(1)
+    dependency_specs = {'pyproject.toml': hashlib.sha256(pyproject_bytes).hexdigest()}
+    requirements_path = root / 'requirements-rocm-gfx900.txt'
+    if requirements_path.is_file():
+        dependency_specs['requirements-rocm-gfx900.txt'] = hashlib.sha256(
+            requirements_path.read_bytes()).hexdigest()
     installed = sorted((distribution.metadata.get('Name', '').lower(), distribution.version)
         for distribution in importlib.metadata.distributions()
         if distribution.metadata.get('Name'))
-    dependency_digest = hashlib.sha256(json.dumps(installed, separators=(',', ':'))
+    dependency_digest = hashlib.sha256(json.dumps({"spec_artifacts": dependency_specs,
+        "installed_distributions": installed}, sort_keys=True, separators=(',', ':'))
         .encode('utf-8')).hexdigest()
     if torch.version.hip:
         backend, backend_version = 'ROCm', str(torch.version.hip)
@@ -592,7 +602,7 @@ def _discover_effective_runtime_identity(device, repo_root=None):
     else:
         raise ValueError('effective capture requires an initialized CUDA/ROCm runtime')
     return {'simulator_id': 'autodrive.TensorThreeVsThreeEnv',
-        'simulator_version': str(project['project']['version']),
+        'simulator_version': simulator_version,
         'simulator_build_sha256': hashlib.sha256(json.dumps(simulator_hashes,
             sort_keys=True, separators=(',', ':')).encode('utf-8')).hexdigest(),
         'python_version': platform.python_version(), 'torch_version': str(torch.__version__),

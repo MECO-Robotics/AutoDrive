@@ -22,6 +22,7 @@ from frc_defense.meco_baseline_freeze import (
     validate_baseline_freeze,
     validate_effective_capture_receipt,
     validate_effective_baseline_freeze,
+    validate_effective_phase0_bundle,
     validate_partition_contract,
     validate_tuple_partition_materialization,
 )
@@ -97,6 +98,8 @@ def _init_repo(root: Path) -> None:
         path = root / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(f"synthetic source fixture: {relative}\n")
+    (root / "pyproject.toml").write_text('[project]\nversion = "0.1.0"\n')
+    (root / "requirements-rocm-gfx900.txt").write_text('torch==fixture\n')
     subprocess.run(["git", "init", "-q", str(root)], check=True)
     subprocess.run(["git", "-C", str(root), "config", "user.name", "Fixture"], check=True)
     subprocess.run(["git", "-C", str(root), "config", "user.email", "fixture@example.invalid"], check=True)
@@ -203,9 +206,11 @@ def _effective_runtime_identity():
 @pytest.fixture
 def stub_effective_device_probe(monkeypatch):
     from frc_defense import curriculum_scenarios
+    import frc_defense.meco_baseline_freeze as freeze_api
     monkeypatch.setattr(curriculum_scenarios, "_discover_effective_runtime_identity",
         lambda device, _root: {**_effective_runtime_identity(),
             "device_index": int(str(device).rsplit(":", 1)[1])})
+    monkeypatch.setattr(freeze_api, "_validate_factory_module_origins", lambda *_args: None)
 
 
 def _registry_and_assignment():
@@ -437,6 +442,13 @@ def test_effective_receipt_and_freeze_bind_factory_snapshot_bytes_and_source(tmp
     freeze = compile_effective_baseline_freeze(receipt, tmp_path)
     assert freeze["qualification_eligible"] is False
     assert validate_effective_baseline_freeze(freeze, receipt, tmp_path) == freeze
+    registry, assignments = _registry_and_assignment()
+    partition = compile_tuple_partition_materialization(
+        freeze_sha256=freeze["freeze_sha256"], registry=registry,
+        assignment_table=assignments)
+    with pytest.raises(ValueError, match="pinned by a trusted digest"):
+        validate_effective_phase0_bundle({"capture_receipt": receipt,
+            "baseline_freeze": freeze, "partition_materialization": partition}, tmp_path)
 
     changed_receipt = __import__("copy").deepcopy(receipt)
     changed_receipt["fields"]["robot_dynamics"]["value"]["forged"] = True
@@ -539,6 +551,13 @@ def test_effective_runtime_identity_is_discovered_without_caller_assertion(tmp_p
     assert receipt["runtime"] == _effective_runtime_identity()
 
 
+def test_factory_and_simulator_modules_must_match_capture_source_root(tmp_path):
+    import frc_defense.meco_baseline_freeze as freeze_api
+    from frc_defense.curriculum_scenarios import make_curriculum_env
+    with pytest.raises(ValueError, match="captured source root"):
+        freeze_api._validate_factory_module_origins(make_curriculum_env, tmp_path)
+
+
 def test_tuple_partition_closes_registry_for_five_identical_tracks():
     registry, assignments = _registry_and_assignment()
     freeze_sha = hashlib.sha256(b"fixture freeze").hexdigest()
@@ -547,19 +566,51 @@ def test_tuple_partition_closes_registry_for_five_identical_tracks():
     assert set(materialized["partitions"]) == set(PARTITION_NAMES)
     assert materialized["final_test_access_ledger"]["status"] == "locked"
     assert materialized["final_test_access_ledger"]["outcomes_read"] is False
+    assert materialized["allocation_authorized"] is False
     assert validate_tuple_partition_materialization(materialized,
         freeze_sha256=freeze_sha, registry=registry, assignment_table=assignments) == materialized
 
 
-def test_final_test_authorization_transition_is_single_use_and_does_not_read_outcomes():
+def test_tuple_partition_requires_a_pinned_assignment_artifact_for_authorization(monkeypatch):
+    import base64
+    import frc_defense.meco_baseline_freeze as freeze_api
+    registry, assignments = _registry_and_assignment()
+    body = {key: assignments[key] for key in
+        ("schema", "assignments", "model_tracks", "evaluation_budget")}
+    content = __import__("json").dumps(body, sort_keys=True,
+        separators=(",", ":")).encode()
+    digest = hashlib.sha256(content).hexdigest()
+    assignments["allocation_provenance"]["authorization_artifact"] = {
+        "content_base64": base64.b64encode(content).decode(), "content_sha256": digest}
+    monkeypatch.setattr(freeze_api, "TRUSTED_ALLOCATION_ARTIFACT_SHA256",
+        frozenset({digest}))
+    partition = compile_tuple_partition_materialization(
+        freeze_sha256=hashlib.sha256(b"fixture freeze").hexdigest(),
+        registry=registry, assignment_table=assignments)
+    assert partition["allocation_authorized"] is True
+    assert partition["allocation_artifact_sha256"] == digest
+
+
+def test_final_test_authorization_transition_is_single_use_and_does_not_read_outcomes(monkeypatch):
+    import base64
+    import frc_defense.meco_baseline_freeze as freeze_api
     registry, assignments = _registry_and_assignment()
     freeze_sha = hashlib.sha256(b"fixture freeze").hexdigest()
     partition = compile_tuple_partition_materialization(freeze_sha256=freeze_sha,
         registry=registry, assignment_table=assignments)
     ledger = dict(partition["final_test_access_ledger"])
-    approval_sha = hashlib.sha256(b"approved authorization fixture").hexdigest()
+    approval = {"schema": "meco-final-test-human-approval-v1",
+        "partition_sha256": partition["partition_sha256"], "authorized_by": "reviewer",
+        "purpose": "final_evaluation", "issued_at_utc": "2026-10-25T00:00:00Z"}
+    approval_bytes = __import__("json").dumps(approval, sort_keys=True,
+        separators=(",", ":")).encode()
+    approval_sha = hashlib.sha256(approval_bytes).hexdigest()
+    monkeypatch.setattr(freeze_api, "TRUSTED_FINAL_TEST_APPROVAL_SHA256",
+        frozenset({approval_sha}))
     authorization = {"schema": "meco-final-test-single-use-authorization-v1",
         "partition_sha256": partition["partition_sha256"],
+        "approval_artifact": {"content_base64": base64.b64encode(approval_bytes).decode(),
+            "content_sha256": approval_sha},
         "approval_artifact_sha256": approval_sha, "authorized_by": "reviewer",
         "purpose": "final_evaluation", "issued_at_utc": "2026-10-25T00:00:00Z"}
     authorization["authorization_sha256"] = canonical_sha256(authorization)
@@ -574,6 +625,24 @@ def test_final_test_authorization_transition_is_single_use_and_does_not_read_out
         consume_final_test_authorization(partition, prior_ledger_state=state,
             authorization=authorization, consumer_id="evaluation-run-2",
             consumed_at_utc="2026-10-25T00:02:00Z")
+
+
+def test_final_test_authorization_rejects_self_asserted_digest():
+    registry, assignments = _registry_and_assignment()
+    partition = compile_tuple_partition_materialization(
+        freeze_sha256=hashlib.sha256(b"freeze").hexdigest(),
+        registry=registry, assignment_table=assignments)
+    authorization = {"schema": "meco-final-test-single-use-authorization-v1",
+        "partition_sha256": partition["partition_sha256"],
+        "approval_artifact_sha256": hashlib.sha256(b"untrusted").hexdigest(),
+        "authorized_by": "self-asserted", "purpose": "final_evaluation",
+        "issued_at_utc": "2026-10-25T00:00:00Z"}
+    authorization["authorization_sha256"] = canonical_sha256(authorization)
+    with pytest.raises(ValueError, match="authenticated approval content bytes"):
+        consume_final_test_authorization(partition,
+            prior_ledger_state=partition["final_test_access_ledger"],
+            authorization=authorization, consumer_id="evaluation-run",
+            consumed_at_utc="2026-10-25T00:01:00Z")
 
 
 @pytest.mark.parametrize("mutation", ["missing_tuple", "track_membership", "axis_leak", "exclusion_reason"])

@@ -20,7 +20,9 @@ qualification gate.
 """
 from __future__ import annotations
 
+import base64
 import hashlib
+import importlib
 import json
 import re
 import subprocess
@@ -33,6 +35,11 @@ from typing import Any, Mapping
 
 BASELINE_FREEZE_SCHEMA = "meco-baseline-freeze-v2"
 PARTITION_CONTRACT_SCHEMA = "meco-heldout-partitions-v1"
+
+# Approval is unavailable until an independently reviewed content digest is
+# pinned here. Empty sets intentionally keep materialized drafts non-authorizing.
+TRUSTED_ALLOCATION_ARTIFACT_SHA256: frozenset[str] = frozenset()
+TRUSTED_FINAL_TEST_APPROVAL_SHA256: frozenset[str] = frozenset()
 
 # Every field is an effective value to be extracted from a real campaign
 # instance. Source hashes identify the code that defines or consumes it; they
@@ -514,6 +521,49 @@ def _strict_digest(value: Any, name: str) -> str:
     return value
 
 
+def _validate_pinned_json_artifact(reference: Mapping[str, Any], *,
+        trusted_digests: frozenset[str], label: str) -> tuple[dict[str, Any], str]:
+    if not isinstance(reference, Mapping) or set(reference) != {
+            "content_base64", "content_sha256"}:
+        raise ValueError(f"{label} must include exact content bytes and digest")
+    try:
+        content = base64.b64decode(reference["content_base64"], validate=True)
+        def reject_duplicate_pairs(pairs):
+            result = {}
+            for key, value in pairs:
+                if key in result:
+                    raise ValueError(f"{label} contains duplicate JSON keys")
+                result[key] = value
+            return result
+        parsed = json.loads(content, object_pairs_hook=reject_duplicate_pairs)
+    except (ValueError, TypeError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"{label} content is not valid canonical JSON") from exc
+    if not isinstance(parsed, dict) or _canonical_json_bytes(parsed) != content:
+        raise ValueError(f"{label} content is not canonical JSON")
+    digest = hashlib.sha256(content).hexdigest()
+    if digest != reference["content_sha256"]:
+        raise ValueError(f"{label} content digest mismatch")
+    if digest not in trusted_digests:
+        raise ValueError(f"{label} is not authenticated by a pinned trusted digest")
+    return parsed, digest
+
+
+def _validate_factory_module_origins(factory: Any, repo_root: str | Path) -> None:
+    root = Path(repo_root).resolve()
+    expected_factory = (root / "frc_defense/curriculum_scenarios.py").resolve()
+    filename = Path(factory.__code__.co_filename).resolve()
+    module_path = Path(importlib.import_module(factory.__module__).__file__).resolve()
+    if filename != expected_factory or module_path != expected_factory:
+        raise ValueError("loaded curriculum factory does not originate from the captured source root")
+    for module_name, relative_path in (
+            ("frc_defense.tensor_3v3", "frc_defense/tensor_3v3.py"),
+            ("frc_defense.tensor_sim", "frc_defense/tensor_sim.py"),
+            ("frc_defense.tensor_physics", "frc_defense/tensor_physics.py")):
+        module = importlib.import_module(module_name)
+        if Path(module.__file__).resolve() != (root / relative_path).resolve():
+            raise ValueError(f"loaded simulator module {module_name} differs from captured source root")
+
+
 def _strict_utc_timestamp(value: Any, name: str) -> str:
     if not isinstance(value, str) or not value.endswith("Z"):
         raise ValueError(f"{name} must be an explicit UTC timestamp")
@@ -604,6 +654,7 @@ def compile_effective_capture_receipt(
         "evaluation_protocol_content_base64", "evaluation_protocol_content_sha256"}
     if set(factory_arguments) - public_arguments or not required_arguments <= set(factory_arguments):
         raise ValueError("effective capture must bind every explicit curriculum factory setting")
+    _validate_factory_module_origins(make_curriculum_env, root)
     effective_snapshot = make_curriculum_env(**dict(factory_arguments),
         _effective_snapshot_only=True, _effective_snapshot_runtime_identity=runtime_identity,
         _effective_snapshot_repo_root=root,
@@ -712,6 +763,7 @@ def validate_effective_capture_receipt(receipt: Mapping[str, Any], repo_root: st
     # Re-run only the factory's snapshot path from the captured public arguments.
     # It returns before environment construction; the runtime probe is read-only.
     from .curriculum_scenarios import make_curriculum_env
+    _validate_factory_module_origins(make_curriculum_env, repo_root)
     reproduced_snapshot = make_curriculum_env(**dict(snapshot["factory_arguments"]),
         _effective_snapshot_only=True,
         _effective_snapshot_runtime_identity=snapshot["runtime_identity"],
@@ -814,10 +866,20 @@ def validate_effective_phase0_bundle(bundle: Mapping[str, Any], repo_root: str |
     partition = bundle["partition_materialization"]
     if not isinstance(partition, Mapping):
         raise ValueError("Phase 0 partition materialization is missing")
+    normalized_registry = partition.get("tuple_registry")
+    if not isinstance(normalized_registry, Mapping):
+        raise ValueError("Phase 0 tuple registry is missing")
+    raw_registry = {"schema": normalized_registry.get("schema"),
+        "tuples": [{key: item[key] for key in (*TUPLE_FIELDS, "eligible")}
+            | ({"exclusion_reason": item["exclusion_reason"]}
+                if item.get("eligible") is False else {})
+            for item in normalized_registry.get("tuples", [])]}
     validate_tuple_partition_materialization(partition,
         freeze_sha256=freeze["freeze_sha256"],
-        registry=partition.get("tuple_registry"),
+        registry=raw_registry,
         assignment_table=partition.get("assignment_table"))
+    if partition.get("allocation_authorized") is not True:
+        raise ValueError("Phase 0 intake requires a preregistration artifact pinned by a trusted digest")
     return {"capture_receipt_sha256": receipt["receipt_sha256"],
         "baseline_freeze_sha256": freeze["freeze_sha256"],
         "partition_sha256": partition["partition_sha256"],
@@ -907,13 +969,26 @@ def compile_tuple_partition_materialization(*, freeze_sha256: str,
                 or item["tuple_ids"] != sorted(eligible_ids) or item["evaluation_budget"] != budget):
             raise ValueError(f"{track} partition membership and budget must match all tracks exactly")
     provenance = assignment_table["allocation_provenance"]
-    if (not isinstance(provenance, Mapping) or set(provenance) != {
-            "authored_by", "authored_at_utc", "source_sha256", "outcomes_accessed"}
+    provenance_keys = {"authored_by", "authored_at_utc", "source_sha256", "outcomes_accessed"}
+    if (not isinstance(provenance, Mapping) or set(provenance) not in (
+            provenance_keys, provenance_keys | {"authorization_artifact"})
             or not isinstance(provenance["authored_by"], str) or not provenance["authored_by"].strip()
             or not isinstance(provenance["authored_at_utc"], str)
             or provenance["outcomes_accessed"] is not False):
         raise ValueError("allocation must be explicitly preregistered before outcomes are accessed")
     _strict_digest(provenance["source_sha256"], "assignment source digest")
+    allocation_authorized = False
+    allocation_artifact_sha256 = None
+    if "authorization_artifact" in provenance:
+        artifact_body, allocation_artifact_sha256 = _validate_pinned_json_artifact(
+            provenance["authorization_artifact"],
+            trusted_digests=TRUSTED_ALLOCATION_ARTIFACT_SHA256,
+            label="predeclared tuple assignment artifact")
+        expected_artifact_body = {key: assignment_table[key]
+            for key in ("schema", "assignments", "model_tracks", "evaluation_budget")}
+        if artifact_body != expected_artifact_body:
+            raise ValueError("authenticated assignment artifact differs from the materialized table")
+        allocation_authorized = True
     uses = {name: sorted(values) for name, values in PARTITION_WORKFLOWS.items()}
     registry_sha = canonical_sha256(normalized_registry)
     assignment_sha = canonical_sha256(dict(assignment_table))
@@ -930,6 +1005,8 @@ def compile_tuple_partition_materialization(*, freeze_sha256: str,
         "assignment_table": dict(assignment_table), "assignment_table_sha256": assignment_sha,
         "partitions": partitions, "model_tracks": dict(tracks),
         "evaluation_budget": dict(budget),
+        "allocation_authorized": allocation_authorized,
+        "allocation_artifact_sha256": allocation_artifact_sha256,
         "final_test_access_ledger": {"schema": "meco-final-test-access-ledger-v1",
             "authorization_schema": "meco-final-test-single-use-authorization-v1",
             "max_authorizations": 1, "authorization_count": 0,
@@ -1006,13 +1083,26 @@ def consume_final_test_authorization(partition_contract: Mapping[str, Any], *,
     if prior.get("authorization_count") != 0:
         raise ValueError("final-test authorization is single-use")
     required = {"schema", "partition_sha256", "approval_artifact_sha256",
+        "approval_artifact",
         "authorized_by", "purpose", "issued_at_utc", "authorization_sha256"}
     if set(authorization) != required or authorization.get("schema") != \
             "meco-final-test-single-use-authorization-v1":
-        raise ValueError("final-test authorization schema is invalid")
+        raise ValueError("final-test authorization schema must include authenticated approval content bytes")
     unsigned_authorization = {key: value for key, value in authorization.items()
         if key != "authorization_sha256"}
-    _strict_digest(authorization["approval_artifact_sha256"], "approval artifact digest")
+    approval, approval_digest = _validate_pinned_json_artifact(
+        authorization["approval_artifact"],
+        trusted_digests=TRUSTED_FINAL_TEST_APPROVAL_SHA256,
+        label="human final-test approval artifact")
+    if (set(approval) != {"schema", "partition_sha256", "authorized_by", "purpose",
+            "issued_at_utc"}
+            or approval.get("schema") != "meco-final-test-human-approval-v1"
+            or authorization["approval_artifact_sha256"] != approval_digest
+            or authorization["partition_sha256"] != approval.get("partition_sha256")
+            or authorization["authorized_by"] != approval.get("authorized_by")
+            or authorization["purpose"] != approval.get("purpose")
+            or authorization["issued_at_utc"] != approval.get("issued_at_utc")):
+        raise ValueError("human approval artifact does not authenticate the final-test authorization")
     if (authorization["partition_sha256"] != partition_sha
             or authorization["purpose"] != "final_evaluation"
             or not isinstance(authorization["authorized_by"], str)
