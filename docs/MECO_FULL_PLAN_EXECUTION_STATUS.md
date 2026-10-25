@@ -29,7 +29,10 @@ the checkout byte-for-byte. The local ledger SHA-256 matches the dashboard API
 pin. This is provenance/serving evidence only; no replay or simulator behavior
 result is claimed. See
 [`phase4-runtime-status-ledger-dashboard-currentness-20261025.md`](implementation-provenance/phase4-runtime-status-ledger-dashboard-currentness-20261025.md)
-for response, digest, asset, and service details.
+for response, digest, asset, and service details. The complete evidence note
+was committed and pushed at
+`612d5bc18bd371c8ddf6a15e147f489bd13e4fcb`; it is outside the digest-pinned
+ledger.
 
 ## Dashboard refreshed for reviewed three-pass provenance — 2026-10-25
 
