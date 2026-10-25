@@ -223,6 +223,27 @@ def test_empty_curriculum_has_registry_and_no_runs(tmp_path):
     assert data["scenarios"]["pickup_simple"]["required_categories"] == ["single", "cluster"]
 
 
+def test_curriculum_errors_use_bounded_queue_or_evidence_projection(tmp_path, monkeypatch):
+    (tmp_path / "orchestration.json").write_text("{}")
+    monkeypatch.setattr("scripts.report_curriculum_progress.summarize", lambda root: {
+        "runs": [], "queue_lanes": [], "queue": None,
+        "errors": [
+            {"path": "/private/secret/orchestration.json", "error": "queue lane 2: TOKEN"},
+            {"path": "/private/secret/evaluation-raw.json", "error": "TOKEN"},
+        ],
+    })
+
+    payload = json.loads(curriculum_status_payload(
+        tmp_path, curriculum_root=tmp_path, project_root=tmp_path))
+
+    assert payload["errors"] == [
+        {"error": "Training queue status could not be projected."},
+        {"error": "Saved evaluation evidence could not be verified."},
+    ]
+    assert "private" not in json.dumps(payload)
+    assert "TOKEN" not in json.dumps(payload)
+
+
 def test_dashboard_requires_explicit_curriculum_root_when_run_dir_is_not_one(tmp_path):
     defense_root = tmp_path / "checkpoints" / "rebuilt-gamepiece-defense"
     defense_root.mkdir(parents=True)

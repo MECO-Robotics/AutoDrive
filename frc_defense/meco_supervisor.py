@@ -1916,6 +1916,11 @@ class MecoSupervisor:
         final_status = Path(str(final_output) + ".status.json")
         if source != final_output:
             shutil.copyfile(source, final_output)
+            try:
+                from .meco_dashboard import _copy_dashboard_comparison_summary
+                _copy_dashboard_comparison_summary(source, final_output)
+            except (OSError, TypeError, ValueError):
+                pass  # The raw report remains authoritative; dashboard will reject a missing sidecar.
         status = json.loads(status_source.read_text())
         status["output_file"] = final_output.name
         _atomic_json(final_status, status)

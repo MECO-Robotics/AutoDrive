@@ -4261,6 +4261,12 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
         if output:
             _atomic_json(Path(output), report)
             update_evaluation_status("complete", len(records))
+            try:
+                from .meco_dashboard import _write_dashboard_comparison_summary
+                _write_dashboard_comparison_summary(Path(output), report)
+            except (OSError, TypeError, ValueError):
+                print("Dashboard comparison summary unavailable; raw report remains authoritative.",
+                      file=sys.stderr)
         return report
     except BaseException:
         try:

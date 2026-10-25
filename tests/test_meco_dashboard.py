@@ -7,7 +7,9 @@ import pytest
 
 from frc_defense.meco_dashboard import (
     ABLATIONS, CONTROLS, TRACKS, _collect_status, _qualification_status,
-    _queue_attempt_projection, _queue_state, _training_curriculum_projection,
+    _copy_dashboard_comparison_summary, _read_evaluation_comparison,
+    _write_dashboard_comparison_summary, _queue_attempt_projection,
+    _queue_state, _training_curriculum_projection,
     meco_status_payload,
 )
 from frc_defense.meco_path_penalty import PLAN_A_PPO_RECOMPUTATION_CONTRACT
@@ -166,6 +168,49 @@ def test_direct_campaign_root_reads_track_runs_queue_scheduler_and_evaluations(t
                    if policy["policy_id"] == track)
         assert row["training_state"] == "complete"
         assert row["run"]["completed_updates"] == 100
+
+
+def test_large_report_uses_digest_bound_strict_comparison_summary(tmp_path, monkeypatch):
+    import frc_defense.meco_dashboard as dashboard
+
+    monkeypatch.setattr(dashboard, "MAX_DASHBOARD_INLINE_REPORT_BYTES", 1)
+    report = _report()
+    source = tmp_path / "evaluation.json"
+    source.write_text(json.dumps(report, separators=(",", ":")))
+    assert _write_dashboard_comparison_summary(source, report)
+
+    comparison, binding, error, visible = _read_evaluation_comparison(
+        source, tmp_path, {"files": 0, "summary_bytes": 0,
+                           "raw_bytes": 0, "records": 0})
+
+    assert error is None and visible
+    assert comparison["policy_metrics"] == dashboard._comparison(report)["policy_metrics"]
+    assert binding == {"report_schema_version": 1, "evaluation_id": "eval-001",
+        "protocol_id": "proto-a", "split": "validation",
+        "source_identity_sha256": report["source_identity_sha256"], "record_count": 44}
+
+    published = tmp_path / "scheduled-evaluation.json"
+    published.write_bytes(source.read_bytes())
+    assert _copy_dashboard_comparison_summary(source, published)
+    copied, _, copy_error, _ = _read_evaluation_comparison(
+        published, tmp_path, {"files": 0, "summary_bytes": 0,
+                            "raw_bytes": 0, "records": 0})
+    assert copy_error is None and copied == comparison
+
+    source.write_bytes(source.read_bytes() + b" ")
+    stale, _, stale_error, _ = _read_evaluation_comparison(
+        source, tmp_path, {"files": 0, "summary_bytes": 0,
+                           "raw_bytes": 0, "records": 0})
+    assert stale is None and stale_error == "dashboard summary is unavailable or invalid"
+
+
+def test_incomplete_report_cannot_produce_dashboard_summary(tmp_path):
+    report = _report()
+    report["records"].pop()
+    source = tmp_path / "incomplete.json"
+    source.write_text(json.dumps(report))
+    assert not _write_dashboard_comparison_summary(source, report)
+    assert not Path(str(source) + ".dashboard-summary.json").exists()
 
 
 def test_direct_campaign_layout_rejects_partial_track_directories(tmp_path):

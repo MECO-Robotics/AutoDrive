@@ -6,6 +6,21 @@ import math
 
 _EXPECTED_THREE_PASS_PROVENANCE_SHA256 = "93c953f451ded90664d54ec93d6d4c5d398cdbab71812d57cb3eb1ec216b8c2a"
 _EXPECTED_PLAN_SHA256 = "718ef9d76f5525bf8e4759d3a0a46790a3c978e2b146efec6436c89dbbb49b10"
+_QUEUE_STATUS_FILES = {"queue-status.json", "orchestration.json", "queue.json",
+                      "task-scheduler-state.json"}
+
+
+def _curriculum_error_projection(item):
+    """Return a bounded error class without projecting raw paths or details."""
+    if isinstance(item, dict):
+        path = item.get("path")
+        if (isinstance(path, str) and len(path) <= 512
+                and path.rsplit("/", 1)[-1] in _QUEUE_STATUS_FILES):
+            return {"error": "Training queue status could not be projected."}
+        detail = item.get("error")
+        if isinstance(detail, str) and len(detail) <= 128 and detail.startswith("queue "):
+            return {"error": "Training queue status could not be projected."}
+    return {"error": "Saved evaluation evidence could not be verified."}
 
 
 def curriculum_status_payload(run_dir, curriculum_root=None, project_root=None,
@@ -157,8 +172,8 @@ def curriculum_status_payload(run_dir, curriculum_root=None, project_root=None,
                "tracks": [tracks[name] for name in ("A1", "A2", "A3", "C1", "C2")],
                "three_pass_provenance": _three_pass_provenance(),
                "queue": {"age_seconds": queue.get("age_seconds")} if queue else None,
-               "errors": [{"error": "Saved evidence could not be verified."}
-                          for _ in errors[:10]], "error": error,
+               "errors": [_curriculum_error_projection(item)
+                          for item in errors[:10]], "error": error,
                "generated_at": report.get("generated_at"),
                "stale_after_seconds": 180}
     return json.dumps(payload, allow_nan=False, separators=(",", ":")).encode()
