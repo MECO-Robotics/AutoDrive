@@ -411,6 +411,7 @@ def _direct_pursuit_review_gate(rows: list[dict], *, protocol: dict,
 
 
 def _reconcile_start_profile_outcomes(outcomes: dict, evidence_root: Path, *,
+        outcome_artifact_path: Path,
         assignment: dict, expected_keys: set[tuple], categories: list[str],
         seeds: list[int]) -> bool:
     """Recompute report coverage, summaries, legality, deltas, and digest."""
@@ -422,7 +423,10 @@ def _reconcile_start_profile_outcomes(outcomes: dict, evidence_root: Path, *,
     matrix_paths = outcomes.get("condition_matrix_paths")
     matrix_hashes = outcomes.get("condition_matrix_sha256")
     arms = {}
-    root = evidence_root.resolve()
+    evidence_root = evidence_root.resolve()
+    root = outcome_artifact_path.resolve().parent
+    if not root.is_relative_to(evidence_root):
+        return False
     for arm in CONDITIONS:
         relative_matrix = Path(matrix_paths[arm])
         if relative_matrix.is_absolute() or ".." in relative_matrix.parts:
@@ -735,6 +739,8 @@ def _start_profile_review_gate(rows: list[dict], *, protocol: dict,
         isinstance(outcomes.get("per_world_legality_records"), list))
     exact_outcomes = (metadata_exact and
         _reconcile_start_profile_outcomes(outcomes, evidence_root,
+            outcome_artifact_path=(evidence_root / row[
+                "paired_outcomes_artifact_path"]).resolve(),
             assignment=assignment, expected_keys=expected_keys,
             categories=[case["category"]], seeds=seed_values))
     if not exact_outcomes:
