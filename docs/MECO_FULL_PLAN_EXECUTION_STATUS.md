@@ -1,10 +1,10 @@
 # MECO learning tracks plan: execution status
 
-> **Live five-track campaign recheck — 2026-10-25 02:50 UTC.** The user
+> **Live five-track campaign recheck — 2026-10-25 03:00 UTC.** The user
 > systemd service `meco-five-continuous-20261025.service` is active (PID
-> `2750253`). A1 and A2 are each at 100/100 updates; A3 is at 55/100 on
-> `cuda:0`, C1 at 81/100 on `cuda:1`, and C2 is queued. The status heartbeat
-> is `2026-10-25T02:50:30Z`; cycle 1 has two completed chunks, zero completed
+> `2750253`). A1, A2, and C1 have each completed 100/100 updates. A3 is at
+> 66/100 on `cuda:0`, and C2 is queued. The status heartbeat is
+> `2026-10-25T03:00:10Z`; cycle 1 has three completed chunks, zero completed
 > cycles, and no evaluation yet. This is still the pinned older-source
 > diagnostic campaign, using only `pickup_simple/cluster`, without evaluation
 > protocol binding, warm starts, or Phase 4 training exposure. The first two
@@ -55,6 +55,19 @@
 > remaining paths wholly onto GPU. The user's CPU-free request is therefore
 > not satisfied; the campaign was not changed. A GPU-hot-path conversion needs
 > separate implementation and seeded simulator/replay evidence.
+
+> **Plan A HIP exact-heap hardening — 2026-10-25.** The reviewed prototype is
+> integrated as `4164f4988`, with exact feature commit
+> `5f199c68efdc4e17ae77fa4e286c15adaf9093d6`. It adds fail-closed WX9100,
+> shape/root/cost, and heap-capacity checks. Dispatch remains disabled and
+> training still uses CPU Dijkstra; no speedup or CPU-free result is claimed.
+> Ten CPU contract tests, compilation, and diff checks passed. No HIP compile,
+> GPU parity/profile, simulator evaluation, or replay was performed. The
+> dashboard's three-pass ledger now records this as tranche 63. After updating
+> the ledger digest, `frc-defense-dashboard.service` was restarted (PID
+> `2874864`); the page, both status APIs, and both frontend assets returned
+> HTTP 200. Served asset hashes match this checkout, and the API validates all
+> 63 tranches as scoped summaries.
 
 > **R4 live training snapshot — 2026-10-25 02:10 UTC.** The service remains
 > active (PID `2750253`). A1 completed its first 100-update chunk; A2 reached

@@ -40,7 +40,7 @@ def test_current_manifest_is_validated_as_summary_only():
     result = dashboard_api._three_pass_provenance()
     assert result["validation_status"] == "validated_summary_only"
     assert result["evidence_class"] == "scoped_transcript_summary"
-    assert len(result["tranches"]) == 62
+    assert len(result["tranches"]) == 63
     lease = next(t for t in result["tranches"]
                  if t["requirement_id"] == "meco-evaluation-device-lease")
     assert lease["implementer"]["commit"] == "9e41078fd438767217d051b89a58b2110449b3fb"
@@ -51,6 +51,12 @@ def test_current_manifest_is_validated_as_summary_only():
         "e843d7ee6662b9f664f05bb8a1885aeb6b30ac8e")
     assert phase4_training["reviewer"]["approved_commit"] == (
         "ba38d8799226c05c498d14d1f6593ef2c73dc738")
+    plan_a_hip = next(t for t in result["tranches"]
+                      if t["requirement_id"] == "plan-a-hip-exact-heap-hardening")
+    assert plan_a_hip["implementer"]["commit"] == (
+        "5f199c68efdc4e17ae77fa4e286c15adaf9093d6")
+    assert plan_a_hip["reviewer"]["approved_commit"] == (
+        "5f199c68efdc4e17ae77fa4e286c15adaf9093d6")
     trace = next(t for t in result["tranches"]
                  if t["requirement_id"] == "meco-inference-observability-decision-trace")
     assert trace["implementer"]["commit"] == "7cfe3d07696167d931ced416780435c4f13ddfc1"

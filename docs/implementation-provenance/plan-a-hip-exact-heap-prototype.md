@@ -57,3 +57,18 @@ prototype. The focused CPU suite passed 8 tests; Python compilation and
 `git diff --check` passed. The HIP extension was not compiled or run. WX9100
 parity, support-digest equality, and performance remain mandatory before
 runtime dispatch; no simulator evaluation or replay was performed.
+
+**Hardening implementation.** Commit `5f199c68efdc4e17ae77fa4e286c15adaf9093d6`
+adds fail-closed device, root, shape, and finite-cost checks; a C++ heap
+capacity overflow guard; and explicit error reporting for invalid active edges
+or overflow. The parity/profile gate remains false and training support still
+dispatches only to the CPU oracle. Ten focused CPU contracts, Python
+compilation, and `git diff --check` passed. No HIP compile/run, simulator
+evaluation, replay, or profile occurred.
+
+**Independent exact-head review.** The reviewer approved the hardened commit as
+a disabled prototype. Review confirmed the gate is checked before extension
+loading, dispatch remains CPU-only, and both Python and C++ fail closed on
+invalid device/shape/edge/heap inputs. The review explicitly does not establish
+HIP parity, runtime speedup, or simulator behavior. The hardened commit was
+integrated as `4164f49885d3c74fb56d8499d9089d1b039f4e17`.
