@@ -558,7 +558,7 @@ def build_score_ledger(
         PROXY_CONTRACT_ID: {
             "contract_id": PROXY_CONTRACT_ID,
             "rules_snapshot_sha256": RULES_SNAPSHOT_SHA256,
-            "scope": "two_robot_2d",
+            "scope": "six_slot_2d_simulation",
             "event_semantics": "abstract_score_action_not_sensor_crossing",
             "alliance_points": proxy_points,
             "event_count": len(clean_proxy),

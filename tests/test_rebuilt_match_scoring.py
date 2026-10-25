@@ -109,8 +109,10 @@ def test_proxy_is_explicitly_not_official_points_or_qualification():
                                  proxy("p3", "blue", 31)])
     proxy_result = result[PROXY_CONTRACT_ID]
     assert proxy_result["alliance_points"] == {"red": 1, "blue": 1}
-    assert proxy_result["scope"] == "two_robot_2d"
+    assert proxy_result["scope"] == "six_slot_2d_simulation"
+    assert proxy_result["alliance_roster_complete"] is False
     assert proxy_result["tower_points_complete"] is False
+    assert proxy_result["fouls_complete"] is False
     assert proxy_result["qualification_eligible"] is False
     assert result["official_match_points"] == {"red": 0, "blue": 0}
     assert result["qualification_eligible"] is False
