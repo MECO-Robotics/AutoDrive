@@ -47,11 +47,11 @@ def reset_fuel_physics(env, mask=None):
         bind_fuel_state(env).reset(mask)
 
 
-def advance_with_fuel(env, commands, active_mask, *, active_nonempty=True):
+def advance_with_fuel(env, commands, active_mask):
     """Advance robot and fuel together; controller cadence stays unchanged."""
     physics = env.fuel_physics
     if physics is None:
-        return env.sim.step(commands, active_mask, _active_nonempty=active_nonempty)
+        return env.sim.step(commands, active_mask)
     physics = bind_fuel_state(env)
     active = (torch.ones(env.n, device=env.device, dtype=torch.bool)
               if active_mask is None else active_mask)
@@ -73,8 +73,7 @@ def advance_with_fuel(env, commands, active_mask, *, active_nonempty=True):
                 env.sim.dt = substep_dt
                 try:
                     with torch.cuda.graph(graph):
-                        env.sim.step(graph_command, graph_active,
-                                     _active_nonempty=True)
+                        env.sim.step(graph_command, graph_active)
                         physics.step(graph_active, env.piece_active,
                                      env.piece_owner, dt=substep_dt,
                                      substeps=1, adaptive=False)
@@ -99,7 +98,7 @@ def advance_with_fuel(env, commands, active_mask, *, active_nonempty=True):
     try:
         env.sim.dt = substep_dt
         for _ in range(substeps):
-            env.sim.step(commands, active, _active_nonempty=active_nonempty)
+            env.sim.step(commands, active)
             physics.step(active, env.piece_active, env.piece_owner,
                          dt=substep_dt, substeps=1,adaptive=False)
     finally:

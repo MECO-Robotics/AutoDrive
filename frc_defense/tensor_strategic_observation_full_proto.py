@@ -86,7 +86,7 @@ def integrated_available(device):
 
 
 def observe(env, focal=0, *, normalize=None, candidates=None, route_available=None,
-            active_mask=None, return_candidate_data=False, row_indices=None,
+            active_mask=None, return_candidate_data=False,
             action_mask=None, own_count=None):
     """Assemble full 137-vector from current env state; does not alter env state.
 
@@ -96,22 +96,24 @@ def observe(env, focal=0, *, normalize=None, candidates=None, route_available=No
     """
     if not available(env.device):
         raise RuntimeError("full observation prototype requires HIP")
+    if (active_mask is not None and env.device.type != "cpu" and
+            (not isinstance(active_mask,torch.Tensor) or
+             active_mask.device != env.device)):
+        raise ValueError("GPU full-observation mask must already reside on environment device")
     if active_mask is None:
         active_mask = torch.ones((env.n,), device=env.device, dtype=torch.bool)
     else:
         active_mask = torch.as_tensor(active_mask, device=env.device,
                                       dtype=torch.bool).reshape(env.n).contiguous()
-    rows = (torch.arange(env.n, device=env.device) if row_indices is None else
-            torch.as_tensor(row_indices, device=env.device, dtype=torch.long).reshape(-1))
     def take(value):
-        return value if row_indices is None else value.index_select(0, rows)
+        return value
 
     p, v = env.sim.pose, env.sim.velocity
     other = 1 - focal
     other_pose, other_velocity = env._observed_robot(focal, other)
     other_pose, other_velocity = take(other_pose), take(other_velocity)
     opponent = take(env._opponent_track_features(focal))
-    obstacles = env._obstacle_features(robot_index=focal, row_indices=row_indices)
+    obstacles = env._obstacle_features(robot_index=focal)
     if candidates is None:
         candidates = env._fuel_candidates(focal)
     indices, valid, nearest = (take(value) for value in candidates)
@@ -149,7 +151,7 @@ def observe(env, focal=0, *, normalize=None, candidates=None, route_available=No
         take(env.match_elapsed).contiguous(), take(env.hub_active).contiguous(),
         take(env.fuel_score_count[:, [focal, other]]).contiguous(),
         env.hub_centers.reshape(-1).contiguous(), env.hub_centers[focal].contiguous(),
-        torch.ones((rows.shape[0],), device=env.device, dtype=torch.bool),
+        active_mask.contiguous(),
         float(env.sim.field_length), float(env.sim.field_width),
         int(env.fuel_capacity), int(env.fuel_count), bool(action_offense),
         bool(do_normalize))

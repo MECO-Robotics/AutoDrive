@@ -15,6 +15,17 @@ OBS_DIM = 137
 ACTION_DIM = 8
 
 
+def _assert_device_condition(device, condition, message):
+    """Fail closed with a device assertion instead of synchronizing a predicate."""
+    if (not isinstance(condition, torch.Tensor) or condition.device != device or
+            condition.numel() != 1):
+        raise ValueError("validation predicate must be a scalar tensor on the environment device")
+    assert_async=getattr(torch,"_assert_async",None)
+    if assert_async is None:
+        raise RuntimeError("device-side validation is unavailable")
+    assert_async(condition,message)
+
+
 def _gated_angular_track_association(track_pos,track_mask,track_age,
                                      detections,detected,observer_pose,
                                      timeout,gate_m):
@@ -95,23 +106,19 @@ class TensorThreeVsThreeObservationMixin:
 
     def _random_active(self, active, tail_shape, *, normal=False, dtype=None,
                        active_count=None):
-        """Draw only for active worlds so stopped episodes do not consume RNG."""
-        count=(int(active.sum().item()) if active_count is None else int(active_count))
-        if not count:
-            return torch.zeros((self.n,*tail_shape),device=self.device,
-                               dtype=dtype or torch.float32)
-        shape=(count,*tail_shape)
+        """Draw a fixed batch and mask inactive worlds without reading the mask on CPU."""
+        active=torch.as_tensor(active,device=self.device,dtype=torch.bool).reshape(self.n)
+        shape=(self.n,*tail_shape)
         sample=(torch.randn(shape,device=self.device,generator=self.generator)
                 if normal else torch.rand(shape,device=self.device,generator=self.generator))
-        if count == self.n:
-            return sample
-        result=torch.zeros((self.n,*tail_shape),device=self.device,
-                           dtype=dtype or torch.float32)
-        result[active]=sample
-        return result
+        return torch.where(active.reshape(self.n,*([1]*len(tail_shape))),sample,
+                           torch.zeros_like(sample)).to(dtype=dtype or sample.dtype)
 
     def _update_perception(self, active, active_count=None):
         """Update per-robot free-FUEL and nearest-opponent tracks."""
+        if (not isinstance(active, torch.Tensor) or active.device != self.device or
+                active.dtype is not torch.bool or tuple(active.shape) != (self.n,)):
+            raise ValueError("perception active mask must be a device bool vector [N]")
         # This is the physical camera/chassis pose used only to render
         # simulated measurements. Policy-visible localization is assembled
         # later from ``policy_pose``; keep sensor generation and policy state
@@ -766,6 +773,10 @@ class TensorThreeVsThreeObservationMixin:
         return mask, possession
 
     def observe(self, active_mask=None):
+        if (active_mask is not None and self.device.type != "cpu" and
+                (not isinstance(active_mask, torch.Tensor) or
+                 active_mask.device != self.device)):
+            raise ValueError("GPU observation mask must already reside on the environment device")
         active = (torch.ones(self.n, device=self.device, dtype=torch.bool) if active_mask is None else
                   torch.as_tensor(active_mask, device=self.device, dtype=torch.bool).reshape(self.n))
         p, v = self.policy_pose, self.sim.velocity
@@ -869,6 +880,8 @@ class TensorThreeVsThreeObservationMixin:
                          candidates, action_mask.to(p.dtype)), -1)
         if obs.shape[-1] != OBS_DIM:
             raise RuntimeError(f"3v3 observation width {obs.shape[-1]} != {OBS_DIM}")
+        if obs.device != self.device or tuple(obs.shape) != (self.n, NUM_ROBOTS, OBS_DIM):
+            raise RuntimeError("3v3 policy observation has an invalid device or batch shape")
         if self.normalize_observations:
             flat = obs.reshape(-1, OBS_DIM)
             sp = torch.stack((self.sim.speed, self.sim.speed), -1).reshape(-1, 2)
@@ -876,8 +889,8 @@ class TensorThreeVsThreeObservationMixin:
             normalize_tensor_observation_batch_in_place(flat,self.sim.field_length,
                                                         self.sim.field_width,sp,om)
         if self._last_obs is None:
-            if not bool(active.all()):
+            if active_mask is not None:
                 raise RuntimeError(
-                    "cannot build a partial observation batch before every world has an observation frame")
+                    "cannot build a masked observation batch before initial frames exist")
             return obs
         return torch.where(active[:,None,None], obs, self._last_obs)

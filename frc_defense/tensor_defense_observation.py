@@ -48,28 +48,29 @@ class TensorDefenseObservationMixin:
 
     def _random_active(self, active_mask, tail_shape, *, normal=False, high=None,
                        active_count=None):
-        count=int(active_mask.sum().item()) if active_count is None else int(active_count)
+        active_mask=torch.as_tensor(active_mask,device=self.device,dtype=torch.bool).reshape(self.n)
         dtype=torch.long if high is not None else self.sim.pose.dtype
-        if count:
-            shape=(count,*tail_shape)
-            if normal:
-                values=torch.randn(shape,device=self.device,generator=self.generator)
-            elif high is not None:
-                values=torch.randint(high,shape,device=self.device,generator=self.generator)
-            else:
-                values=torch.rand(shape,device=self.device,generator=self.generator)
-            if count == self.n:
-                return values
-            out=torch.zeros((self.n,*tail_shape),device=self.device,dtype=dtype)
-            out[active_mask]=values
-            return out
-        return torch.zeros((self.n,*tail_shape),device=self.device,dtype=dtype)
+        shape=(self.n,*tail_shape)
+        if normal:
+            values=torch.randn(shape,device=self.device,generator=self.generator)
+        elif high is not None:
+            values=torch.randint(high,shape,device=self.device,generator=self.generator)
+        else:
+            values=torch.rand(shape,device=self.device,generator=self.generator)
+        return torch.where(active_mask.reshape(self.n,*([1]*len(tail_shape))),values,
+                           torch.zeros_like(values)).to(dtype=dtype)
 
     def _update_perception(self, reset_mask=None, active_mask=None, active_count=None):
         """Advance simple per-robot FUEL tracking from simulated sensor detections."""
         from . import tensor_sim as _tensor_sim
+        if (active_mask is not None and self.device.type != "cpu" and
+                (not isinstance(active_mask, torch.Tensor) or
+                 active_mask.device != self.device)):
+            raise ValueError("GPU perception mask must already reside on the environment device")
         active_mask=(torch.ones(self.n,device=self.device,dtype=torch.bool) if active_mask is None
                      else torch.as_tensor(active_mask,device=self.device,dtype=torch.bool))
+        if active_mask.device != self.device or tuple(active_mask.shape) != (self.n,):
+            raise ValueError("perception active mask must be a device bool vector [N]")
         dt=self.dt
         advance_mask=(active_mask if reset_mask is None else
                       torch.zeros_like(active_mask))
@@ -274,7 +275,7 @@ class TensorDefenseObservationMixin:
 
     def _strategic_observation(self, focal, *, return_candidate_data=False,
                                active_mask=None, cache_active_mask=None,
-                               row_indices=None, candidate_data=None,
+                               candidate_data=None,
                                action_mask=None, own_count=None):
         from . import tensor_sim as _tensor_sim
         if (_tensor_sim._full_strategic_observation_available is not None and
@@ -282,7 +283,7 @@ class TensorDefenseObservationMixin:
             self._full_observation_hip_available=True
             raw, candidate_data, action_mask = _tensor_sim._full_strategic_observation(
                 self, focal, active_mask=active_mask, return_candidate_data=True,
-                row_indices=row_indices, candidates=candidate_data,
+                candidates=candidate_data,
                 action_mask=action_mask, own_count=own_count)
             self._cache_strategic_own_candidates(
                 candidate_data, action_mask, focal=focal,
@@ -394,12 +395,12 @@ class TensorDefenseObservationMixin:
         merged_mask = torch.where(selected[:, None], action_mask, previous_mask)
         self._pending_strategic_own_candidates = (merged_data, merged_mask)
 
-    def _raw_obs(self, active_mask=None, cache_active_mask=None, row_indices=None,
+    def _raw_obs(self, active_mask=None, cache_active_mask=None,
                  candidate_data=None, action_mask=None, own_count=None):
         if self.action_mode=="strategic":
             return self._strategic_observation(
                 0, active_mask=active_mask,
-                cache_active_mask=cache_active_mask, row_indices=row_indices,
+                cache_active_mask=cache_active_mask,
                 candidate_data=candidate_data, action_mask=action_mask,
                 own_count=own_count)
         p,v=self.sim.pose,self.sim.velocity
@@ -440,49 +441,34 @@ class TensorDefenseObservationMixin:
         return raw
 
     def _obs(self, initialize_mask=None, active_mask=None, active_count=None,
-             capture_output=True, capture_raw_mask=None, capture_raw_rows=None):
+             capture_output=True, capture_raw_mask=None):
         # PPO supplies this scalar for its fixed, synchronized full-active
         # batch. Do not inspect the device mask here: active_count is already
         # the trusted shape/RNG count used by _random_active.
         full_active = (active_mask is None or
                        (active_count is not None and int(active_count) == self.n))
+        if (active_mask is not None and self.device.type != "cpu" and
+                (not isinstance(active_mask, torch.Tensor) or
+                 active_mask.device != self.device)):
+            raise ValueError("GPU observation mask must already reside on the environment device")
         active_mask=(torch.ones(self.n,device=self.device,dtype=torch.bool) if active_mask is None
                      else torch.as_tensor(active_mask,device=self.device,dtype=torch.bool))
+        if active_mask.device != self.device or tuple(active_mask.shape) != (self.n,):
+            raise ValueError("observation active mask must be a device bool vector [N]")
+        if (capture_raw_mask is not None and self.device.type != "cpu" and
+                (not isinstance(capture_raw_mask,torch.Tensor) or
+                 capture_raw_mask.device != self.device)):
+            raise ValueError("GPU raw observation capture mask must be device resident")
         raw_capture_mask=(active_mask if capture_raw_mask is None else
                           (active_mask & torch.as_tensor(
                               capture_raw_mask, device=self.device,
                               dtype=torch.bool).reshape(self.n)))
-        candidate_data=action_mask=own_count=None
-        if capture_raw_rows is not None:
-            # Candidate ranking and masks still refresh for every active world:
-            # the next physics tick consumes them in the strategic controller.
-            candidate_data=self._fuel_candidates(0)
-            own_count=self._own_possession(0)
-            action_mask=self.strategic_action_mask(
-                0, _candidate_data=candidate_data)
-            self._cache_strategic_own_candidates(
-                candidate_data, action_mask, focal=0, active_mask=active_mask)
-            raw=None
-            if capture_raw_rows.numel():
-                raw=self._raw_obs(
-                    active_mask=raw_capture_mask, cache_active_mask=active_mask,
-                    row_indices=capture_raw_rows, candidate_data=candidate_data,
-                    action_mask=action_mask, own_count=own_count)
-        else:
-            raw=self._raw_obs(active_mask=raw_capture_mask,
-                              cache_active_mask=active_mask)
+        raw=self._raw_obs(active_mask=raw_capture_mask,
+                          cache_active_mask=active_mask)
         history_length=self.observation_history.shape[1]
         if initialize_mask is None:
             next_index=(self._observation_history_index+1).remainder(history_length)
-            if capture_raw_rows is not None:
-                self._observation_history_index.copy_(
-                    torch.where(active_mask, next_index,
-                                self._observation_history_index))
-                if capture_raw_rows.numel():
-                    self.observation_history[
-                        self._observation_world_index[capture_raw_rows],
-                        next_index[capture_raw_rows]]=raw
-            elif full_active and capture_raw_mask is None:
+            if full_active and capture_raw_mask is None:
                 # PPO supplies a trusted full-batch active count for ordinary
                 # strategic ticks. Avoid all-true mask selects while retaining
                 # the same ring slot, values, storage, and subsequent RNG calls.
@@ -527,15 +513,15 @@ class TensorDefenseObservationMixin:
         if self.randomize and self.observation_dropout>0:
             keep=self._random_active(active_mask,(18,),active_count=active_count)>=self.observation_dropout
             obs[:,:18].mul_(keep)
+        if obs.device != self.device or tuple(obs.shape) != (self.n, self.obs_dim):
+            raise RuntimeError("policy observation has an invalid device or batch shape")
         if full_active:
             return obs
         return torch.where(active_mask[:,None],obs,self._last_observation)
 
-    def _obstacle_features(self,robot_index=0,row_indices=None):
-        pose=(self.sim.pose[:,robot_index] if row_indices is None else
-              self.sim.pose.index_select(0,row_indices)[:,robot_index])
-        row_count=pose.shape[0]
-        out=torch.zeros((row_count,12),device=self.device)
+    def _obstacle_features(self,robot_index=0):
+        pose=self.sim.pose[:,robot_index]
+        out=torch.zeros((self.n,12),device=self.device)
         obstacles=(torch.cat((self.sim.obstacles,self.field_feature_obstacles),0)
                    if self.field_feature_obstacles.shape[0] else self.sim.obstacles)
         if obstacles.shape[0]:

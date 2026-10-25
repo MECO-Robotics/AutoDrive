@@ -209,7 +209,6 @@ class TensorDefenseEnv(
         self.device=self.sim.device
         self._full_observation_hip_available=False
         self._ppo_sparse_delayed_observation_capture=False
-        self._ppo_observation_delay_groups=None
         self._adstar_planners=None
         self._adstar_defender_planners=None
         self._adstar_tactical_planner=None

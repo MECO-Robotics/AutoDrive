@@ -1848,10 +1848,12 @@ def _run_macro_step(env, action_index: int, action_ticks: int, goal_xy=None, *,
     total = torch.zeros((), device=env.device)
     ended = timeout = False
     executed_actions = []
+    executed_tick_mask = []
     heading_alignment_opportunity = False
     native_goal_preempted = False
-    selected_target_lost = False
-    selected_target_action_remasked = False
+    selected_target_lost = torch.zeros((),device=env.device,dtype=torch.bool)
+    selected_target_action_remasked = torch.zeros((),device=env.device,dtype=torch.bool)
+    macro_active = torch.ones((env.n,),device=env.device,dtype=torch.bool)
     frozen_traversal_cost = (None if planner_traversal_cost_override is None else
         torch.as_tensor(planner_traversal_cost_override, device=env.device,
                         dtype=env.sim.pose.dtype).detach().clone())
@@ -1865,7 +1867,8 @@ def _run_macro_step(env, action_index: int, action_ticks: int, goal_xy=None, *,
                 "planner_traversal_cost_override_action": int(action_index),
                 "planner_traversal_cost_override_scale": planner_traversal_cost_scale,
             }
-        _, _, done, truncated, _ = env.step(actions, capture_info=False,
+        executed_tick_mask.append(macro_active[0].clone())
+        _, _, done, truncated, _ = env.step(actions, active_mask=macro_active, capture_info=False,
             planner_goal_override=goal_xy,
             planner_goal_override_action=action_index if goal_xy is not None else None,
             planner_goal_override_target_track=goal_track_index,
@@ -1903,10 +1906,14 @@ def _run_macro_step(env, action_index: int, action_ticks: int, goal_xy=None, *,
         if metric_ledger is not None:
             metric_ledger.observe_outer_step(int(env.last_actions[0, 3].item()))
         executed_actions.append(int(env.last_actions[0, 3].item()))
-        selected_target_lost |= (
-            getattr(env, "_last_planner_collection_target_valid", None) is False)
-        selected_target_action_remasked |= (
-            getattr(env, "_last_planner_collection_action_match", None) is False)
+        target_valid = getattr(env, "_last_planner_collection_target_valid", None)
+        action_match = getattr(env, "_last_planner_collection_action_match", None)
+        if isinstance(target_valid, torch.Tensor):
+            selected_target_lost |= ~target_valid
+            macro_active &= target_valid
+        if isinstance(action_match, torch.Tensor):
+            selected_target_action_remasked |= ~action_match
+            macro_active &= action_match
         if safety_counts is not None:
             current = _physics_safety_snapshot(env)
             previous = safety_counts.get("_last_snapshot")
@@ -1932,15 +1939,20 @@ def _run_macro_step(env, action_index: int, action_ticks: int, goal_xy=None, *,
         total += env.curriculum_metrics.reward_delta()[0]
         ended = bool(done[0].item())
         timeout = bool(truncated[0].item())
-        if (ended or timeout or selected_target_lost or
-                selected_target_action_remasked):
+        if ended or timeout:
             break
+    if executed_tick_mask:
+        executed_flags=torch.stack(executed_tick_mask).detach().cpu().tolist()
+        executed_actions=[action for action,was_active in zip(executed_actions,executed_flags)
+                          if was_active]
     env._last_obs = env.observe()
     final_heading_error = None
     final_goal_distance = None
     final_heading_target = (goal_heading if goal_heading is not None else
         getattr(env, "_last_planner_collection_goal_heading", None))
-    if final_heading_target is not None and not selected_target_lost:
+    selected_target_lost_report = bool(selected_target_lost.item())
+    selected_target_action_remasked_report = bool(selected_target_action_remasked.item())
+    if final_heading_target is not None and not selected_target_lost_report:
         difference = torch.atan2(
             torch.sin(env.sim.pose[0, 3, 2] - float(final_heading_target)),
             torch.cos(env.sim.pose[0, 3, 2] - float(final_heading_target))).abs()
@@ -1951,9 +1963,9 @@ def _run_macro_step(env, action_index: int, action_ticks: int, goal_xy=None, *,
     native_goal_preempted &= final_goal_distance is not None and final_goal_distance > .04
     result = (total, ended, timeout, executed_actions, final_heading_error,
             final_goal_distance, heading_alignment_opportunity, native_goal_preempted,
-            selected_target_lost)
+            selected_target_lost_report)
     if return_execution_flags:
-        return (*result, selected_target_action_remasked)
+        return (*result, selected_target_action_remasked_report)
     return result
 
 

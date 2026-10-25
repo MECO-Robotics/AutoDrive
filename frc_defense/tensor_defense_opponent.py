@@ -13,17 +13,25 @@ class TensorDefenseOpponentMixin:
     """Planning and tactical motion methods used by ``TensorDefenseEnv``."""
 
     def _advance_adstar_cadence(self, active_mask):
-        """Return whether to plan and the mask, avoiding a reduction when aligned."""
+        """Return fixed-shape per-world planner eligibility."""
+        if active_mask is None:
+            active_mask=torch.ones(self.n,device=self.device,dtype=torch.bool)
+        elif (self.device.type != "cpu" and
+              (not isinstance(active_mask,torch.Tensor) or
+               active_mask.device != self.device)):
+            raise ValueError("GPU planner active mask must already reside on environment device")
+        active_mask=torch.as_tensor(active_mask,device=self.device,
+                                    dtype=torch.bool).reshape(self.n)
         if self._planner_full_batch_active and self._planner_tick_aligned:
             self._planner_tick_scalar += 1
             self._planner_tick.add_(1)
             due=self._planner_tick_scalar % self.adstar_replan_interval == 0
-            return due,None
+            return active_mask & torch.full_like(active_mask,due)
         self._planner_tick_aligned=False
         self._planner_full_batch_active=False
         self._planner_tick=torch.where(active_mask,self._planner_tick+1,self._planner_tick)
         replan=active_mask&(self._planner_tick%self.adstar_replan_interval==0)
-        return bool(replan.any()),replan
+        return replan
 
     def _adstar_tactical_velocity(self, waypoint_action, active_mask=None):
         """Decode a normalized field waypoint and route robot 0 to it."""
@@ -67,11 +75,11 @@ class TensorDefenseOpponentMixin:
         waypoint=torch.maximum(torch.minimum(waypoint,high),low)
         active_mask=(torch.ones(self.n,device=self.device,dtype=torch.bool) if active_mask is None
                      else active_mask)
-        should_replan,replan_mask=self._advance_adstar_cadence(active_mask)
-        if should_replan:
-            planner.plan(defender[:,:2],waypoint,defender[:,2],self.sim.length[:,0],
-                self.sim.width[:,0],self.sim.speed[:,0],lateral_friction=self.sim.lateral_mu[:,0],
-                acceleration=self.sim.accel[:,0],active_mask=replan_mask)
+        replan_mask=self._advance_adstar_cadence(active_mask)
+        planner.plan(defender[:,:2],waypoint,defender[:,2],self.sim.length[:,0],
+            self.sim.width[:,0],self.sim.speed[:,0],lateral_friction=self.sim.lateral_mu[:,0],
+            acceleration=self.sim.accel[:,0],active_mask=replan_mask,
+            static_active_mask=True)
         command,_=planner.path_reference(defender[:,:2],self.sim.velocity[:,0,:2],self.sim.speed[:,0])
         distance=(waypoint-defender[:,:2]).norm(dim=-1,keepdim=True)
         command=torch.where(distance<=.3,torch.zeros_like(command),command)
@@ -116,12 +124,11 @@ class TensorDefenseOpponentMixin:
         observed_defender,observed_velocity=self._observed_robot(1,0)
         active_mask=(torch.ones(self.n,device=self.device,dtype=torch.bool) if active_mask is None
                      else active_mask)
-        should_replan,replan_mask=self._advance_adstar_cadence(active_mask)
-        if should_replan:
-            planner.plan(pose[:,:2],target,pose[:,2],self.sim.length[:,1],self.sim.width[:,1],
-                self.sim.speed[:,1],observed_defender[:,:2],observed_velocity[:,:2],
-                self.task=="defense",self.sim.lateral_mu[:,1],self.sim.accel[:,1],
-                active_mask=replan_mask)
+        replan_mask=self._advance_adstar_cadence(active_mask)
+        planner.plan(pose[:,:2],target,pose[:,2],self.sim.length[:,1],self.sim.width[:,1],
+            self.sim.speed[:,1],observed_defender[:,:2],observed_velocity[:,:2],
+            self.task=="defense",self.sim.lateral_mu[:,1],self.sim.accel[:,1],
+            active_mask=replan_mask,static_active_mask=True)
         command,_=planner.path_reference(pose[:,:2],self.sim.velocity[:,1,:2],self.sim.speed[:,1])
         magnitude=command.norm(dim=-1,keepdim=True)
         return command*torch.minimum(torch.ones_like(magnitude),
@@ -156,15 +163,11 @@ class TensorDefenseOpponentMixin:
         observed_defender,_=self._observed_robot(1,0)
         active_mask=(torch.ones(self.n,device=self.device,dtype=torch.bool) if active_mask is None
                      else active_mask)
-        should_replan,replan_mask=self._advance_adstar_cadence(active_mask)
-        # A host-side fixed cadence avoids the device synchronization caused by
-        # checking the per-world mask. The aligned common case uses a scalar;
-        # contact replanning remains bounded by the configured cadence.
-        if should_replan:
-            planner.plan(pose[:,:2],self._attacker_objective(),pose[:,2],self.sim.length[:,1],
-                self.sim.width[:,1],self.sim.speed[:,1],observed_defender[:,:2],
-                self._observed_robot(1,0)[1][:,:2],True,self.sim.lateral_mu[:,1],self.sim.accel[:,1],
-                active_mask=replan_mask)
+        replan_mask=self._advance_adstar_cadence(active_mask)
+        planner.plan(pose[:,:2],self._attacker_objective(),pose[:,2],self.sim.length[:,1],
+            self.sim.width[:,1],self.sim.speed[:,1],observed_defender[:,:2],
+            self._observed_robot(1,0)[1][:,:2],True,self.sim.lateral_mu[:,1],self.sim.accel[:,1],
+            active_mask=replan_mask,static_active_mask=True)
         command,_=planner.path_reference(pose[:,:2],self.sim.velocity[:,1,:2],self.sim.speed[:,1])
         magnitude=command.norm(dim=-1,keepdim=True)
         return command*torch.minimum(torch.ones_like(magnitude),
@@ -228,11 +231,11 @@ class TensorDefenseOpponentMixin:
             target=attacker+attacker_velocity*reach_time+velocity_direction*.55
         active_mask=(torch.ones(self.n,device=self.device,dtype=torch.bool) if active_mask is None
                      else active_mask)
-        should_replan,replan_mask=self._advance_adstar_cadence(active_mask)
-        if should_replan:
-            planner.plan(defender[:,:2],target,defender[:,2],self.sim.length[:,1],
-                self.sim.width[:,1],self.sim.speed[:,1],attacker,attacker_velocity,False,
-                self.sim.lateral_mu[:,1],self.sim.accel[:,1],active_mask=replan_mask)
+        replan_mask=self._advance_adstar_cadence(active_mask)
+        planner.plan(defender[:,:2],target,defender[:,2],self.sim.length[:,1],
+            self.sim.width[:,1],self.sim.speed[:,1],attacker,attacker_velocity,False,
+            self.sim.lateral_mu[:,1],self.sim.accel[:,1],active_mask=replan_mask,
+            static_active_mask=True)
         command,_=planner.path_reference(defender[:,:2],self.sim.velocity[:,1,:2],self.sim.speed[:,1])
         magnitude=command.norm(dim=-1,keepdim=True)
         return command*torch.minimum(torch.ones_like(magnitude),

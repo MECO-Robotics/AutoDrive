@@ -16,6 +16,17 @@ import warnings
 import torch
 
 
+def _assert_device_condition(device, condition, message):
+    """Validate device predicates without copying their values to the host."""
+    if (not isinstance(condition, torch.Tensor) or condition.device != device or
+            condition.numel() != 1):
+        raise ValueError("planner validation predicate must be a device scalar")
+    assert_async=getattr(torch,"_assert_async",None)
+    if assert_async is None:
+        raise RuntimeError("device-side planner validation is unavailable")
+    assert_async(condition,message)
+
+
 _HIP_ADSTAR_EXTENSION = None
 _HIP_ADSTAR_EXTENSION_ATTEMPTED = False
 _HIP_OCCUPANCY_EXTENSION = None
@@ -833,10 +844,10 @@ class TensorADStar:
         # stop command in that case and allow the next planning update to try
         # again from the new state.
         unresolved=has_route&~resolved&~line_clear&~raw_clear
-        can_repair=(path.device.type=="cpu" or
-                    not torch.cuda.is_current_stream_capturing())
         failed=unresolved
-        if can_repair and bool(unresolved.any().item()):
+        repair_selected=(bool(unresolved.any().item()) if path.device.type=="cpu"
+                         else False)
+        if repair_selected:
             repair_source=source.clone()
             repair_lengths=torch.where(unresolved,lengths,torch.ones_like(lengths))
             repaired=self._repair_paths_locally(
@@ -981,6 +992,11 @@ class TensorADStar:
         if learned_traversal_cost is None:
             learned_cost = None
         else:
+            if (self.device.type != "cpu" and
+                    (not isinstance(learned_traversal_cost,torch.Tensor) or
+                     learned_traversal_cost.device != self.device)):
+                raise ValueError(
+                    "GPU learned traversal cost must already reside on the planner device")
             source_cost = torch.as_tensor(learned_traversal_cost)
             learned_cost = torch.as_tensor(learned_traversal_cost,
                                            device=self.device, dtype=self.dtype)
@@ -999,13 +1015,21 @@ class TensorADStar:
                     validated_cost[0] is source_cost and
                     validated_cost[1] == source_version and
                     validated_cost[2] == learned_cost_scale):
-                if not bool(torch.isfinite(learned_cost).all().item()) or \
-                        bool((learned_cost < 0).any().item()):
-                    raise ValueError(
+                finite_nonnegative=(torch.isfinite(learned_cost).all() &
+                                    (learned_cost >= 0.).all())
+                scaled_finite=torch.isfinite(
+                    learned_cost * float(learned_cost_scale)).all()
+                if self.device.type == "cpu":
+                    if not bool(finite_nonnegative):
+                        raise ValueError(
+                            "learned_traversal_cost must be finite and nonnegative")
+                    if not bool(scaled_finite):
+                        raise ValueError(
+                            "scaled learned_traversal_cost must remain finite")
+                else:
+                    _assert_device_condition(self.device,finite_nonnegative,
                         "learned_traversal_cost must be finite and nonnegative")
-                if not bool(torch.isfinite(
-                        learned_cost * float(learned_cost_scale)).all().item()):
-                    raise ValueError(
+                    _assert_device_condition(self.device,scaled_finite,
                         "scaled learned_traversal_cost must remain finite")
                 if source_version is not None:
                     self._validated_learned_traversal_cost = (
@@ -1111,35 +1135,29 @@ class TensorADStar:
         write_rows(self.last_trench_alignment,trench_alignment)
         blocked_goal=blocked[batch,gx,gy]
         if batch_n <= 64:
-            if bool(blocked_start.any().item()):
-                start_projection=self._nearest_visible_endpoint(start,blocked)
-                start=torch.where(blocked_start[:,None],start_projection,start)
-            if bool(blocked_goal.any().item()):
-                goal_projection=self._nearest_visible_endpoint(goal,blocked)
-                goal=torch.where(blocked_goal[:,None],goal_projection,goal)
-            sx,sy=self._indices(start); gx,gy=self._indices(goal)
+            start_projection=self._nearest_visible_endpoint(start,blocked)
+            goal_projection=self._nearest_visible_endpoint(goal,blocked)
+            start=torch.where(blocked_start[:,None],start_projection,start)
+            goal=torch.where(blocked_goal[:,None],goal_projection,goal)
         else:
-            blocked_rows=torch.nonzero(blocked_start,as_tuple=False).flatten()
-            if blocked_rows.numel():
-                start=start.clone()
-                for offset in range(0,blocked_rows.numel(),8192):
-                    rows=blocked_rows[offset:offset+8192]
-                    row_start=start[rows]
-                    row_blocked=blocked.index_select(0,rows).flatten(1)
-                    ix,iy=sx[rows],sy[rows]
-                    nx,ny=self._nearest_visible_start_cell(
-                        row_start,row_blocked,ix,iy)
-                    start[rows]=torch.stack((self.x[nx],self.y[ny]),-1)
-                sx,sy=self._indices(start)
-            blocked_rows=torch.nonzero(blocked_goal,as_tuple=False).flatten()
-            if blocked_rows.numel():
-                goal=goal.clone()
-                for offset in range(0,blocked_rows.numel(),8192):
-                    rows=blocked_rows[offset:offset+8192]
-                    row_goal=goal[rows]
-                    row_blocked=blocked.index_select(0,rows).flatten(1)
-                    goal[rows]=self._nearest_visible_endpoint(row_goal,row_blocked)
-                gx,gy=self._indices(goal)
+            projected_start=start.clone()
+            projected_goal=goal.clone()
+            for offset in range(0,batch_n,64):
+                end=min(offset+64,batch_n)
+                row_slice=slice(offset,end)
+                row_blocked=blocked[row_slice]
+                row_start=start[row_slice]
+                row_goal=goal[row_slice]
+                nx,ny=self._nearest_visible_start_cell(
+                    row_start,row_blocked,sx[row_slice],sy[row_slice])
+                projected_start[row_slice]=torch.where(
+                    blocked_start[row_slice,None],
+                    torch.stack((self.x[nx],self.y[ny]),-1),row_start)
+                projected_goal[row_slice]=torch.where(
+                    blocked_goal[row_slice,None],
+                    self._nearest_visible_endpoint(row_goal,row_blocked),row_goal)
+            start,goal=projected_start,projected_goal
+        sx,sy=self._indices(start); gx,gy=self._indices(goal)
         blocked[batch,gx,gy]=False
         blocked[batch,sx,sy]=False
         # Both the HIP kernels and the Torch fallback broadcast this one
@@ -1267,11 +1285,8 @@ class TensorADStar:
             lengths += progressing.long()
             reached=(px==gx)&(py==gy)
             active &= progressing & ~reached
-            # Route extraction is sequential, but once every world is done,
-            # remaining iterations are no-ops. Check in chunks to avoid a
-            # device synchronization on each path point.
-            if k % 16 == 0 and not bool(active.any().item()):
-                break
+            # Keep route extraction fixed-iteration; a host reduction here
+            # would synchronize every batch on device progress.
         write_rows(self.potential, value)
         if learned_cost is None:
             path,lengths=self._shortcut_path(
@@ -1366,21 +1381,20 @@ class TensorADStar:
 
     def defender_spawn(self, starts, mask, generator):
         """Choose a randomized point near the computed clear route on-device."""
+        if (self.device.type != "cpu" and
+                (not isinstance(mask,torch.Tensor) or mask.device != self.device)):
+            raise ValueError("GPU defender spawn mask must already reside on planner device")
+        mask=torch.as_tensor(mask,device=self.device,dtype=torch.bool).reshape(self.n)
         distance=(self.last_path-starts[:,None,:]).norm(dim=-1)
         valid=(torch.arange(self.max_points,device=self.device)[None,:] < self.last_lengths[:,None])
         eligible=valid&(distance>=1.25)&(distance<=2.75)
         # Random ranks among eligible points, with an ahead-of-start fallback.
-        weights=torch.zeros(eligible.shape,device=self.device)
-        count=int(mask.sum().item())
-        if count:
-            weights[mask]=torch.rand((count,self.max_points),device=self.device,generator=generator)
-        weights=weights.masked_fill(~eligible,-1.)
+        weights=torch.rand(eligible.shape,device=self.device,generator=generator)
+        weights=weights.masked_fill(~(eligible&mask[:,None]),-1.)
         index=weights.argmax(-1)
         fallback=(valid&(distance>=1.1)).float().argmax(-1)
-        index=torch.where(eligible.any(-1),index,fallback)
+        index=torch.where((eligible&mask[:,None]).any(-1),index,fallback)
         point=self.last_path[torch.arange(self.n,device=self.device),index]
-        jitter=torch.zeros((self.n,2),device=self.device)
-        if count:
-            jitter[mask]=torch.rand((count,2),device=self.device,generator=generator)-.5
+        jitter=torch.rand((self.n,2),device=self.device,generator=generator)-.5
         point=torch.where(mask[:,None],point+jitter*.18,starts)
         return point

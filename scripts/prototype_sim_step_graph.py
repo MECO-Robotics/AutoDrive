@@ -71,8 +71,8 @@ def main():
     # Warm extension compilation and allocator paths, then reset both sims to
     # identical seeds before capture and comparison.
     for _ in range(2):
-        eager.sim.step(commands, active, _active_nonempty=True)
-        captured.sim.step(commands, active, _active_nonempty=True)
+        eager.sim.step(commands, active)
+        captured.sim.step(commands, active)
     eager.reset(seed=args.seed)
     captured.reset(seed=args.seed)
     torch.cuda.synchronize(device)
@@ -83,10 +83,10 @@ def main():
     try:
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
-            captured.sim.step(commands, active, _active_nonempty=True)
+            captured.sim.step(commands, active)
         torch.cuda.synchronize(device)
         for tick in range(1, args.ticks + 1):
-            eager.sim.step(commands, active, _active_nonempty=True)
+            eager.sim.step(commands, active)
             graph.replay()
             torch.cuda.synchronize(device)
             difference = compare(tensor_state(eager.sim), tensor_state(captured.sim), tick)
