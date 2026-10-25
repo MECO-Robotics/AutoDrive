@@ -10,8 +10,12 @@
 > compilation, JS syntax, and diff checks passed. The three-pass ledger now
 > contains 70 summaries with its dashboard digest pin updated. No simulator,
 > replay, GPU, or training action was part of this dashboard-only change; the
-> active r4 training run was left untouched. Dashboard restart/currentness
-> verification follows this integration commit.
+> active r4 training run was left untouched. After integration commit
+> `0be3ff7f7`, `frc-defense-dashboard.service` restarted from this checkout at
+> 05:32:03 UTC (PID `3034352`). `/`, both status APIs, and both JavaScript
+> assets returned HTTP 200; the curriculum API validated all 70 summaries,
+> with this tranche latest. Both served asset SHA-256 hashes matched this
+> checkout.
 
 > **Diagnostic monitor tranche reviewed and pushed — 2026-10-25 05:07 UTC.** The
 > manifest-bound diagnostic evaluation monitor is approved at exact head
