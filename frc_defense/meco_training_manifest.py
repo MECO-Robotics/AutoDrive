@@ -478,8 +478,16 @@ def describe_campaign(config, *, source_root=ROOT, output=None):
     source = source_identity_projection(source_identity())
     source_hash = _sha(source)
     git = _git_binding(source_root)
-    warm = {track: _warm_start(config.get("warm_start_artifacts", {}).get(track), track,
+    warm_artifacts = config.get("warm_start_artifacts") or {}
+    if not isinstance(warm_artifacts, dict) or set(warm_artifacts) not in (set(), set(MECO_TRACKS)):
+        raise ValueError("warm starts must be configured for all five tracks or none")
+    warm = {track: _warm_start(warm_artifacts.get(track), track,
             source, protocol_path, protocol["protocol_id"], protocol_sha) for track in MECO_TRACKS}
+    present_warm_starts = [item["present"] for item in warm.values()]
+    if any(present_warm_starts) and not all(present_warm_starts):
+        raise ValueError("warm starts must be present for all five tracks or none")
+    if all(present_warm_starts) and any(not item["binding_valid"] for item in warm.values()):
+        raise ValueError("all supplied warm starts must bind the current source, protocol and track")
     schedule = config.get("scheduler")
     if not isinstance(schedule, dict) or schedule.get("master_seed") != base_seed:
         raise ValueError("scheduler must explicitly bind the protocol master seed")
@@ -695,6 +703,12 @@ def validate_campaign_manifest(manifest, *, source_root=ROOT):
             protocol.get("path"), protocol["protocol_id"], protocol["sha256"])
         if current != item:
             raise ValueError(f"{track} warm-start bytes, binding, or target coverage changed")
+    present_warm_starts = [item.get("present") is True for item in warm.values()]
+    if any(present_warm_starts) and not all(present_warm_starts):
+        raise ValueError("campaign manifest contains a partial five-track warm-start set")
+    if all(present_warm_starts) and any(item.get("binding_valid") is not True
+            for item in warm.values()):
+        raise ValueError("campaign manifest warm starts do not all bind source/protocol/track")
     all_covered = all(warm[t].get("phase2_covered") is True for t in MECO_TRACKS)
     readiness = manifest.get("readiness", {})
     hardware_ready = bool(host_inventory["verified"] and

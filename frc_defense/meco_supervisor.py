@@ -91,6 +91,43 @@ def _validate_runtime_warm_start(track, artifact, *, qualification_protocol,
         expected_prediction_mode=prediction_mode)
 
 
+def _manifest_warm_start_paths(campaign_manifest):
+    """Return the exact present five-track artifact map from manifest metadata."""
+    warm = campaign_manifest.get("warm_starts") if isinstance(campaign_manifest, dict) else None
+    if not isinstance(warm, dict) or set(warm) != set(MECO_TRACKS):
+        raise ValueError("campaign manifest must contain warm-start entries for all five tracks")
+    present = [item.get("present") is True for item in warm.values()
+        if isinstance(item, dict)]
+    if len(present) != len(MECO_TRACKS):
+        raise ValueError("campaign manifest warm-start entries are malformed")
+    if not any(present):
+        if any(item.get("present") is not False or item.get("path") is not None or
+                item.get("sha256") is not None for item in warm.values()):
+            raise ValueError("absent warm-start map contains partial artifact metadata")
+        return {}
+    if not all(present):
+        raise ValueError("campaign manifest warm starts must cover all five tracks or none")
+    result = {}
+    for track in MECO_TRACKS:
+        item = warm[track]
+        path_text, digest = item.get("path"), item.get("sha256")
+        if (item.get("binding_valid") is not True or not isinstance(path_text, str) or
+                not path_text or not isinstance(digest, str) or len(digest) != 64 or
+                any(char not in "0123456789abcdef" for char in digest)):
+            raise ValueError(f"{track} manifest warm-start binding is invalid")
+        path = Path(path_text).expanduser().absolute()
+        cursor = path
+        while cursor != cursor.parent:
+            if cursor.is_symlink():
+                raise ValueError(f"{track} warm-start path contains a symlink")
+            cursor = cursor.parent
+        if (not path.is_file() or
+                hashlib.sha256(path.read_bytes()).hexdigest() != digest):
+            raise ValueError(f"{track} manifest warm-start bytes are missing or changed")
+        result[track] = str(path.resolve())
+    return result
+
+
 def _atomic_json(path: Path, payload):
     path.parent.mkdir(parents=True, exist_ok=True)
     content = json.dumps(payload, indent=2, allow_nan=False)
@@ -404,6 +441,11 @@ class MecoSupervisor:
             self.manifest_validation = validate_campaign_manifest(campaign_manifest)
             if not self.manifest_validation["valid"]:
                 raise ValueError("campaign manifest failed validation")
+            manifest_warm_paths = _manifest_warm_start_paths(campaign_manifest)
+            supplied_warm_paths = {track: str(Path(path).expanduser().resolve())
+                for track, path in dict(warm_start_artifacts or {}).items()}
+            if supplied_warm_paths != manifest_warm_paths:
+                raise ValueError("runtime warm-start paths must exactly match the validated campaign manifest")
             self.manifest = campaign_manifest
             # The frozen manifest is the sole authority in manifest mode.
             # Older v2 manifests omit this field and retain the historical
@@ -1970,7 +2012,8 @@ def main(argv=None):
             evaluation_protocol=(None if ev["split"] == "diagnostic" else ev["path"]),
             evaluation_split=ev["split"],
             phase4_train_exposure=campaign.get("phase4_train_exposure", False),
-            campaign_manifest=manifest, resume_campaign=args.resume_campaign)
+            campaign_manifest=manifest, resume_campaign=args.resume_campaign,
+            warm_start_artifacts=_manifest_warm_start_paths(manifest))
         result = supervisor.run()
         print(json.dumps(result, indent=2))
         return result
