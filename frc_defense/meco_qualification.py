@@ -2161,6 +2161,22 @@ def _paired_shard_for_index(campaign, shard_index):
     return campaign["shards"][shard_index]
 
 
+def paired_calibration_replay_binding(campaign, shard_index, work_unit):
+    """Return the exact immutable context to pass through evaluate_meco into replay."""
+    shard = _paired_shard_for_index(campaign, shard_index)
+    if work_unit not in shard["work_units"]:
+        raise ValueError("paired calibration binding work unit is outside its shard")
+    return {"campaign_id": campaign["campaign_id"],
+        "shard_index": shard_index, "shard_manifest_id": shard["manifest_id"],
+        "work_unit_id": _canonical_sha256(work_unit), "work_unit": work_unit,
+        "pair_id": work_unit["pair_id"], "control_id": work_unit["control_id"],
+        "source_binding": campaign["source"],
+        "baseline_freeze_sha256": campaign["baseline_freeze"]["freeze_sha256"],
+        "partition_sha256": campaign["partition"]["partition_sha256"],
+        "estimand_approval_sha256": campaign["estimand_approval"]["approval_sha256"],
+        "scoring": campaign["scoring"]}
+
+
 def build_paired_calibration_progress(campaign, shard_index, completed_rows, *,
         replay_root, approval):
     """Compile progress only after reloading and revalidating every replay row."""
@@ -2262,6 +2278,159 @@ def build_paired_calibration_final_shard(campaign, shard_index, progress, *,
     return {**body, "final_shard_id": _canonical_sha256(body)}
 
 
+def _paired_variance(values):
+    if len(values) < 2:
+        return 0.0
+    mean = sum(values) / len(values)
+    return sum((value - mean) ** 2 for value in values) / (len(values) - 1)
+
+
+def _paired_control_summary(campaign, control_id, pairs):
+    strata = {}
+    outcome_deltas = {"red": [], "blue": []}
+    safety_deltas = {name: [] for name in sorted(SAFETY_METRIC_NAMES)}
+    throughput_deltas = []
+    seed_groups = {}
+    for pair_id, rows in pairs.items():
+        if set(rows) != {"D0", control_id}:
+            raise ValueError("paired calibration merge has incomplete or extra control pairing")
+        baseline, candidate = rows["D0"], rows[control_id]
+        left = {key: value for key, value in baseline["work_unit"].items()
+            if key not in ("control_id", "paired_control_id", "pair_id")}
+        right = {key: value for key, value in candidate["work_unit"].items()
+            if key not in ("control_id", "paired_control_id", "pair_id")}
+        if (left != right
+                or baseline["work_unit"]["paired_control_id"] != control_id
+                or candidate["work_unit"]["paired_control_id"] != control_id):
+            raise ValueError("paired calibration merge pair tuple/repetition differs")
+        tuple_row = candidate["work_unit"]
+        stratum = tuple(tuple_row[key] for key in ("category", "layout_id",
+            "defender_family", "start_condition", "sensor_profile"))
+        deltas = {side: candidate["simulated_match_score"][side]
+            - baseline["simulated_match_score"][side] for side in ("red", "blue")}
+        strata.setdefault(stratum, {side: [] for side in ("red", "blue")})
+        for side in ("red", "blue"):
+            strata[stratum][side].append(float(deltas[side]))
+            outcome_deltas[side].append(float(deltas[side]))
+        seed_key = (stratum, tuple_row["seed"])
+        seed_groups.setdefault(seed_key, {side: [] for side in ("red", "blue")})
+        for side in ("red", "blue"):
+            seed_groups[seed_key][side].append(float(deltas[side]))
+        for name in safety_deltas:
+            safety_deltas[name].append(candidate["safety_metrics"][name]
+                - baseline["safety_metrics"][name])
+        throughput_deltas.append(candidate["useful_throughput"]
+            - baseline["useful_throughput"])
+    if not outcome_deltas["red"]:
+        raise ValueError("paired calibration merge has no completed pairs")
+    summary = {"control_id": control_id, "pair_count": len(pairs),
+        "simulated_match_score_difference": {}}
+    for side in ("red", "blue"):
+        groups = {repr(key): values[side] for key, values in strata.items()}
+        bootstrap_seed = int(_canonical_sha256({"campaign_id": campaign["campaign_id"],
+            "control_id": control_id, "alliance": side})[:16], 16)
+        differences = outcome_deltas[side]
+        within = [_paired_variance(group[side]) for group in seed_groups.values()]
+        seed_means = [sum(group[side]) / len(group[side])
+            for group in seed_groups.values()]
+        summary["simulated_match_score_difference"][side] = {
+            "mean": sum(differences) / len(differences),
+            "cluster_bootstrap_ci": _cluster_bootstrap_ci(groups,
+                seed=bootstrap_seed, replicates=BOOTSTRAP_REPLICATES),
+            "within_seed_variance_mean": sum(within) / len(within),
+            "between_seed_variance": _paired_variance(seed_means)}
+    summary["safety_rate_difference"] = {name: {
+        "mean": sum(values) / len(values)} for name, values in safety_deltas.items()}
+    summary["useful_throughput_difference_mean"] = (
+        sum(throughput_deltas) / len(throughput_deltas))
+    return summary
+
+
+def build_paired_calibration_merged_report(campaign, final_shard_raws, *,
+        replay_root, approval):
+    """Strictly merge complete canonical shard bytes and produce preregistered summaries."""
+    validate_paired_calibration_campaign(campaign)
+    blockers = paired_calibration_execution_blockers(campaign)
+    if blockers:
+        raise ValueError("paired calibration merge blocked by controls: "
+            + ", ".join(blockers))
+    if not isinstance(final_shard_raws, list) or len(final_shard_raws) != len(campaign["shards"]):
+        raise ValueError("paired calibration merge requires exactly one final artifact per shard")
+    final_by_index = {}
+    final_hashes = {}
+    for raw in final_shard_raws:
+        if not isinstance(raw, bytes) or not raw:
+            raise ValueError("paired calibration final shard must be supplied as exact bytes")
+        try:
+            artifact = json.loads(raw)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError("paired calibration final shard is invalid JSON") from exc
+        canonical = json.dumps(artifact, sort_keys=True, separators=(",", ":"),
+            allow_nan=False).encode("utf-8")
+        if raw != canonical:
+            raise ValueError("paired calibration final shard bytes are not canonical")
+        index = artifact.get("shard_index") if isinstance(artifact, dict) else None
+        if type(index) is not int or index in final_by_index:
+            raise ValueError("paired calibration merge has duplicate or invalid shard index")
+        shard = _paired_shard_for_index(campaign, index)
+        body = {key: value for key, value in artifact.items() if key != "final_shard_id"}
+        expected_fields = {"schema", "campaign_id", "shard_index",
+            "shard_manifest_id", "worker_id", "worker_assignment_sha256",
+            "source_binding", "baseline_freeze_sha256", "partition_sha256",
+            "estimand_approval_sha256", "scoring", "progress_id",
+            "completed_work_unit_ids", "completed_rows", "complete", "final_shard_id"}
+        if (set(artifact) != expected_fields
+                or artifact.get("schema") != PAIRED_CALIBRATION_FINAL_SHARD
+                or artifact.get("final_shard_id") != _canonical_sha256(body)
+                or artifact.get("campaign_id") != campaign["campaign_id"]
+                or artifact.get("shard_manifest_id") != shard["manifest_id"]
+                or artifact.get("worker_id") != shard["worker_id"]
+                or artifact.get("worker_assignment_sha256") != shard["worker_assignment_sha256"]
+                or artifact.get("source_binding") != campaign["source"]
+                or artifact.get("baseline_freeze_sha256") != campaign["baseline_freeze"]["freeze_sha256"]
+                or artifact.get("partition_sha256") != campaign["partition"]["partition_sha256"]
+                or artifact.get("estimand_approval_sha256") != campaign["estimand_approval"]["approval_sha256"]
+                or artifact.get("scoring") != campaign["scoring"]
+                or artifact.get("complete") is not True):
+            raise ValueError("paired calibration final shard identity or bindings changed")
+        expected_ids = sorted(_canonical_sha256(unit) for unit in shard["work_units"])
+        if artifact.get("completed_work_unit_ids") != expected_ids:
+            raise ValueError("paired calibration final shard has incomplete or extra work")
+        row_ids = []
+        for row in artifact.get("completed_rows", []):
+            validate_paired_calibration_outcome_row(campaign, index, row,
+                replay_root=replay_root, approval=approval)
+            row_ids.append(row["work_unit_id"])
+        if row_ids != expected_ids:
+            raise ValueError("paired calibration final shard rows do not exactly cover schedule")
+        final_by_index[index] = artifact
+        final_hashes[index] = hashlib.sha256(raw).hexdigest()
+    if set(final_by_index) != set(range(len(campaign["shards"]))):
+        raise ValueError("paired calibration merge shard set is incomplete")
+    all_rows = [row for index in range(len(campaign["shards"]))
+        for row in final_by_index[index]["completed_rows"]]
+    row_by_unit = {row["work_unit_id"]: row for row in all_rows}
+    if len(row_by_unit) != len(all_rows):
+        raise ValueError("paired calibration merge has overlapping work units")
+    expected_units = [unit for shard in campaign["shards"] for unit in shard["work_units"]]
+    if set(row_by_unit) != {_canonical_sha256(unit) for unit in expected_units}:
+        raise ValueError("paired calibration merge does not cover the frozen schedule")
+    pairs = {}
+    for row in all_rows:
+        pairs.setdefault(row["pair_id"], {})[row["control_id"]] = row
+    summaries = [_paired_control_summary(campaign, control_id,
+        {pair_id: rows for pair_id, rows in pairs.items() if control_id in rows})
+        for control_id in PAIRED_CALIBRATION_CONTROLS[1:]]
+    body = {"schema": "meco-paired-calibration-merged-report-v1",
+        "campaign_id": campaign["campaign_id"],
+        "final_shard_sha256": [final_hashes[index]
+            for index in range(len(campaign["shards"]))],
+        "work_unit_count": len(all_rows), "control_summaries": summaries,
+        "official_match_points": None, "qualification_eligible": False,
+        "interpretation": "descriptive simulated outcome calibration; not official match points, qualification, or margin approval"}
+    return {**body, "report_id": _canonical_sha256(body)}
+
+
 def write_paired_calibration_artifact_immutable(path, artifact):
     """Atomically publish canonical JSON without replacing conflicting bytes."""
     path = Path(path)
@@ -2347,6 +2516,13 @@ def build_paired_calibration_outcome_row(campaign, shard_index, work_unit,
     if (evaluation_record.get("safety_metrics_schema") != SAFETY_METRICS_SCHEMA
             or evaluation_record.get("safety_metrics_source_identity_sha256") != source_hash):
         raise ValueError("paired calibration safety metrics lack exact source binding")
+    safety_metrics = evaluation_record.get("meco_metric_ledger", {}).get("safety_metrics")
+    if (not isinstance(safety_metrics, dict)
+            or set(safety_metrics) != SAFETY_METRIC_NAMES
+            or any(type(safety_metrics.get(name)) not in (int, float)
+                or not math.isfinite(float(safety_metrics[name]))
+                or not 0 <= float(safety_metrics[name]) <= 1 for name in SAFETY_METRIC_NAMES)):
+        raise ValueError("paired calibration exact safety ledger is missing or invalid")
     replay_path = replay_ref.get("result_path")
     replay_id = replay_ref.get("simulation_id")
     replay_record_digest = replay_ref.get("evaluation_record_digest")
@@ -2372,6 +2548,8 @@ def build_paired_calibration_outcome_row(campaign, shard_index, work_unit,
     if (not isinstance(replay, dict) or replay.get("simulation_id") != replay_id
             or replay.get("evaluation_record_digest") != replay_record_digest
             or replay.get("replay_contract_schema") != PAIRED_CALIBRATION_REPLAY_CONTRACT
+            or replay.get("paired_calibration_binding") != paired_calibration_replay_binding(
+                campaign, shard_index, work_unit)
             or replay.get("source_identity_sha256") != source_hash):
         raise ValueError("paired calibration replay identity/source differs from its reference")
     for field in ("scenario_id", "category", "seed", "split", "policy", "policy_id",
@@ -2391,6 +2569,13 @@ def build_paired_calibration_outcome_row(campaign, shard_index, work_unit,
     from .meco_simulated_score_ledger import (EVENT_STREAM_SCHEMA, LEDGER_SCHEMA,
         RULES_ID, RULES_SHA256)
     worker = campaign["worker_assignments"][shard_index % len(campaign["worker_assignments"])]
+    if (evaluation_record.get("execution_device", {}).get("device") != worker["device"]
+            or evaluation_record.get("execution_device", {}).get("accelerator_backend") != "ROCm"):
+        raise ValueError("paired calibration evaluation did not use its assigned indexed WX9100")
+    outcome_digest = _canonical_sha256({"metrics": metrics,
+        "safety_metrics": safety_metrics,
+        "execution_failures": evaluation_record.get("execution_failures")})
+    safety_digest = _canonical_sha256(safety_metrics)
     body = {"schema": PAIRED_CALIBRATION_ARTIFACT,
         "campaign_id": campaign["campaign_id"], "shard_index": shard_index,
         "shard_manifest_id": shard["manifest_id"], "work_unit_id": unit_id,
@@ -2401,6 +2586,14 @@ def build_paired_calibration_outcome_row(campaign, shard_index, work_unit,
         "evaluation_record_sha256": replay_record_digest,
         "worker_assignment": worker,
         "worker_assignment_sha256": _canonical_sha256(worker),
+        "paired_calibration_binding": paired_calibration_replay_binding(
+            campaign, shard_index, work_unit),
+        "paired_calibration_binding_sha256": _canonical_sha256(
+            paired_calibration_replay_binding(campaign, shard_index, work_unit)),
+        "evaluation_metrics": metrics,
+        "evaluation_metrics_sha256": _canonical_sha256(metrics),
+        "execution_failures": evaluation_record.get("execution_failures"),
+        "outcome_digest": outcome_digest, "safety_digest": safety_digest,
         "ledger_schema": LEDGER_SCHEMA, "rules_id": RULES_ID,
         "rules_sha256": RULES_SHA256,
         "event_stream_schema": EVENT_STREAM_SCHEMA,
@@ -2419,7 +2612,8 @@ def build_paired_calibration_outcome_row(campaign, shard_index, work_unit,
         "raw_fuel_counts": list(terminal_counts),
         "safety_metrics_schema": SAFETY_METRICS_SCHEMA,
         "safety_metrics_source_identity_sha256": source_hash,
-        "safety_metrics": {name: float(metrics[name]) for name in sorted(SAFETY_METRIC_NAMES)}}
+        "safety_metrics": {name: float(safety_metrics[name])
+            for name in sorted(SAFETY_METRIC_NAMES)}}
     return {**body, "outcome_row_sha256": _canonical_sha256(body)}
 
 
@@ -2431,8 +2625,11 @@ def validate_paired_calibration_outcome_row(campaign, shard_index, row, *,
         "work_unit_id", "work_unit", "pair_id", "control_id", "replay_id",
         "replay_path", "replay_sha256", "evaluation_record_sha256",
         "worker_assignment", "worker_assignment_sha256", "ledger_schema", "rules_id",
+        "paired_calibration_binding", "paired_calibration_binding_sha256",
         "rules_sha256", "event_stream_schema", "replay_contract_schema",
         "event_stream_sha256", "ledger_sha256", "estimand_approval_sha256",
+        "evaluation_metrics", "evaluation_metrics_sha256", "outcome_digest", "safety_digest",
+        "execution_failures",
         "terminal_score_counts", "score_binding", "simulated_match_score",
         "official_match_points", "qualification_eligible", "useful_throughput",
         "raw_fuel_counts", "safety_metrics_schema",
@@ -2462,6 +2659,10 @@ def validate_paired_calibration_outcome_row(campaign, shard_index, row, *,
     if (row.get("worker_assignment") != worker
             or row.get("worker_assignment_sha256") != _canonical_sha256(worker)):
         raise ValueError("paired calibration outcome worker/device identity changed")
+    replay_binding = paired_calibration_replay_binding(campaign, shard_index, unit)
+    if (row.get("paired_calibration_binding") != replay_binding
+            or row.get("paired_calibration_binding_sha256") != _canonical_sha256(replay_binding)):
+        raise ValueError("paired calibration outcome binding differs from campaign shard")
     from .meco_simulated_score_ledger import (EVENT_STREAM_SCHEMA, LEDGER_SCHEMA,
         RULES_ID, RULES_SHA256, estimand_approval_digest,
         validate_estimand_approval, validate_replay_score_binding)
@@ -2483,6 +2684,13 @@ def validate_paired_calibration_outcome_row(campaign, shard_index, row, *,
     if (replay.get("simulation_id") != row["replay_id"]
             or replay.get("evaluation_record_digest") != row["evaluation_record_sha256"]
             or replay.get("source_identity_sha256") != source_hash
+            or replay.get("paired_calibration_worker_identity") != worker
+            or replay.get("paired_calibration_binding") != replay_binding
+            or replay.get("execution_device") != {"device": worker["device"],
+                "accelerator_backend": "ROCm"}
+            or replay.get("device") != {"device": worker["device"],
+                "accelerator_backend": "ROCm"}
+            or replay.get("simulation_device") != worker["device"]
             or replay.get("score_event_stream", {}).get("schema") != EVENT_STREAM_SCHEMA
             or replay.get("score_event_stream", {}).get("events_sha256") != row["event_stream_sha256"]):
         raise ValueError("paired calibration replay identity/event stream changed")
@@ -2494,6 +2702,24 @@ def validate_paired_calibration_outcome_row(campaign, shard_index, row, *,
                 "policy_id": control["policy_id"],
                 "prediction_mode": control["prediction_mode"]}[field]):
             raise ValueError("paired calibration replay tuple/control differs from work unit")
+    expected_case = {key: unit[key] for key in (
+        "layout_id", "defender_family", "start_condition", "sensor_profile")}
+    replay_evaluation = replay.get("evaluation_record")
+    if (replay.get("qualification_case") != expected_case
+            or not isinstance(replay_evaluation, dict)
+            or replay_evaluation.get("metrics") != row["evaluation_metrics"]
+            or replay_evaluation.get("safety_metrics") != row["safety_metrics"]
+            or replay.get("outcome_digest") != row["outcome_digest"]
+            or replay.get("safety_digest") != row["safety_digest"]
+            or _canonical_sha256(replay_evaluation.get("metrics"))
+                != row["evaluation_metrics_sha256"]):
+        raise ValueError("paired calibration replay outcome/case/safety digest differs")
+    if (not isinstance(row.get("execution_failures"), list)
+            or _canonical_sha256({"metrics": row["evaluation_metrics"],
+                "safety_metrics": row["safety_metrics"],
+                "execution_failures": row["execution_failures"]}) != row["outcome_digest"]
+            or _canonical_sha256(row["safety_metrics"]) != row["safety_digest"]):
+        raise ValueError("paired calibration evaluation outcome/safety digest is invalid")
     rebuilt = validate_replay_score_binding(replay, row["score_binding"],
         row["terminal_score_counts"], approval)
     if (rebuilt["ledger_sha256"] != row["ledger_sha256"]

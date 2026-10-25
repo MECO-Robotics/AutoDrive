@@ -4,10 +4,16 @@ import copy
 import hashlib
 import json
 from pathlib import Path
+import struct
 
 import pytest
 
 from frc_defense import meco_qualification as q
+from frc_defense.meco_simulated_score_ledger import (
+    ESTIMAND_SCHEMA, OUTCOME_NAME, PHASE0_PLAN_SHA256, RULES, RULES_ID,
+    RULES_SHA256, SOURCE_PLAN_SHA256, MecoScoreEventRecorder,
+    estimand_approval_digest, make_event_stream, sha256,
+    validate_estimand_approval, validate_replay_score_binding)
 
 
 def _workers():
@@ -24,6 +30,7 @@ def _workers():
 
 def _bindings():
     freeze_sha = "b" * 64
+    approval_sha = estimand_approval_digest(_approval())
     return ({"path": "artifacts/baseline-freeze.json",
              "artifact_sha256": "a" * 64,
              "schema": "meco-baseline-freeze-v2",
@@ -37,7 +44,23 @@ def _bindings():
             {"path": "approvals/estimand.json",
              "artifact_sha256": "e" * 64,
              "schema": "meco-simulated-score-estimand-review-v1",
-             "approval_sha256": "f" * 64})
+             "approval_sha256": approval_sha})
+
+
+def _approval():
+    return {"schema": ESTIMAND_SCHEMA, "approval_id": "human-review-fixture",
+        "approved": True, "approver": "fixture@example.org",
+        "approved_at": "2026-10-25T12:00:00Z",
+        "source_plan_sha256": SOURCE_PLAN_SHA256,
+        "phase0_plan_sha256": PHASE0_PLAN_SHA256,
+        "simulator_source_sha256": "9" * 64,
+        "rules_id": RULES_ID, "rules_sha256": RULES_SHA256,
+        "primary_estimand": OUTCOME_NAME,
+        "formula": "sum score_units by alliance over accepted FUEL score-award events",
+        "unit": RULES["unit"], "included_outcomes": RULES["included_outcomes"],
+        "excluded_outcomes": RULES["excluded_outcomes"],
+        "interpretation_limits": "Synthetic contract fixture, not official FRC points.",
+        "intended_use": "Descriptive simulator outcome research only."}
 
 
 def _cases(monkeypatch):
@@ -71,8 +94,39 @@ def _outcome_fixture(monkeypatch, campaign, unit, replay_root):
     source_hash = campaign["source"]["source_identity_sha256"]
     metrics = {name: .1 for name in q.SAFETY_METRIC_NAMES}
     metrics.update({"success": 1.0, "useful_throughput": 3.5})
-    ledger = {"ledger_sha256": "9" * 64,
-        "simulated_match_score": {"red": 2, "blue": 1}}
+    approval = _approval()
+    approval_sha = estimand_approval_digest(approval)
+    scoring_configuration = {"dt": 0.02, "alliance_zone_depth_m": 3.0,
+        "hub_schedule": "source-bound-current", "robot_control_modes": ["deterministic"] * 6,
+        "robot_types": ["dumper"] * 6, "robot_roles": ["offense"] * 3 + ["defense"] * 3,
+        "robot_fuel_capacities": [8] * 6, "robot_score_interval_s": [0.2] * 6,
+        "robot_dimensions_m": {"length": [1.] * 6, "width": [.7] * 6},
+        "field_geometry": {"field_length_m": 16., "field_width_m": 8.,
+            "hub_centers_m": [[4., 4.], [12., 4.]], "bump_regions": []},
+        "robot_readiness": {"dumper_stationary_linear_mps": 0.2,
+            "dumper_stationary_angular_radps": 0.2,
+            "dumper_aim_tolerance_rad": 3.14159 / 9,
+            "bump_clearance_source": "TensorThreeVsThreeEnv._robots_clear_of_bumps"},
+        "score_intent_source": "effective policy action trace passed to update_fuel_actions",
+        "score_rules_id": RULES_ID, "robot_team_slots": [0, 0, 0, 1, 1, 1],
+        "fuel_count": 32}
+    context = {"episode_id": "paired-fixture-episode", "seed": unit["seed"],
+        "scenario_id": unit["scenario_id"], "robot_team_slots": [0, 0, 0, 1, 1, 1],
+        "world_count": 1, "source_identity_sha256": source_hash,
+        "effective_scoring_configuration": scoring_configuration,
+        "effective_scoring_configuration_sha256": sha256(scoring_configuration),
+        "fuel_count": 32, "terminal_state": "complete", "terminal_tick": 8}
+    recorder = MecoScoreEventRecorder(context, approval, approval_sha)
+    elapsed = 0.
+    dt = struct.unpack("=f", struct.pack("=f", .02))[0]
+    for _ in range(2):
+        elapsed = struct.unpack("=f", struct.pack("=f", elapsed + dt))[0]
+    recorder.record_award(tick=1, match_elapsed_s=elapsed, world_slot=0,
+        alliance=0, robot_slot=0, piece_slot=4, piece_generation=0,
+        source_site="gamepiece_actions.update_fuel_actions.vectorized_score_mutation")
+    captured = recorder.finish(terminal_tick=8, terminal_state="complete",
+        terminal_score_counts=[1, 0])
+    ledger = captured["ledger"]
     evaluation = {**{key: unit[key] for key in (
         "scenario_id", "category", "layout_id", "defender_family",
         "start_condition", "sensor_profile", "split", "seed")},
@@ -82,32 +136,54 @@ def _outcome_fixture(monkeypatch, campaign, unit, replay_root):
         "source_identity_sha256": source_hash,
         "safety_metrics_schema": q.SAFETY_METRICS_SCHEMA,
         "safety_metrics_source_identity_sha256": source_hash,
-        "metrics": metrics, "score_terminal_counters": [2, 1],
-        "fuel_score_count": [2, 1], "official_match_points": None,
+        "meco_metric_ledger": {"safety_metrics": {name: metrics[name]
+            for name in q.SAFETY_METRIC_NAMES}},
+        "metrics": metrics, "score_terminal_counters": [1, 0],
+        "fuel_score_count": [1, 0], "official_match_points": None,
         "qualification_eligible": False,
+        "execution_device": {"device": "cuda:0", "accelerator_backend": "ROCm"},
+        "execution_failures": [],
         "simulated_score_ledger": ledger,
         "simulated_match_score": ledger["simulated_match_score"]}
     replay_digest = q._canonical_sha256(evaluation)
     replay_ref = {"simulation_id": "sim-001",
         "result_path": "sim-001.result.json",
         "evaluation_record_digest": replay_digest}
+    worker = campaign["worker_assignments"][0]
+    outcome_digest = q._canonical_sha256({"metrics": metrics,
+        "safety_metrics": evaluation["meco_metric_ledger"]["safety_metrics"],
+        "execution_failures": []})
     replay = {"simulation_id": "sim-001", "evaluation_record_digest": replay_digest,
         "replay_contract_schema": q.PAIRED_CALIBRATION_REPLAY_CONTRACT,
+        "paired_calibration_binding": q.paired_calibration_replay_binding(
+            campaign, 0, unit),
         "source_identity_sha256": source_hash,
+        "paired_calibration_worker_identity": worker,
+        "device": {"device": "cuda:0", "accelerator_backend": "ROCm"},
+        "execution_device": {"device": "cuda:0", "accelerator_backend": "ROCm"},
+        "simulation_device": "cuda:0", "outcome_digest": outcome_digest,
+        "safety_digest": q._canonical_sha256(evaluation["meco_metric_ledger"]["safety_metrics"]),
         "scenario_id": unit["scenario_id"], "category": unit["category"],
         "seed": unit["seed"], "split": unit["split"],
+        "qualification_case": {key: unit[key] for key in (
+            "layout_id", "defender_family", "start_condition", "sensor_profile")},
         "policy": control["policy"], "policy_id": control["policy_id"],
         "prediction_mode": control["prediction_mode"],
-        "score_event_stream": {"schema": campaign["scoring"]["event_stream_schema"],
-            "events_sha256": "8" * 64}}
+        "evaluation_record": {"metrics": metrics,
+            "safety_metrics": evaluation["meco_metric_ledger"]["safety_metrics"],
+            "simulated_score_ledger_sha256": ledger["ledger_sha256"],
+            "simulated_match_score": ledger["simulated_match_score"],
+            "source_identity_sha256": source_hash},
+        "score_event_stream": captured["event_stream"],
+        "simulated_score_ledger": ledger,
+        "simulated_match_score": ledger["simulated_match_score"],
+        "estimand_approval_sha256": approval_sha,
+        "score_terminal_counters": [1, 0]}
     replay_raw = json.dumps(replay, sort_keys=True).encode()
     (replay_root / replay_ref["result_path"]).write_bytes(replay_raw)
-    from frc_defense import meco_simulated_score_ledger as ledger_api
-    monkeypatch.setattr(ledger_api, "validate_estimand_approval", lambda *a, **k: None)
-    monkeypatch.setattr(ledger_api, "estimand_approval_digest", lambda approval: "f" * 64)
-    monkeypatch.setattr(ledger_api, "validate_replay_score_binding",
-        lambda *args: ledger)
-    approval = {"approved": True}
+    validate_estimand_approval(approval, source_identity_sha256=source_hash)
+    assert estimand_approval_digest(approval) == campaign["estimand_approval"]["approval_sha256"]
+    validate_replay_score_binding(replay, evaluation, [1, 0], approval)
     row = q.build_paired_calibration_outcome_row(campaign, 0, unit, evaluation,
         replay_raw, replay_ref, approval)
     return row, approval, ledger, replay_raw, evaluation, replay_ref
@@ -215,6 +291,33 @@ def test_paired_artifact_writer_is_atomic_idempotent_and_never_overwrites(tmp_pa
             {"schema": q.PAIRED_CALIBRATION_PROGRESS, "progress_id": "b" * 64})
 
 
+def test_paired_merge_stays_blocked_until_every_registered_control_is_executable(monkeypatch):
+    campaign = _campaign(monkeypatch)
+    with pytest.raises(ValueError, match="merge blocked by controls: D2/multi_model_v1"):
+        q.build_paired_calibration_merged_report(campaign, [], replay_root="unused",
+            approval={})
+
+
+def test_paired_control_summary_uses_same_tuple_and_separate_alliance_deltas(monkeypatch):
+    campaign = _campaign(monkeypatch)
+    units = [unit for shard in campaign["shards"] for unit in shard["work_units"]]
+    candidate = next(unit for unit in units if unit["control_id"] == "D1/current")
+    baseline = next(unit for unit in units if unit["pair_id"] == candidate["pair_id"]
+        and unit["control_id"] == "D0")
+    safety = {name: .2 for name in q.SAFETY_METRIC_NAMES}
+    rows = {candidate["pair_id"]: {
+        "D0": {"work_unit": baseline, "simulated_match_score": {"red": 2, "blue": 1},
+            "safety_metrics": safety, "useful_throughput": 3.0},
+        "D1/current": {"work_unit": candidate,
+            "simulated_match_score": {"red": 4, "blue": 0},
+            "safety_metrics": {name: .1 for name in q.SAFETY_METRIC_NAMES},
+            "useful_throughput": 4.0}}}
+    summary = q._paired_control_summary(campaign, "D1/current", rows)
+    assert summary["simulated_match_score_difference"]["red"]["mean"] == 2.0
+    assert summary["simulated_match_score_difference"]["blue"]["mean"] == -1.0
+    assert summary["safety_rate_difference"][next(iter(q.SAFETY_METRIC_NAMES))]["mean"] == -0.1
+
+
 def test_paired_outcome_row_binds_evaluation_and_exact_replay(monkeypatch, tmp_path):
     campaign = _campaign(monkeypatch)
     unit = campaign["shards"][0]["work_units"][0]
@@ -247,6 +350,40 @@ def test_paired_outcome_row_binds_evaluation_and_exact_replay(monkeypatch, tmp_p
     with pytest.raises(ValueError, match="evaluation digest differs"):
         q.build_paired_calibration_outcome_row(campaign, 0, unit, evaluation,
             replay_raw, changed, {"approved": True})
+
+
+@pytest.mark.parametrize("mutation,message", [
+    ("qualification_case", "outcome/case/safety digest differs"),
+    ("metrics", "outcome/case/safety digest differs"),
+    ("safety", "outcome/case/safety digest differs"),
+    ("worker", "identity/event stream changed"),
+])
+def test_paired_outcome_rejects_replay_tuple_metrics_safety_and_device_drift(
+        monkeypatch, tmp_path, mutation, message):
+    campaign = _campaign(monkeypatch)
+    unit = campaign["shards"][0]["work_units"][0]
+    case_root = tmp_path / mutation
+    case_root.mkdir()
+    row, approval, _, replay_raw, _, _ = _outcome_fixture(
+        monkeypatch, campaign, unit, case_root)
+    replay = json.loads(replay_raw)
+    if mutation == "qualification_case":
+        replay["qualification_case"]["layout_id"] = "wrong-layout"
+    elif mutation == "metrics":
+        replay["evaluation_record"]["metrics"]["success"] = 0.0
+    elif mutation == "safety":
+        name = next(iter(q.SAFETY_METRIC_NAMES))
+        replay["evaluation_record"]["safety_metrics"][name] = .9
+    else:
+        replay["paired_calibration_worker_identity"]["device_uuid"] = "other-gpu"
+    changed_raw = json.dumps(replay, sort_keys=True).encode()
+    (case_root / "sim-001.result.json").write_bytes(changed_raw)
+    row["replay_sha256"] = hashlib.sha256(changed_raw).hexdigest()
+    body = {key: value for key, value in row.items() if key != "outcome_row_sha256"}
+    row["outcome_row_sha256"] = q._canonical_sha256(body)
+    with pytest.raises(ValueError, match=message):
+        q.validate_paired_calibration_outcome_row(campaign, 0, row,
+            replay_root=case_root, approval=approval)
 
 
 @pytest.mark.parametrize("field,value", [
