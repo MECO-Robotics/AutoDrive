@@ -30,6 +30,153 @@ def _describe(tmp_path, protocol, repo, cases):
         device="cuda:0", output_root=tmp_path / "campaign", repo_root=repo)
 
 
+def _execute_adapters(tmp_path, descriptor, *, collector_hook=None, combine_hook=None,
+        event_log=None):
+    """Synthetic strict receipts/sidecars for execute_multicase's restart contract."""
+    runtime = descriptor["runtime_source_identity"]
+    protocol = descriptor["qualification_protocol"]
+    collected = []
+    events = event_log if event_log is not None else []
+
+    def collect(case, attempt_root):
+        case_key = case["case_key"]
+        events.append(("collect", tuple(case_key), str(attempt_root)))
+        attempt_root.mkdir(parents=True, mode=0o700)
+        if collector_hook:
+            collector_hook(case, attempt_root)
+        collected.append((case_key, str(attempt_root)))
+        manifest_path = attempt_root / "complete.json"
+        complete_manifest = {"synthetic_complete": True}
+        manifest_path.write_text(json.dumps(complete_manifest))
+        one_case = {"scenario_id": case_key[0], "category": case_key[1],
+            "seeds": case["seeds"], "device": descriptor["device"],
+            "source": descriptor["source"], "qualification_protocol": protocol,
+            "outputs": {"root": str(attempt_root), "manifest": str(manifest_path)}}
+        datasets = {}
+        source = None
+        for family in ("trajectory", "ub", "p"):
+            data_path = attempt_root / f"{family}.jsonl"
+            device_info = {"device": descriptor["device"], "synthetic": True}
+            rows = [{"scenario_id": case_key[0], "category": case_key[1],
+                "seed": seed, "decision_index": 0,
+                "protocol_id": protocol["id"],
+                "qualification_protocol_sha256": protocol["sha256"],
+                "source_identity_sha256": multi._digest(runtime),
+                "device": device_info} for seed in case["seeds"]]
+            data_path.write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in rows))
+            manifest = {"split": "train", "scenario_id": case_key[0],
+                "category": case_key[1], "seeds": case["seeds"],
+                "protocol_id": protocol["id"],
+                "qualification_protocol_sha256": protocol["sha256"],
+                "sources": runtime, "source_identity_sha256": multi._digest(runtime),
+                "device": device_info, "prediction_mode": descriptor["prediction_mode"],
+                "record_count": len(rows), "dataset_sha256": multi._sha(data_path.read_bytes())}
+            if family != "trajectory":
+                manifest.update({"source_dataset_sha256": source["sha256"],
+                    "source_manifest_sha256": source["manifest_sha256"]})
+            sidecar = data_path.with_suffix(data_path.suffix + ".manifest.json")
+            sidecar.write_text(json.dumps(manifest, sort_keys=True))
+            datasets[family] = {"path": str(data_path), "sha256": multi._sha(data_path.read_bytes()),
+                "manifest_path": str(sidecar), "manifest_sha256": multi._sha(sidecar.read_bytes())}
+            if family == "trajectory":
+                source = datasets[family]
+        return {"schema": multi.SCHEMA + ".case-receipt",
+            "descriptor_sha256": descriptor["descriptor_sha256"],
+            "case_key": case_key, "seeds": case["seeds"],
+            "source": descriptor["source"], "qualification_protocol": protocol,
+            "device": descriptor["device"], "one_case_descriptor": one_case,
+            "attempt_root": str(attempt_root),
+            "complete_set_manifest_path": str(manifest_path),
+            "complete_set_manifest_sha256": multi._sha(manifest_path.read_bytes()),
+            "complete_set_manifest": complete_manifest, "datasets": datasets}
+
+    def combine(family, shards, output, *, expected_cases, descriptor,
+            source_binding=None, source_shards=None):
+        records = []
+        shard_manifests = []
+        for case, shard_path in zip(expected_cases, shards):
+            path = Path(shard_path)
+            rows = [json.loads(line) for line in path.read_text().splitlines() if line]
+            records.extend(rows)
+            sidecar = path.with_suffix(path.suffix + ".manifest.json")
+            shard_manifests.append({"case_key": [case["scenario_id"], case["category"]],
+                "seeds": case["seeds"], "path": str(path), "manifest_path": str(sidecar),
+                "dataset_sha256": multi._sha(path.read_bytes()),
+                "manifest_sha256": multi._sha(sidecar.read_bytes()),
+                "record_count": len(rows), "schema": "synthetic-v1", "target_schema": "synthetic-v1"})
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in records))
+        coverage = multi.case_coverage(expected_cases, records)
+        manifest = {"schema": multi.SCHEMA + ".combined-target", "target_family": family,
+            "descriptor_sha256": descriptor["descriptor_sha256"],
+            "case_set_sha256": descriptor["case_set_sha256"],
+            "dataset_sha256": multi._sha(output.read_bytes()), "record_count": len(records),
+            "qualification_protocol": descriptor["qualification_protocol"],
+            "case_coverage": coverage, "shard_manifests": shard_manifests}
+        if family in ("ub", "p"):
+            manifest.update({"source_dataset_sha256": source_binding["sha256"],
+                "source_manifest_sha256": source_binding["manifest_sha256"],
+                "case_source_bindings": [{"case_key": [case["scenario_id"], case["category"]],
+                    "source_dataset_path": item["path"],
+                    "source_dataset_sha256": item["sha256"],
+                    "source_manifest_path": item["manifest_path"],
+                    "source_manifest_sha256": item["manifest_sha256"]}
+                    for case, item in zip(expected_cases, source_shards)]})
+        sidecar = output.with_suffix(output.suffix + ".manifest.json")
+        sidecar.write_text(json.dumps(manifest, sort_keys=True))
+        result = {"path": str(output), "sha256": multi._sha(output.read_bytes()),
+            "manifest_path": str(sidecar), "manifest_sha256": multi._sha(sidecar.read_bytes()),
+            "record_count": len(records), "case_coverage": coverage}
+        if family in ("ub", "p"):
+            result.update({"source_dataset_sha256": source_binding["sha256"],
+                "source_manifest_sha256": source_binding["manifest_sha256"]})
+        if combine_hook:
+            combine_hook(family, shards, output)
+        return result
+
+    def fit(combined, artifact_paths, *, descriptor, shard_receipts=None):
+        for track, artifact in artifact_paths.items():
+            artifact.write_bytes(track.encode())
+        return {"descriptor_sha256": descriptor["descriptor_sha256"],
+            "combined_inputs": combined}
+
+    def validate(track, artifact, combined, *, descriptor):
+        return {"track": track, "artifact_sha256": multi._sha(Path(artifact).read_bytes()),
+            "descriptor_sha256": descriptor["descriptor_sha256"],
+            "case_set_sha256": descriptor["case_set_sha256"], "combined_inputs": combined}
+
+    from contextlib import contextmanager
+    @contextmanager
+    def lease(_devices, *, owner):
+        events.append(("lease_enter", owner))
+        try:
+            yield {"synthetic": True}
+        finally:
+            events.append(("lease_exit", owner))
+
+    def attest(_lease, devices):
+        events.append(("attest", tuple(devices)))
+        return {"logical_lease": {"devices": devices}}
+
+    return collect, combine, fit, validate, lease, attest, collected, events
+
+
+def _run_synthetic_execute(monkeypatch, tmp_path, descriptor, *, collector_hook=None,
+        combine_hook=None):
+    from frc_defense import meco_phase2_complete_set
+    monkeypatch.setattr(multi, "validate_multicase_descriptor", lambda value: value)
+    monkeypatch.setattr(meco_phase2_complete_set, "validate_complete_set_manifest",
+        lambda manifest, _descriptor: manifest if manifest == {"synthetic_complete": True}
+        else (_ for _ in ()).throw(ValueError("synthetic complete-set evidence mismatch")))
+    adapters = _execute_adapters(tmp_path, descriptor,
+        collector_hook=collector_hook, combine_hook=combine_hook)
+    collect, combine, fit, validate, lease, attest, collected, events = adapters
+    result = multi.execute_multicase(descriptor, collect_case=collect,
+        combine_target=combine, fit_combined=fit, validate_track=validate,
+        lease_factory=lease, device_identity_verifier=attest)
+    return result, collected, events, adapters
+
+
 def test_descriptor_is_deterministic_full_case_closed_and_no_write(tmp_path, frozen_protocol):
     protocol, repo = frozen_protocol
     cases = [{"scenario_id": "case-a", "category": "single"},
@@ -82,6 +229,137 @@ def test_case_coverage_rejects_missing_seed_and_duplicate_decision():
         multi.case_coverage(expected, rows[:1])
     with pytest.raises(ValueError, match="duplicate"):
         multi.case_coverage(expected, rows + [copy.deepcopy(rows[0])])
+
+
+def test_execute_multicase_publishes_only_after_serial_shards_and_five_receipts(
+        tmp_path, frozen_protocol, monkeypatch):
+    protocol, repo = frozen_protocol
+    descriptor = _describe(tmp_path, protocol, repo, [
+        {"scenario_id": "case-a", "category": "single"},
+        {"scenario_id": "case-b", "category": "pair"}])
+    result, collected, events, _ = _run_synthetic_execute(monkeypatch, tmp_path, descriptor)
+    assert [case for case, _ in collected] == [["case-a", "single"], ["case-b", "pair"]]
+    assert [event[0] for event in events] == ["lease_enter", "attest", "collect",
+        "collect", "lease_exit"]
+    assert [event[1] for event in events if event[0] == "collect"] == [
+        ("case-a", "single"), ("case-b", "pair")]
+    assert set(result["artifacts"]) == set(multi.MECO_TRACKS)
+    assert result["phase2_ready"] is result["phase2_complete"] is False
+    assert result["qualification_eligible"] is False
+    assert result["target_coverage"]["trajectory"]["case-a::single"]["observed_seeds"] == [11, 12]
+    assert result["target_coverage"]["p"]["case-b::pair"]["observed_seed_count"] == 2
+    assert json.loads(Path(descriptor["outputs"]["manifest"]).read_text()) == result
+    multi.validate_five_track_manifest(result, descriptor,
+        validator_receipts=result["validator_receipts"],
+        artifact_paths={track: Path(entry["path"]) for track, entry in result["artifacts"].items()})
+    pooled = Path(result["combined_inputs"]["p"]["path"])
+    pooled.write_bytes(pooled.read_bytes() + b"tamper\n")
+    with pytest.raises(ValueError, match="combined p bytes changed"):
+        multi.validate_five_track_manifest(result, descriptor,
+            validator_receipts=result["validator_receipts"],
+            artifact_paths={track: Path(entry["path"]) for track, entry in result["artifacts"].items()})
+
+
+@pytest.mark.parametrize("tamper_kind", ["receipt", "trajectory", "ub", "p", "sidecar"])
+def test_execute_resume_rejects_tampered_receipt_and_retries_fresh_attempt(
+        tmp_path, frozen_protocol, monkeypatch, tamper_kind):
+    protocol, repo = frozen_protocol
+    descriptor = _describe(tmp_path, protocol, repo, [
+        {"scenario_id": "case-a", "category": "single"},
+        {"scenario_id": "case-b", "category": "pair"}])
+    failed_once = {"value": False}
+    def interrupt_second_case(case, _attempt):
+        if case["case_key"] == ["case-b", "pair"] and not failed_once["value"]:
+            failed_once["value"] = True
+            raise RuntimeError("injected interruption")
+    from frc_defense import meco_phase2_complete_set
+    monkeypatch.setattr(multi, "validate_multicase_descriptor", lambda value: value)
+    monkeypatch.setattr(meco_phase2_complete_set, "validate_complete_set_manifest",
+        lambda manifest, _descriptor: manifest if manifest == {"synthetic_complete": True}
+        else (_ for _ in ()).throw(ValueError("synthetic complete-set evidence mismatch")))
+    adapters = _execute_adapters(tmp_path, descriptor, collector_hook=interrupt_second_case)
+    collect, combine, fit, validate, lease, attest, collected, events = adapters
+    with pytest.raises(RuntimeError, match="injected interruption"):
+        multi.execute_multicase(descriptor, collect_case=collect, combine_target=combine,
+            fit_combined=fit, validate_track=validate, lease_factory=lease,
+            device_identity_verifier=attest)
+    case_a = descriptor["outputs"]["root"] + "/shards/case-0001/attempt-0001"
+    receipt_path = Path(case_a) / "case-receipt.json"
+    if tamper_kind == "receipt":
+        receipt = json.loads(receipt_path.read_text())
+        receipt["case_key"] = ["forged", "single"]
+        receipt_path.write_text(json.dumps(receipt))
+    elif tamper_kind == "sidecar":
+        receipt = json.loads(receipt_path.read_text())
+        sidecar = Path(receipt["datasets"]["ub"]["manifest_path"])
+        sidecar.write_text(sidecar.read_text() + " ")
+    else:
+        receipt = json.loads(receipt_path.read_text())
+        source = Path(receipt["datasets"][tamper_kind]["path"])
+        source.write_text(source.read_text() + "{}\n")
+    result = multi.execute_multicase(descriptor, collect_case=collect,
+        combine_target=combine, fit_combined=fit, validate_track=validate,
+        lease_factory=lease, device_identity_verifier=attest)
+    assert result["phase2_complete"] is False
+    attempts = sorted(Path(descriptor["outputs"]["root"]
+        + "/shards/case-0001").glob("attempt-*"))
+    assert [item.name for item in attempts] == ["attempt-0001", "attempt-0002"]
+    assert [case for case, _ in collected].count(["case-a", "single"]) == 2
+    assert events.count(("lease_enter", "phase2-multicase-" + descriptor["descriptor_sha256"][:16])) == 2
+    assert events.count(("lease_exit", "phase2-multicase-" + descriptor["descriptor_sha256"][:16])) == 2
+
+
+def test_execute_resume_after_first_shard_interruption_uses_new_attempt(
+        tmp_path, frozen_protocol, monkeypatch):
+    protocol, repo = frozen_protocol
+    descriptor = _describe(tmp_path, protocol, repo, [
+        {"scenario_id": "case-a", "category": "single"},
+        {"scenario_id": "case-b", "category": "pair"}])
+    stopped = {"value": False}
+    def interrupt_first_case(case, _attempt):
+        if case["case_key"] == ["case-a", "single"] and not stopped["value"]:
+            stopped["value"] = True
+            raise RuntimeError("first-shard interruption")
+    from frc_defense import meco_phase2_complete_set
+    monkeypatch.setattr(multi, "validate_multicase_descriptor", lambda value: value)
+    monkeypatch.setattr(meco_phase2_complete_set, "validate_complete_set_manifest",
+        lambda manifest, _descriptor: manifest if manifest == {"synthetic_complete": True}
+        else (_ for _ in ()).throw(ValueError("synthetic complete-set evidence mismatch")))
+    collect, combine, fit, validate, lease, attest, collected, _events = _execute_adapters(
+        tmp_path, descriptor, collector_hook=interrupt_first_case)
+    with pytest.raises(RuntimeError, match="first-shard interruption"):
+        multi.execute_multicase(descriptor, collect_case=collect, combine_target=combine,
+            fit_combined=fit, validate_track=validate, lease_factory=lease,
+            device_identity_verifier=attest)
+    result = multi.execute_multicase(descriptor, collect_case=collect,
+        combine_target=combine, fit_combined=fit, validate_track=validate,
+        lease_factory=lease, device_identity_verifier=attest)
+    attempts = sorted(Path(descriptor["outputs"]["root"]
+        + "/shards/case-0001").glob("attempt-*"))
+    assert [item.name for item in attempts] == ["attempt-0001", "attempt-0002"]
+    assert not (attempts[0] / "case-receipt.json").exists()
+    assert (attempts[1] / "case-receipt.json").is_file()
+    assert [case for case, _ in collected] == [["case-a", "single"], ["case-b", "pair"]]
+    assert set(result["artifacts"]) == set(multi.MECO_TRACKS)
+
+
+@pytest.mark.parametrize("tamper_family", ["trajectory", "ub", "p"])
+@pytest.mark.parametrize("tamper_kind", ["data", "manifest"])
+def test_execute_combiner_digest_drift_fails_before_fitting_or_bundle_publication(
+        tmp_path, frozen_protocol, monkeypatch, tamper_family, tamper_kind):
+    protocol, repo = frozen_protocol
+    descriptor = _describe(tmp_path, protocol, repo, [
+        {"scenario_id": "case-a", "category": "single"},
+        {"scenario_id": "case-b", "category": "pair"}])
+    def tamper_after_write(family, _shards, output):
+        if family == tamper_family:
+            path = (output if tamper_kind == "data" else
+                output.with_suffix(output.suffix + ".manifest.json"))
+            path.write_text(path.read_text() + "tampered by injected adapter\n")
+    with pytest.raises(ValueError, match=f"combined {tamper_family} corpus"):
+        _run_synthetic_execute(monkeypatch, tmp_path, descriptor,
+            combine_hook=tamper_after_write)
+    assert not Path(descriptor["outputs"]["manifest"]).exists()
 
 
 def test_combination_is_stable_case_seed_decision_order_and_preserves_repeat_evidence(tmp_path):

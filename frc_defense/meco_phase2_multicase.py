@@ -682,7 +682,7 @@ def execute_multicase(descriptor: dict, *, collect_case=None, combine_target=Non
     validate_multicase_descriptor(descriptor)
     root = Path(descriptor["outputs"]["root"])
     _check_output_namespace(root, (Path(descriptor["qualification_protocol"]["path"]),
-        Path(__file__).resolve().parents[1]))
+        Path(__file__).resolve().parents[1]), allow_existing=True)
     if lease_factory is None:
         from .meco_device_lease import lease_devices
         lease_factory = lease_devices
