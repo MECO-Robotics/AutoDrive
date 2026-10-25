@@ -63,6 +63,10 @@ class TensorDefenseObservationMixin:
     def _update_perception(self, reset_mask=None, active_mask=None, active_count=None):
         """Advance simple per-robot FUEL tracking from simulated sensor detections."""
         from . import tensor_sim as _tensor_sim
+        if (active_mask is not None and self.device.type != "cpu" and
+                (not isinstance(active_mask, torch.Tensor) or
+                 active_mask.device != self.device)):
+            raise ValueError("GPU perception mask must already reside on the environment device")
         active_mask=(torch.ones(self.n,device=self.device,dtype=torch.bool) if active_mask is None
                      else torch.as_tensor(active_mask,device=self.device,dtype=torch.bool))
         if active_mask.device != self.device or tuple(active_mask.shape) != (self.n,):
@@ -443,6 +447,10 @@ class TensorDefenseObservationMixin:
         # the trusted shape/RNG count used by _random_active.
         full_active = (active_mask is None or
                        (active_count is not None and int(active_count) == self.n))
+        if (active_mask is not None and self.device.type != "cpu" and
+                (not isinstance(active_mask, torch.Tensor) or
+                 active_mask.device != self.device)):
+            raise ValueError("GPU observation mask must already reside on the environment device")
         active_mask=(torch.ones(self.n,device=self.device,dtype=torch.bool) if active_mask is None
                      else torch.as_tensor(active_mask,device=self.device,dtype=torch.bool))
         if active_mask.device != self.device or tuple(active_mask.shape) != (self.n,):

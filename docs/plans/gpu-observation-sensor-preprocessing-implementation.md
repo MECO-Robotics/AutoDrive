@@ -25,6 +25,11 @@ The reviewed source base is `53f3d9c9a49a7e12bf65b5e1fa2797f4464e63be`.
 - 3v3 resets follow the same per-world cadence rule; a device reset mask never
   restores its scalar full-batch counter. Tensor masks and returned observation
   batches receive static device/shape guards at perception and policy boundaries.
+- GPU paths reject CPU or wrong-device active/reset masks at their observation
+  boundaries. The NumPy normalizer remains defined for offline adapters; source
+  audit found no call to it from the simulator observation callchains. Tensor
+  normalization now checks that observation and scale tensors share a device
+  and that the feature width supports the fixed 35-value scale schema.
 - Strategic evaluation active counts are maintained by its host episode quota
   scheduler while processing already-finished episodes; reset cardinality is no
   longer reduced from `reset_mask` to the host.

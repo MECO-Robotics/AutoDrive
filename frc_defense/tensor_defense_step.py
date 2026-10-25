@@ -19,6 +19,9 @@ class TensorDefenseStepMixin:
     def step(self,action,active_mask=None,*,_active_count=None,_return_info=True,
              _capture_observation=True):
         full_batch=active_mask is None
+        if (not full_batch and self.device.type != "cpu" and
+                (not isinstance(active_mask, torch.Tensor) or active_mask.device != self.device)):
+            raise ValueError("GPU active mask must already reside on the environment device")
         active_mask=(torch.ones(self.n,device=self.device,dtype=torch.bool)
                      if active_mask is None else
                      torch.as_tensor(active_mask,device=self.device,dtype=torch.bool).reshape(self.n))

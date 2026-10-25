@@ -266,6 +266,9 @@ class TensorDefenseResetMixin:
 
     def reset_done(self,mask):
         """Reset selected environment slots; return the full fresh observation batch."""
+        if (self.device.type != "cpu" and
+                (not isinstance(mask, torch.Tensor) or mask.device != self.device)):
+            raise ValueError("GPU reset mask must already reside on the environment device")
         mask=torch.as_tensor(mask,device=self.device,dtype=torch.bool).reshape(self.n)
         # A device reset mask cannot select a host-side scalar fast path.
         # Keep per-world cadence active after every reset call.

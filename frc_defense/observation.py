@@ -23,7 +23,13 @@ def normalize_numpy_observation_in_place(obs, field_length, field_width,
 
 def normalize_tensor_observation_batch_in_place(obs, field_length, field_width,
                                                 max_speeds, max_omegas):
-    """Apply the same fixed scales to an ``[N, 35]`` Torch observation batch."""
+    """Apply fixed scales to tensor batches whose first 35 features use this schema."""
+    if (not hasattr(obs, "device") or not hasattr(max_speeds, "device") or
+            not hasattr(max_omegas, "device") or obs.device != max_speeds.device or
+            obs.device != max_omegas.device):
+        raise ValueError("observation and normalization scales must share one tensor device")
+    if obs.ndim != 2 or obs.shape[1] < 35:
+        raise ValueError("tensor observation batch must have shape [N, >=35]")
     obs[:, 0].div_(field_length); obs[:, 1].div_(field_width); obs[:, 2].div_(math.pi)
     obs[:, 3:5].div_(max_speeds[:, 0:1].clamp_min(.1))
     obs[:, 5].div_(max_omegas[:, 0].clamp_min(.1))

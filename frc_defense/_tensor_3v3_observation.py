@@ -762,6 +762,10 @@ class TensorThreeVsThreeObservationMixin:
         return mask, possession
 
     def observe(self, active_mask=None):
+        if (active_mask is not None and self.device.type != "cpu" and
+                (not isinstance(active_mask, torch.Tensor) or
+                 active_mask.device != self.device)):
+            raise ValueError("GPU observation mask must already reside on the environment device")
         active = (torch.ones(self.n, device=self.device, dtype=torch.bool) if active_mask is None else
                   torch.as_tensor(active_mask, device=self.device, dtype=torch.bool).reshape(self.n))
         p, v = self.policy_pose, self.sim.velocity

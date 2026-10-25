@@ -581,6 +581,9 @@ class TensorThreeVsThreeEnv(
         return self._last_obs, {"field_layout": self.field_layout_id, "robots": NUM_ROBOTS}
 
     def reset_done(self, mask):
+        if (self.device.type != "cpu" and
+                (not isinstance(mask, torch.Tensor) or mask.device != self.device)):
+            raise ValueError("GPU reset mask must already reside on the environment device")
         mask = torch.as_tensor(mask, device=self.device, dtype=torch.bool).reshape(self.n)
         self._invalidate_last_action_audit(mask)
         self.sim.reset_done(mask)
@@ -739,6 +742,9 @@ class TensorThreeVsThreeEnv(
             self._full_batch_step_scalar+=1
         elif not full_batch:
             self._full_batch_step_scalar=None
+        if (not full_batch and self.device.type != "cpu" and
+                (not isinstance(active_mask, torch.Tensor) or active_mask.device != self.device)):
+            raise ValueError("GPU active mask must already reside on the environment device")
         active=(torch.ones(self.n,device=self.device,dtype=torch.bool) if full_batch else
                 torch.as_tensor(active_mask,device=self.device,dtype=torch.bool).reshape(self.n))
         if _return_info is not None:
