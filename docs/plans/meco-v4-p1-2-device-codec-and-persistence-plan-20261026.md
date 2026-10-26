@@ -65,7 +65,12 @@ rebase onto current `main` or copy later source onto the pinned base.
 
 The codec must consume only the accepted declarations and reconciliation
 artifact. Preserve packed little-endian layout, field order, offsets, shapes,
-track codes, fixed capacities, and exact byte counts:
+track codes, fixed capacities, and exact byte counts. Within each transition
+field group, flatten in the listed field order; for each field serialize rows
+in increasing `rollout_row_index`, then the field's canonical inner axes in
+their listed order. Groups follow `TRANSITION_FIELD_GROUPS`. Do not change to
+row-major field interleaving. The 2,304 event records remain in their supplied
+opaque byte order.
 
 - 96-byte v2 header and 123-byte static identity prefix.
 - 32 transition rows, 9,822,906 bytes each.
@@ -74,6 +79,18 @@ track codes, fixed capacities, and exact byte counts:
 - The adopted profile digest, payload digest span, reserved-zero fields,
   fail-closed version-first reader rule, and exact-length predicate.
 
+Only these digest definitions are in scope: `profile_digest` is the accepted
+constant SHA-256 of the exact pinned V4 proposal file bytes, without
+extraction/re-encoding; `payload_digest` is SHA-256 of the exact payload byte
+span, excluding the 96-byte header. Compute the latter only on-device. Treat
+the 123-byte static identity prefix and the per-row `input_digest`,
+`support_digest`, and `transition_digest` fields as caller-supplied opaque
+bytes and preserve them unchanged. The pinned accepted artifact does not
+specify exact preimages for those row-level digests; do not compute, validate,
+or reinterpret them in this slice. If source/config/checkpoint digest
+computation is required rather than supplied as the accepted identity prefix,
+stop for a reviewed scope/contract amendment.
+
 The implementation may add these schema-layer operations in
 `frc_defense/meco_transition_v4.py`:
 
@@ -81,11 +98,11 @@ The implementation may add these schema-layer operations in
    uint8 bundle; no host numeric conversion or implicit padding.
 2. Device-side read/deserialize of the same byte layout, rejecting an invalid
    version/header or non-exact bundle length before accepting payload fields.
-3. Device-side structural validation and SHA-256 digest operations over the
-   exact accepted byte spans, using only existing device-native tensor
-   primitives. Field shape, dtype, row count, byte length, fixed codes,
-   reserved bytes, and adopted digest spans may be checked. No numeric tensor
-   or digest input may materialize on or be checked by CPU code.
+3. Device-side structural validation and SHA-256 of the exact payload span,
+   using only existing device-native tensor primitives. Field shape, dtype,
+   row count, byte length, fixed codes, reserved bytes, and the payload digest
+   may be checked. No numeric tensor or digest input may materialize on or be
+   checked by CPU code.
 4. A host-only opaque persistence boundary that transfers completed uint8
    bytes to/from storage unchanged. It must not decode fields, compute
    digests, repair bytes, or transform numeric values on the host.
