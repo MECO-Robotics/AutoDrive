@@ -1,14 +1,17 @@
 # P5 PPO/RNG, typed end causes and atomic trainer package plan
 
 **Date:** 2026-10-26  
-**Status:** Pass 1 planner-authored candidate; pending independent exact-head review  
+**Status:** G0/source-authoring gate amendment candidate; previous plan head requires fresh independent exact-head review
 **Planner:** plan_a_owner (planner only; not implementer, reviewer, or human approver)  
 **Implementation source base:** 6ed961a09c08dfc1796d98ae3566bd3f0eaaaf22  
-**Accepted overall plan:** 6325920252773cfa05d63167ba3c29a90debdb01; file SHA-256 9a12708980529cb03810ad40f43dbfe1e29461485a4f50fd1a7b06c7202dec5a  
+**Original accepted overall plan:** 6325920252773cfa05d63167ba3c29a90debdb01; file SHA-256 9a12708980529cb03810ad40f43dbfe1e29461485a4f50fd1a7b06c7202dec5a
+**Overall-plan G0/source-authoring amendment:** 8efec9378d1912f0839d7c6cd8e88467fceb1d5a; file SHA-256 57f20a1bcfe6f229429d402140de93a0ee1780372e21a9ac3344f81c72faca90; pending fresh independent review
 **Accepted P0 package plan:** 13dbd7f8f953995850e811202f7e9c5264c49dca; file SHA-256 09ec722d64d01d99b60cc9ed52e47ce68790e548f66107cc1a19dd9a7a588adf  
 **Accepted P1 package plan:** 53686a254318484f9c6bc3496ecc1c461572c53a; file SHA-256 21c07b2c08d37e48ed5d0dac1f149e4a45eb89d59360f466b587f534cf81e076; exact Pass 1 ACCEPT record 854d5286947074ed33f7ac059d67f2f9ccbf9257  
-**P2 package plan:** ACCEPT at commit 8d0727f10d46bfc5fee2810a1ec7fa7987ecaf91; independent Pass 1 record commit 0292f01638bf3180b4952721f5692a4446841013. Plan file SHA-256 5eddd42914ab74426257ab8c1ff883b25c0c39aaa40bf7c40ccc2e363fbb3957. Its implementation/API head remains pending.
-**P3 package plan:** ACCEPT at commit 8b641ccc56b7c73a880a095b3c6940cb03b617f3; independent Pass 1 record commit a11e68b6240c6701a14d6fafe932f65f0b05d6e2. Plan file SHA-256 6958cb883a339a251e6069378d8ebb853be97e4965d30ca0eba8d3003fbc0a9b. Its implementation/API head remains pending.
+**P0 package plan gate amendment:** `3185de5d9108717ff6eb5eb998ecfb41ad356057`, pending fresh review; P0a human decisions and candidate ACCEPT remain source-only prerequisites.
+**P2 package plan gate amendment:** `1f918a9e0f99ec49a0baf4c3ce69649c4f095a2a`, pending fresh review; API head remains pending.
+**P3 package plan:** original ACCEPT at `8b641ccc56b7c73a880a095b3c6940cb03b617f3`; gate amendment pending fresh review; implementation/API head remains pending.
+**P3 gate amendment:** `bbeb3ce3bedf4827e8b4f0d337705e1cdb9765ec`, file SHA-256 `d3849f802087b9702e98b93aafc24a379710bfb4a22b750d9b7eedf08a72b50f`; pending fresh independent review.
 **P4 package plan/API:** in progress; no accepted plan or implementation/API head is pinned.
 This dependency-status update supersedes the prior candidate's P2/P3 pending-review statements; it does not change P5 scope or unblock implementation.
 **Accepted reconciliation:** 03bd0a7a3ef4ea0d2506ec4f9b031745ba53ada9; artifact SHA-256 294a02012427c2ceeb638ea0cd337d1fa7908cf47fb9d0f07bef29ed6790510c  
@@ -20,9 +23,9 @@ This dependency-status update supersedes the prior candidate's P2/P3 pending-rev
 
 Implement the accepted P5 transition/PPO caller integration for A1/A2/A3/C1/C2: the 160-physics-tick strategic horizon, at most 12 ticks per macro with a partial final macro, gamma 0.993 per macro under the adopted branch/continuation exponent convention, distinct terminal/truncation/bootstrap semantics, typed end cause, action/log-probability/command linkage, two independent GPU Philox streams, all-or-none PPO updates, and five source-bound checkpoint manifests and continuations.
 
-P5 consumes the exact accepted P1 standalone V4 transition/event/artifact API. It does not reimplement or alter P1 field order, profile, byte totals, event schema, reader, digests or manifest encoding. P2 and P3 package plans are now independently accepted, but their implementation/API heads remain pending; P4 is in progress and has no accepted plan or API head. Pass 2 stays blocked until this plan is independently accepted, G0 and P0a are satisfied, P1's exact API implementation head is independently accepted and integrated, and P2/P3/P4 have independently accepted interface heads that P5 can pin. No compatibility is inferred from plan names or moving branches.
+P5 consumes the exact P1 standalone V4 transition/event/artifact API. It does not reimplement or alter P1 field order, profile, byte totals, event schema, reader, digests or manifest encoding. P0/P2/P3 source-authoring gate amendments are pending fresh review; P2/P3 implementation/API heads remain pending; P4 is in progress and has no accepted plan or API head. Before P5 source authoring, this plan and P0a must be accepted, P1/P2/P3/P4 candidate interfaces must receive independent SOURCE/API ACCEPT, and exact heads must be pinned. Pre-G0 authoring cannot integrate or runtime-use any candidate API. P4 and any other candidate interface cannot be inferred from plan names or moving branches.
 
-This is a package plan only. It authorizes no source edits, tests, builds, simulator/runtime, GPU, dashboard, training, evaluation, checkpoint mutation, campaign inspection or qualification. Do not touch live diagnostic campaign PID 2750253, its dashboard, workers, outputs, checkpoints, devices or leases. The user must stop it manually and GPU lease release must be independently confirmed before any implementation or validation. G0, P0a and all package-specific gates remain in force.
+This is a package plan only. It authorizes no action until this exact amendment receives independent Pass 1 ACCEPT and its source prerequisites are pinned. Then isolated ZFS worktrees may author only allowlisted source/test files and perform static source/diff review before G0. A pre-G0 reviewer may return SOURCE/API ACCEPT or REVISE for an exact candidate head; this does not constitute package-final Pass 3 ACCEPT or permit dependent-package integration/runtime use. Do not touch live diagnostic campaign PID 2750253, its dashboard, workers, outputs, checkpoints, devices or leases. Until the user manually stops the campaign and both WX9100 leases are independently confirmed released, builds/compilation, test execution, simulator/runtime, numerical work, GPU/device use, dashboard, training, evaluation, checkpoint mutation, integration, merge, promotion and qualification remain prohibited. G0, P0a and all package-specific gates remain in force. Pre-G0 source work may cite pinned reconciliation/profile hashes but must not add or require the absent reconciliation artifact in its worktree; the reviewed contract-anchor bridge is post-G0 and required before validation/integration.
 
 ## Contract and source evidence
 
@@ -44,15 +47,16 @@ These citations establish current gaps only. No tests were run and no trainer, d
 
 ## Dependencies and worktree
 
-P5 implementation requires:
+P5 source-only authoring requires:
 
-1. G0 complete and still satisfied, including manual campaign stop, independent lease-release evidence, explicit maintainer authorization and reviewed contract-anchor integration base.
-2. P0a candidate and required human decisions accepted at exact head. P0b is not needed to implement/test P5 source; it is required before fresh training or qualification.
-3. P1 implementation independently accepted and integrated. Record its exact transition/event/manifest API commit and blobs. The accepted P1 plan is not an implemented API.
-4. Accepted P2, P3 and P4 plans and interfaces. P2 plan 8d0727f10d46bfc5fee2810a1ec7fa7987ecaf91 (file SHA-256 5eddd42914ab74426257ab8c1ff883b25c0c39aaa40bf7c40ccc2e363fbb3957) is ACCEPT with review record 0292f01638bf3180b4952721f5692a4446841013. P3 plan 8b641ccc56b7c73a880a095b3c6940cb03b617f3 (file SHA-256 6958cb883a339a251e6069378d8ebb853be97e4965d30ca0eba8d3003fbc0a9b) is ACCEPT with review record a11e68b6240c6701a14d6fafe932f65f0b05d6e2. These are planning approvals only: P2 and P3 implementation/API heads remain pending. P4 is in progress and has neither accepted plan nor API head. Pin the exact implementation/API heads and confirm action order, observation/route inputs and output ownership before P5 Pass 2; shared-file boundaries must be resolved.
-5. This plan receives independent Pass 1 ACCEPT. Named Pass 2 implementer and Pass 3 reviewer are distinct from each other and from planner.
+1. Independent Pass 1 ACCEPT of this exact amended plan and accepted P0a candidate plus required human decisions.
+2. Exact P1 transition/event/artifact API candidate head with independent SOURCE/API ACCEPT; P1's accepted package plan alone is not an implemented API.
+3. Exact P2 observation/route, P3 Plan A, and P4 Plan C candidate interface heads with independent SOURCE/API ACCEPT, plus pinned field/action order, observation/route inputs, output ownership and shared-file boundaries. P2 and P3 plan amendments remain pending fresh review; their APIs are pending. P4 plan/API remain in progress.
+4. Distinct Pass 2 implementer, pre-G0 source/API reviewer and post-G0 final reviewer; all work occurs in an isolated ZFS worktree from the approved source base and candidate API references.
 
-Create a fresh ZFS-backed worktree from the exact integration head containing accepted P0a, P1, P2, P3 and P4; proposed path .worktrees/autodrive-v4-p5-ppo-rng and branch codex/v4-p5-ppo-rng-YYYYMMDD. Do not use the live campaign checkout. Pin each prerequisite before editing. P5 is sole owner of frc_defense/meco_track_training.py. P5 owns its counterfactual end-cause integration in frc_defense/meco_counterfactual.py. Other packages consume reviewed P5 interfaces and may not duplicate trainer/RNG/checkpoint logic.
+G0 is required before any build/compile, test execution, simulator/runtime, numerical work, calibration/evaluation, dashboard, device/GPU use, training, checkpoint mutation, integration, merge, promotion or qualification. It requires manual campaign stop, independent release confirmation for both WX9100 leases, explicit maintainer authorization, and a reviewed contract-anchor bridge before validation/integration. P0b is not needed to author P5 source; it is required before fresh training or qualification.
+
+Create a fresh ZFS-backed worktree from approved source base 6ed961a09c08dfc1796d98ae3566bd3f0eaaaf22, referencing exact pinned candidate interfaces but not copying/depending on the absent reconciliation artifact; proposed path .worktrees/autodrive-v4-p5-ppo-rng and branch codex/v4-p5-ppo-rng-YYYYMMDD. Never use, inspect, or branch from the live campaign checkout. Before G0, author only allowlisted files and static reviews. Candidate APIs may guide source authoring, but P5 and dependent packages may not integrate or runtime-use them until G0 and final package ACCEPT. P5 is sole owner of frc_defense/meco_track_training.py and owns its counterfactual end-cause integration in frc_defense/meco_counterfactual.py. Other packages may stage source against a pinned candidate API but cannot integrate/use it until post-G0 final ACCEPT.
 
 ## Finite Pass 2 allowlist
 
@@ -106,9 +110,11 @@ Implement the adopted PPO RNG row without global PyTorch/Python RNG or CPU fallb
 
 ## GPU-only execution boundary
 
-All algorithmic tensors and work in trainer, optimizer, policy sampling, GAE, returns, replay validation, digest inputs, counterfactual reconstruction, state checks and RNG run on assigned HIP/WX9100 devices. No CPU simulation, policy inference, scoring/reward, route/state digest, GAE/metrics, dynamic .item()/.tolist()/.cpu()/.numpy() reads, host iteration over device rows, global RNG fallback, P600 fallback or silent migration is permitted. Host Python may supervise processes, parse immutable configuration, send control messages and persist opaque bytes; it may not inspect dynamic tensor values or compute algorithmic results.
+All algorithmic tensors and work in trainer, optimizer, policy sampling, GAE, returns, replay validation, digest inputs, counterfactual reconstruction, state checks and RNG must run on assigned HIP/WX9100 devices after G0 validation begins. No CPU simulation, policy inference, scoring/reward, route/state digest, GAE/metrics, dynamic .item()/.tolist()/.cpu()/.numpy() reads, host iteration over device rows, global RNG fallback, P600 fallback or silent migration is permitted. Host Python may supervise processes, parse immutable configuration, send control messages and persist opaque bytes; it may not inspect dynamic tensor values or compute algorithmic results. Before G0 none of this numerical/runtime work may execute.
 
 Pin each worker to an explicitly released WX9100 UUID and HIP index, recording ROCm/HIP/PyTorch/runtime, process, track, kernel and device identity. Across the five lanes, use both WX9100s without oversubscribing into CPU work. Device loss, wrong UUID, unsupported kernel or ambiguous affinity stops the worker. Do not claim one simulation jointly uses both devices unless the integration implements it. Evaluation shares and checkpoint isolation follow the accepted overall plan.
+
+Preserve the user's confirmed current counterfactual collection defaults at source base 6ed961a09c08dfc1796d98ae3566bd3f0eaaaf22: horizon_ticks=160, action_ticks=12, candidate_k=16, prediction_mode="cv", max_c_candidates=8, max_a_pairs=8, gamma_per_macro=0.993 (frc_defense/meco_counterfactual.py:920-924; DEFAULT_GAMMA at line 46). The callable's default device="cpu" is not an allowed execution path; any future runtime must explicitly bind a supported WX9100 and fail closed on CPU/P600 or ambiguous affinity. Changing these algorithmic defaults requires a separately reviewed plan/source decision.
 
 ## Acceptance evidence
 
@@ -124,11 +130,11 @@ All validation is future-gated; this plan ran none.
 - Before any dashboard replay, restart services from current accepted integration checkout and verify backend/frontend asset identity, active services and successful endpoints. Generate a fresh replay, inspect provenance and mark old-code replays outdated.
 - Run approved P5 tests and simulator cases on both assigned WX9100s; retain UUID/runtime, per-kernel placement/transfer/synchronization, Philox and optimizer device evidence, with proof of no CPU/P600 fallback. Report tests, simulator scenario/seed/replay, dashboard checks, device traces and gaps.
 
-Pass 3 independently checks exact commit/blob hashes, allowlist, P0a/P1/P2/P3/P4 bindings, V4 bytes, Philox vectors, failure injection, manifests, device traces and simulator/dashboard evidence. Any rebase creates a new exact head requiring review. P5 ACCEPT does not authorize training: P0b, fresh source-bound checkpoints and separate campaign authorization are still required.
+Review is staged. Before G0, an independent source reviewer checks exact commit/blob hashes, allowlist, P0a/P1/P2/P3/P4 candidate bindings, V4 field/byte invariants, Philox source contract, atomicity design and manifest interfaces and may return SOURCE/API ACCEPT or REVISE. SOURCE/API ACCEPT pins a candidate only; it is not package-final Pass 3 ACCEPT and does not authorize integration or runtime use by P5 or dependent packages. After G0, final Pass 3 checks the same exact head plus executed tests, failure injection, five manifests, both-device traces, seeded simulator replay and current-dashboard evidence. Only final exact-head ACCEPT permits integration; a rebase or source change requires renewed review. P5 final ACCEPT still does not authorize training: P0b, fresh source-bound checkpoints and separate campaign authorization are required.
 
 ## Risks and stop conditions
 
-- P2 and P3 plans are accepted, but their implementation/API heads are pending; P4 is in progress. Do not begin implementation until exact heads and ownership boundaries are accepted.
+- P2 and P3 plans are accepted, but their gate amendments need fresh review and implementation/API heads remain pending; P4 is in progress. Source-only work requires exact candidate-interface SOURCE/API ACCEPT; execution and integration remain blocked until G0 and final Pass 3 ACCEPT.
 - End-cause status must use accepted V4/P1 registries; no local enum renumbering, extra fields or byte changes.
 - Rollback of model/Adam state can require substantial memory. Measure it, but do not weaken atomic semantics to reduce memory.
 - PPO rollback cannot undo simulator ticks. Stop and reconstruct only from the last committed checkpoint and frozen task seed.
@@ -143,4 +149,4 @@ Pass 3 independently checks exact commit/blob hashes, allowlist, P0a/P1/P2/P3/P4
 - Pass 2 implementer: unassigned; must use exact accepted dependency head and finite allowlist.
 - Pass 3 reviewer: unassigned, distinct from planner and implementer; reviews exact pushed heads and persists ACCEPT/REVISE.
 
-Planner disposition: **PENDING independent exact-head Pass 1 review.** No implementation, tests, device use, simulator/dashboard validation, training, checkpoint qualification, human approval or Stage 1 result is claimed.
+Planner disposition: **PENDING independent exact-head Pass 1 review of this gate amendment.** No source implementation, executed tests, device use, simulator/dashboard validation, training, checkpoint qualification, human approval or Stage 1 result is claimed.
