@@ -1,11 +1,12 @@
 # P2 GPU-resident environment, observation, candidate and route package plan
 
 **Date:** 2026-10-26  
-**Status:** Pass 1 planner-authored candidate; pending independent exact-head review  
+**Status:** Amendment candidate; original P2 plan received Pass 1 ACCEPT; this G0/source-authoring amendment requires fresh independent exact-head review
 **Planner:** `plan_a_owner` (planner only; not implementer or reviewer)  
 **Implementation source base:** `6ed961a09c08dfc1796d98ae3566bd3f0eaaaf22`  
-**Accepted overall plan:** `6325920252773cfa05d63167ba3c29a90debdb01`  
-**Overall-plan file SHA-256:** `9a12708980529cb03810ad40f43dbfe1e29461485a4f50fd1a7b06c7202dec5a`  
+**Overall plan:** original accepted commit `6325920252773cfa05d63167ba3c29a90debdb01`; G0/source-authoring amendment candidate `5b25eb1cfba7850a871b9024d834457d0fb755a4` (pending fresh review)
+**Original overall-plan file SHA-256:** `9a12708980529cb03810ad40f43dbfe1e29461485a4f50fd1a7b06c7202dec5a`
+**Amended overall-plan file SHA-256:** `f5d1751ae6ca02452f286d756116859f176558a5822711a48f2b1aa4d734b43a`
 **Accepted P0 package plan:** `13dbd7f8f953995850e811202f7e9c5264c49dca`  
 **P0-plan file SHA-256:** `09ec722d64d01d99b60cc9ed52e47ce68790e548f66107cc1a19dd9a7a588adf`  
 **Reconciliation commit:** `03bd0a7a3ef4ea0d2506ec4f9b031745ba53ada9`  
@@ -17,7 +18,7 @@
 
 Implement the P2 portion of the accepted MECO V4 plan: GPU-resident environment state and observation/perception, opponent and fuel tracks, candidate generation, static legal-pose graph construction, batched route search and path output, and explicit device placement/evidence on the two AMD WX9100 devices. Preserve current behavior and safety semantics unless a separately accepted reconciliation or package plan changes them. Match the canonical profile and keep one policy track bound to one process/run identity.
 
-This is a package plan only. It authorizes no source edits, tests, build, simulator, profiler, dashboard, GPU, training or campaign operation. Pass 2 remains blocked until this exact plan receives independent Pass 1 ACCEPT, G0 is evidenced, P0a is accepted, P1 is accepted and integrated, and distinct implementer/reviewer identities are assigned. Do not touch live campaign PID `2750253` or its workers, outputs, checkpoints, dashboard, devices or leases. The user must manually stop it and GPU lease release must be independently verified before any P2 execution or device use.
+This is a package plan only. It authorizes no action until this amended exact plan receives independent Pass 1 ACCEPT, P0a is accepted, P1 is accepted and integrated, and distinct implementer/reviewer identities are assigned. Then Pass 2 may author only allowlisted source/test files and perform static source/diff review in an isolated ZFS worktree before G0. A pre-G0 independent source/interface review may return SOURCE/API ACCEPT for an exact candidate head; this is not package-final Pass 3 ACCEPT and does not authorize dependent-package integration or runtime use. Builds/compilation, test execution, simulator, profiler, numerical work, calibration/evaluation, dashboard, device/GPU use, training, checkpoint mutation, integration, merge and promotion remain prohibited until the user manually stops the live diagnostic campaign and both WX9100 leases are independently verified released. Do not touch live campaign PID `2750253` or its workers, outputs, checkpoints, dashboard, devices or leases.
 
 P2 is strictly downstream of the accepted P0a preregistration and P1 interfaces. It precedes P3/P4/P5 consumers. P2 does not own score-event schema/semantics (P1), policy model implementations (P3/P4), shared PPO/trainer edits (P5), or qualification/scheduling (P6). It will audit those tensor boundaries and publish interface/residency requirements without editing their paths. The complete training/evaluation graph is a required audit; any unresolved non-P2 residency item must name its owning package and block the global GPU-only completion gate until that owner closes it.
 
@@ -45,12 +46,12 @@ These are search leads, not a complete audit or proof that all listed scalar pul
 
 **Required bases/gates:**
 
-1. G0 from the accepted overall plan: independent review of the overall plan; explicit campaign stop by the user; independent GPU lease release; named distinct owners; accepted contract-anchor bridge and implementation integration base.
+1. Accepted amended overall plan and accepted P2 plan; exact isolated ZFS worktree; distinct implementer and reviewer. G0 is an execution/integration gate, not a source-authoring prerequisite. Before G0, no build/compile, test execution, simulator/profiler, numerical work, calibration/evaluation, dashboard, device/GPU use, training, checkpoint mutation, integration, merge or promotion is permitted.
 2. Accepted P0a candidate and required human decisions. P0b is not a P2 prerequisite because it occurs after P1–P6 source freeze.
 3. Accepted P1 implementation/interface head for the V4 typed event table and score/transition interaction. Record the exact P1 integration commit in the P2 implementation ledger before branching.
 4. Pass 1 ACCEPT of this P2 plan and distinct named Pass 2 implementer and Pass 3 reviewer.
 
-Create a new ZFS-backed worktree from the exact reviewed P1 integration head after gates are met: `.worktrees/autodrive-v4-p2-gpu-resident` on `codex/v4-p2-gpu-resident-YYYYMMDD`. Never branch from the active campaign checkout or reuse output directories. P2 commits and pushes each coherent interface, kernel/vectorization slice, failure contract and test slice before dependent changes. Any shared-path conflict is resolved in a reviewed integration branch, not by simultaneous edits.
+Create a new ZFS-backed worktree from the exact reviewed P1 integration head after source-authoring prerequisites are met: `.worktrees/autodrive-v4-p2-gpu-resident` on `codex/v4-p2-gpu-resident-YYYYMMDD`. Never branch from or inspect the active campaign checkout, or reuse its output directories. Before G0, P2 may only author and push coherent source/test slices and perform static review. After the exact head receives SOURCE/API ACCEPT, dependent owners may cite it for source authoring, but may not integrate or runtime-use it. After G0, run required tests and device/simulator evidence; final Pass 3 ACCEPT then permits integration of that exact head. Any shared-path conflict is resolved only after G0 in a reviewed integration branch, not by simultaneous edits.
 
 ## Finite Pass 2 allowlist
 
@@ -112,7 +113,7 @@ P2 measures and reports all hot-path copies/synchronizations, including those in
 ### Tests and device evidence
 
 - Focused tests cover device mismatch/rejection, CPU tensor/CPU fallback rejection, track and target masks, cardinality at 0/1/max, stale/reset handles, deterministic candidate ties, opponent/fuel validity, route success/no-path/blocked-start/blocked-goal/capacity errors, footprint/swept-heading checks and graph-capture/device-loss behavior.
-- Tests run only after this plan and G0 are accepted. Numerical algorithms and simulator state must run on the two WX9100 devices; CPU may supervise processes or handle immutable file/network I/O only.
+- Test files may be authored before G0, but no test may execute until this plan is accepted and G0 is evidenced. Numerical algorithms and simulator state must run on the two WX9100 devices; CPU may supervise processes or handle immutable file/network I/O only.
 - Capture profiler/device traces for both WX9100s over representative P2 environment, observation, candidate and route work. Include per-kernel device UUID, tensor device/shape/dtype, transfer bytes, synchronization and launch data. Include a test/trace proving CPU and P600 fallback is rejected.
 - P2 unit/regression tests that exercise simulated robot, perception, route, collection or scoring behavior must be accompanied by a representative seeded end-to-end simulator evaluation exercising that behavior. Inspect the resulting simulation record/replay and report scenario, seed, replay ID and outcome; tests alone do not establish simulation behavior.
 - Before producing or reviewing any dashboard replay, restart dashboard services on the current accepted integration checkout after source changes; confirm backend and frontend asset versions, active service state and successful endpoint responses. Generate a new replay and inspect provenance; mark old-source replays outdated.
@@ -120,7 +121,7 @@ P2 measures and reports all hot-path copies/synchronizations, including those in
 
 ### Integration gate
 
-P2 Pass 3 reviews exact pushed commit and file blobs, finite allowlist, P0a/P1 bindings, residency ledger, tests, seeded simulator evidence and dashboard freshness where replay is required. After ACCEPT, integration creates and reviews a new exact head. P2 acceptance does not by itself authorize five-track training or claim global GPU-only completion; all P1–P6 owner gates and final P0b are still required.
+P2 has two review dispositions. Before G0, an independent source reviewer checks exact pushed commit/blob hashes, allowlist, P0a/P1 bindings, source semantics, candidate API shape and static residency ledger and may write SOURCE/API ACCEPT or REVISE. SOURCE/API ACCEPT pins a candidate for dependent authors; it is explicitly not package-final Pass 3 ACCEPT and does not allow dependent-package integration or runtime use. After G0, a distinct independent final reviewer checks the same exact head plus executed tests, both-device traces, seeded simulator evidence and current-dashboard freshness where replay is required. Only final Pass 3 ACCEPT permits integration of that exact head; any source change requires new review. P2 acceptance does not by itself authorize five-track training or claim global GPU-only completion; all P1–P6 owner gates and final P0b are still required.
 
 ## Risks and stop conditions
 
@@ -129,12 +130,13 @@ P2 Pass 3 reviews exact pushed commit and file blobs, finite allowlist, P0a/P1 b
 - **Other-package ownership:** the complete graph includes scalar reads in trainer, supervised data and counterfactual paths. Record handoffs and block global residency completion until their owners fix them; do not expand P2 scope.
 - **P1/P2 shared environment boundary:** P1 is accepted and integrated first. P2 is sole owner of `tensor_3v3.py` changes after that head; do not rebase P1 modifications away or alter score-event meanings.
 - **WX9100 launch/runtime uncertainty:** only validated HIP kernels and explicit device IDs can pass. Do not use CPU, P600, unpinned GPU, stale extension or silent fallback to keep a run alive.
-- **G0/live campaign:** no validation or implementation before user stop and independent lease release. Planning and source review do not imply those facts.
+- **G0/live campaign:** source/test authoring and static review may proceed only after plan acceptance and prerequisites; no execution or integration before user stop and independent release of both WX9100 leases. Planning and source review do not imply those facts.
 
 ## Three-pass roles and disposition
 
 - **Pass 1 planner:** `plan_a_owner`; cannot implement or review P2.
 - **Pass 2 implementer:** unassigned; must work only in the fresh worktree/branch above and only inside the finite allowlist.
-- **Pass 3 reviewer:** unassigned and distinct from planner and implementer; must review exact head and all required evidence, then persist ACCEPT/REVISE at a stable review path.
+- **Pre-G0 source/API reviewer:** unassigned and distinct from planner and implementer; records SOURCE/API ACCEPT or REVISE against exact head. This does not authorize integration or runtime use.
+- **Post-G0 final Pass 3 reviewer:** unassigned and independent; reviews exact head and all required runtime evidence, then persists final ACCEPT/REVISE at a stable review path.
 
 Planner disposition: **PENDING independent Pass 1 review.** This plan is not source/test/runtime authorization and claims no implementation, GPU residency, simulator result, dashboard validation, campaign status, human approval, or qualification result.
