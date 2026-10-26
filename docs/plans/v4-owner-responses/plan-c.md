@@ -103,12 +103,16 @@ join and sentinel contract.
    | 0 | Reserved invalid code; never assigned to a populated source row. |
    | 1 | Base action, rows 0-7; action index equals row index. |
    | 2 | Sensed target, rows 8-511; row `r` targets observer buffer slot `r-8`. |
-   | 3 | Approach offset, rows 512-535; each consecutive four rows use one action, variants 1-6 in source offset order. |
+   | 3 | Approach offset, rows 512-535; each consecutive four rows share one variant and enumerate actions 0-3. |
    | 4 | Continuation, row 536; action and goal variant come from the revalidated commitment. |
 
    Variant 0 means no offset; variants 1-6 map in source order to
    `(+.22,0)`, `(-.22,0)`, `(0,+.22)`, `(0,-.22)`, `(+.34,0)`, and
-   `(-.34,0)` meters (meco_candidates.py lines 1306-1313). The versioned
+   `(-.34,0)` meters (meco_candidates.py lines 1306-1313). Therefore rows
+   512-515 are variant 1/actions 0-3; 516-519 are variant 2/actions 0-3;
+   520-523 are variant 3/actions 0-3; 524-527 are variant 4/actions 0-3;
+   528-531 are variant 5/actions 0-3; and 532-535 are variant 6/actions
+   0-3. The versioned
    static row dictionary maps source-global row `r` to identity code `r+1`;
    code 0 is invalid. Thus `candidate_identity[r]` and selected command
    `candidate_identity_code` equal `r+1` in the range 1-537. This identifies
