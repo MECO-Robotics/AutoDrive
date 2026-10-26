@@ -122,10 +122,11 @@ Every code/schema package uses three distinct roles and exact-head artifacts:
    source-only slice. After G0, package validation may begin under its
    accepted plan.
 3. **Pass 3 reviewer:** a different agent first performs a source-scope and
-   interface review of the exact source-only candidate head. This review may
-   record a candidate API identity and source-scope disposition, but it is not
-   final ACCEPT and does not permit dependent packages to integrate or use the
-   API. After G0, the reviewer checks exact hashes, tests, device-residency
+   interface review of the exact source-only candidate head. The reviewer may
+   record only SOURCE/API ACCEPT or REVISE. SOURCE/API ACCEPT pins a candidate
+   API for dependent authors, but is not package-final Pass 3 ACCEPT and does
+   not permit dependent packages to integrate or runtime-use the API. After
+   G0, the reviewer checks exact hashes, tests, device-residency
    evidence, and required simulator/dashboard evidence; only the final exact-
    head ACCEPT permits integration. REVISE requires a corrected commit and a
    new review record. Authors do not review their own work.
@@ -511,9 +512,9 @@ workers.
   Make one coherent, reviewable commit per interface, kernel, error contract,
   or fixture; push each commit before beginning its dependent slice. Every
   commit records source/profile/protocol identity changes and migration impact.
-- Pass 3 first records a source-scope/interface disposition on the exact
-  source-only candidate head. It is not final ACCEPT and cannot authorize
-  dependent-package integration/use. After G0, Pass 3 checks exact pushed
+- Pass 3 first records SOURCE/API ACCEPT or REVISE on the exact source-only
+  candidate head. This candidate API pin cannot authorize dependent-package
+  integration or runtime use. After G0, Pass 3 checks exact pushed
   hashes, allowlist, invariants, required tests, device traces and simulator/
   dashboard evidence; only this final ACCEPT allows integration. Persist both
   dispositions and do not accept a moving branch or stale commit.
