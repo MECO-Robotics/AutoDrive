@@ -1,25 +1,27 @@
-# P6 five-track supervisor package plan review
+# Independent Pass 1 review: P6 dual-protocol package-plan amendment
 
-**Disposition:** ACCEPT — exact-head Pass 1 review  
-**Reviewer:** `/root/closure_wave1_reviewer/p6_plan_reviewer` (independent of planner)  
-**Reviewed commit:** `76fe00109eda347273b8fdc8cf1799431d80aae3`  
-**Reviewed file:** `docs/plans/meco-v4-p6-five-track-supervisor-qualification-package-plan-20261026.md`  
-**Reviewed file SHA-256:** `a8f9c4049b0466d9a7d5b39b0e63e919d59222454eae167c46f8b5300ca8744a`  
-**Source base named by plan:** `6ed961a09c08dfc1796d98ae3566bd3f0eaaaf22`
+- **Verdict:** REVISE (supersedes the ACCEPT for prior P6 plan head `ea51dd8c84ab4e59bf056fae8c47facaee0c1fbd` as review of this amendment)
+- **Review date:** 2026-10-26
+- **Reviewer identity:** `/root/closure_wave1_reviewer`
+- **Original P6 planner:** `/root/closure_wave1_reviewer`; amendment planner: `plan_a_owner`
+- **Reviewed amendment commit:** `de974e053c796f06a3f8e8312a9cb176f95c2025`
+- **Reviewed file:** `docs/plans/meco-v4-p6-five-track-supervisor-qualification-package-plan-20261026.md`
+- **Git blob:** `0b400ff10fdb0570cc33389b5d251accf5a86ddb`
+- **Plan file SHA-256:** `64ff84f6fa7b63c911659b77608315b8948ecc9c166bbee27898eb80ee52d786`
+- **Accepted overall plan:** commit `8efec9378d1912f0839d7c6cd8e88467fceb1d5a`, file SHA-256 `57f20a1bcfe6f229429d402140de93a0ee1780372e21a9ac3344f81c72faca90`; ACCEPT record commit `b0b2962d299b1ecaab053b873ef2ae09e3c5f467`, record SHA-256 `54e68870b3b95fd91b92d3f934e44d5ec9bb63e1fb6d03f67e6d95f10d3abb4a`
+- **Prior accepted P6 plan:** commit `ea51dd8c84ab4e59bf056fae8c47facaee0c1fbd`, file SHA-256 `60cb8e6126cea8d307a96caef6b3099e5db5e43efe41170df0cb4e3237462a5e`; ACCEPT record commit `f97a9ed025b892e75669b95eec4785d15f05afff`, record SHA-256 `8bee77e4ce40dbc3be0058f61f08f992f539c8ed2a57945802263ae0eecc9710`
+- **P0 dual-protocol candidate:** commit `55e788f19d676e65a2150debd99d25aaa16f7716`, file SHA-256 `8f959afd2071970afcf2f94bf0879104dd7bcdd17ddcbd1587682d2940c00ef3`; REVISE record commit `91179c53b88a75933c9ce7a00510f6bc9daf01cb`, record SHA-256 `c34c0b05ff0fab64810cc14f7e97aa058ed2306ef7cc8b49c574a78b2c5d8004`
 
-## Findings
+## Review scope and evidence
 
-The refreshed dependency table correctly distinguishes accepted Pass 1 planning artifacts from implementation/API acceptance. P3's accepted Plan A plan is pinned to commit `8b641ccc56b7c73a880a095b3c6940cb03b617f`, its file digest, and ACCEPT record `a11e68b6240c6701a14d6fafe932f65f0b05d6e2`; P5's accepted package plan is pinned to `2742920fc22a87865bdcd03f162ef3a3b9a67978`, its file digest, and ACCEPT record `43901154cfb59981fca39137e7804cf74dd864c0`. The plan explicitly says those decisions accept only the plans; exact implementation/API and integration heads must still be accepted before P6 Pass 2. P4 is explicitly pending plan review and later implementation/API acceptance.
+The amendment addresses the P0 dual-protocol dependency: it keeps `pickup_simple` Stage 1 and `full_match_offense` primary score evaluation proposal-only pending P0a and authorized human decisions; defines separate role-bound protocol records, evidence/calibration paths, and Phase 0 cross-binding; assigns schema, runner, API, and tests to P6; preserves three-round Stage 1 semantics; and maintains the acyclic P0a → P1–P6 source freeze → P0b → P6 runtime order. It preserves the manual-stop and dual-WX9100 lease-release gates, explicit authorization, post-G0 contract bridge, pre-G0 no-execution boundary, and live-campaign no-contact boundary.
 
-P6's scope and ownership boundaries are reviewable: P5 retains exclusive ownership of `meco_track_training.py`; P6 has a finite source/test allowlist and must amend before editing outside it. The plan covers five isolated lanes, atomic committed-checkpoint snapshots, immutable read-only evaluations, three consecutive Stage 1 rounds per track, append-only provenance, and dashboard status projection. It clearly requires training to continue through evaluation and qualification until explicit manual user stop, with no score, timeout, update-count, or qualification-completion stop trigger.
+### Finding: P1 ACCEPT record digest is stale
 
-G0, P0a/P0b sequencing, accepted P1/P2 contracts, two-WX9100 assignment, GPU-only numerical work, residency evidence, failure-closed device admission, and separation of planner, implementer, reviewer, operator, and human approver are stated. The plan also carries the repository's seeded simulator/replay and current dashboard restart, service, endpoint, backend/frontend freshness, and replay provenance requirements for any later behavior validation. It states that this Pass 1 plan authorizes no execution or campaign activity.
+In the dependency table, the accepted current P1 plan is correctly pinned to `606ba5adce04afd84bfb372260aebde8fd4fcec6`, file SHA-256 `7dc5be35d3826a6047653021e97a941d6872a73a6997ba768e95753f693b0653`, and review commit `77816edbd1923c018d4af774b2f1b3bae0f415b8`. But the table gives that record SHA-256 as `0680a57e5ff0427b20a0a5bd86c224085583b241b3f57bcb18bde69cab0f158f`, which belongs to the earlier P1 plan at commit `53686a254318484f9c6bc3496ecc1c461572c53a`. The exact review record for current P1 head `606ba5...` has SHA-256 `3dbadfb7243d891fdacf993962722b90e245120442c039a15a48def97f0ca193`. Replace the stale digest and verify the full dependency table's review-record hashes before resubmission.
 
-## Verification performed
+This stale record hash breaks the exact accepted dependency chain. The dual-protocol scope and staged gates otherwise pass; no scope or protocol-role changes are requested.
 
-- Recomputed the reviewed plan SHA-256; it matches the supplied digest.
-- Verified the P3 and P5 plan commits and their acceptance-record commits are present, and recomputed both referenced plan file digests successfully.
-- Inspected the full exact-head plan for owner boundaries, dependency gates, manual-stop behavior, snapshot/evaluation isolation, finite allowlist, device constraints, and validation requirements.
-- No tests, simulator, runtime, GPU, dashboard, or campaign actions were run.
+## Authority limits
 
-No blocking plan defect was found. ACCEPT is limited to this exact Pass 1 plan artifact; it does not accept P3/P4/P5 implementation heads, authorize source changes or runtime, establish G0, or assert training or qualification success. P4 review and all exact implementation/API integration reviews remain prerequisites as the plan states.
+This REVISE applies only to the exact P6 amendment commit/blob/hash above. It does not authorize source/test changes, P0a decisions, P0b calibration, G0 execution, runtime, device, dashboard, campaign, training, or qualification. No tests or operational actions were performed.
