@@ -184,7 +184,8 @@ begins. This plan does not claim G0 is satisfied.
 it precedes P1–P6 source implementation. It does not run calibration or emit
 the final Phase 0 artifact or protocol.
 
-1. Preregister the `simulated_match_score` estimand and accepted-event rules:
+1. Propose in the candidate the `simulated_match_score` estimand and
+   accepted-event rules:
    accepted active-HUB FUEL awards only. Current source evidence identifies
    `fuel_scored_event` and `fuel_score_count` in
    `frc_defense/gamepiece_actions.py`, consumed by reward/info paths in
@@ -192,24 +193,24 @@ the final Phase 0 artifact or protocol.
    distinct task-reward metric. P1 owns implementation of the reconciled
    typed event table. P0a records the intended semantics and requires P1 to
    verify producer/consumer sites against its exact source base.
-2. Approve the immutable target-scoped protocol v5 schema, including target
+2. Specify the proposed immutable target-scoped protocol v5 schema, including target
    IDs, transitive prerequisite closure, case/layout/opponent table, field and
    rule identity, split labels, metric definitions, stopping/promotion rules,
    artifact provenance and fail-closed behavior. Existing v1/v2 protocols
    remain history; they do not satisfy the v5 contract.
-3. Freeze disjoint train, calibration, validation and final-test case/seed
+3. Propose disjoint train, calibration, validation and final-test case/seed
    partitions and their canonical bytes before candidate outcomes are
    observed. Record the case-generation procedure, seed derivation, split
    membership and permitted regeneration conditions. Any change to source,
    rules, case matrix or seed-generation code requires a new preregistration
    revision before results are examined.
-4. Preregister the D0 calibration design, repeats, uncertainty calculation,
+4. Propose the D0 calibration design, repeats, uncertainty calculation,
    useful-gain and safety noninferiority margin method, minimum evidence and
    decision procedure. Do not finalize numeric margins from unrun or
    unreviewed evidence, and do not tune the method after candidate results.
    Record which product/maintainer decisions require explicit human approval;
    hashes and agent-authored records are not approval or authentication.
-5. Define source-identity inputs and the canonical Phase 0 artifact/protocol
+5. Propose source-identity inputs and the canonical Phase 0 artifact/protocol
    hash boundary. Specify that P0b binds the final reviewed source tree,
    reconciled profile, device pair, score rules, exact cases/seeds, calibration
    evidence, margins and approval record. P0b must fail closed if any bound
@@ -241,9 +242,11 @@ depend on accepted P0b. This sequencing prevents a P0↔P6 cycle.
 2. Run only the preregistered D0 cases, seed partitions and repeat schedule on
    the two assigned WX9100 devices, with no CPU numerical fallback. Retain
    raw records and independently recompute the prescribed uncertainty and
-   margins. Existing qualification code's v2 protocol and CPU default are not
-   acceptable as the v5 implementation.
-3. Emit (without source edits) the immutable Phase 0 artifact containing exact source/rules/profile/
+   margins. Existing qualification code's older protocol versions and
+   single-indexed-device invocation do not demonstrate the v5 contract or
+   two-WX9100 residency.
+3. Emit (without source edits) the immutable Phase 0 artifact containing
+   exact source/rules/profile/
    device identity, score estimand/rules, cases and split seed bytes/hashes,
    calibration records, uncertainty, margins and explicit approval
    provenance. Emit the final target-scoped v5 protocol bound to that artifact,
@@ -258,8 +261,8 @@ depend on accepted P0b. This sequencing prevents a P0↔P6 cycle.
    Stage 1 qualification may begin only after P0b is accepted and fresh
    source-bound checkpoints are available.
 
-**P0b acceptance:** independent exact-head review accepts the generated artifact and
-protocol; calibration recomputes from retained records under P0a's method;
+**P0b acceptance:** independent exact-head review accepts the generated
+artifact and protocol; calibration recomputes from retained records under P0a's method;
 the final hashes bind the frozen P1–P6 integration source and reconciled
 profile; seed partitions are disjoint; margins and all required human
 approvals are explicit. No Stage 1 round uses an uncalibrated, stale or legacy
@@ -442,8 +445,7 @@ result and end-cause record. No tests alone can close the behavior gate.
 **Source implementation dependencies:** accepted P0a and P1–P5. P6 owns the
 qualification v5 schema, runner and source implementation (including
 `frc_defense/meco_qualification.py` and its qualification tests) after P0a.
-P6 source
-must be frozen and reviewed before P0b final calibration. **Runtime
+P6 source must be frozen and reviewed before P0b final calibration. **Runtime
 qualification dependencies:** accepted P0b, P1–P6 integrated and reviewed,
 fresh five-track checkpoints, frozen protocol v5, dual-device readiness and a
 separate human authorization to start the new campaign. P0b does not require
