@@ -171,6 +171,31 @@ exact-head review; PPO producer, compute, validation, checkpoint/RNG writer,
 and runtime remain separately scoped and reviewed work. No owner adoption,
 implementation, or Stage 1 evidence is claimed here.
 
+### PPO V4 successor proposal review status (2026-10-26)
+
+The new shared command/PPO transition ABI V4 successor proposal received
+independent exact-head Pass 1 **ACCEPT** as a planning artifact:
+`docs/plans/gpu-shared-command-ppo-transition-abi-v4-20261026.md`, candidate
+commit `6b4ce4a939a2cdea375bd4be6879f6f7bc73141b`, artifact SHA-256
+`0c5ba39c3a4fa7c9bdf168ccf7c1dc792f4d3e27bd6f532517a967fca4b025b6`.
+Its planning base is `5bf923a62f1ed0f07cbd2a6901cbf2cd41632bd4`; it is a
+versioned successor proposal and leaves the accepted V3 ABI immutable. Pass 1
+acceptance records planning quality only: it is not adoption by environment,
+Plan A, Plan C, route, observation/native, PPO/RNG, gamepiece/score,
+artifact/manifest, or evaluation/curriculum owners, and it authorizes no
+schema or source implementation, tests, compilation, runtime, simulator,
+dashboard, checkpoint, campaign, training, or evaluation work.
+
+Before any schema-only plan can be proposed, every affected owner must
+explicitly adopt this exact V4 artifact hash or publish a versioned replacement;
+the shared-ABI owner must then publish one adopted immutable ABI/profile hash,
+and each owner plan must pin and independently review it. The V4 document's
+proposed profile, capacities, target-handle lifecycle, field table, route
+retention, digest/RNG encodings, payload and envelope remain recommendations
+until those gates pass. The training objective's Stage 1 and uninterrupted
+five-track continuation evidence remain separate runtime gates; this planning
+acceptance establishes neither.
+
 ### Refreshed dependency order and campaign boundary
 
 1. Keep the active two-WX9100 campaign and its live checkout, supervisor,
