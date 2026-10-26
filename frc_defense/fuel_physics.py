@@ -199,8 +199,9 @@ class FuelPhysics:
         flat_delta *= .015/magnitude.clamp_min(.015)
         self.pos[..., :2].add_(flat_delta)
         self.piece_pos.add_(flat_delta)
-        self._last_xy.copy_(self.piece_pos)
         affected = flat_delta.norm(dim=-1) > 0
+        self._last_xy.copy_(torch.where(affected[..., None], self.piece_pos,
+                                        self._last_xy))
         self.sleeping &= ~affected
         self.sleep_clock.masked_fill_(affected, 0.)
 
