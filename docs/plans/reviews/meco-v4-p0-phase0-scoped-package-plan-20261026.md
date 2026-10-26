@@ -1,24 +1,27 @@
-# Independent Pass 1 review: scoped P0 Phase 0 package plan
+# Independent Pass 1 review: P0 dual-protocol artifact-allowlist amendment
 
-- **Verdict:** ACCEPT (supersedes prior REVISE for amendment `c4f136b267f8e41e0baec53394f28fac28f16eb5`)
+- **Verdict:** REVISE (supersedes ACCEPT for prior P0 plan head `72ee8fce1d4a955d100b97d47b58528374faddec`)
 - **Review date:** 2026-10-26
 - **Reviewer identity:** `/root/closure_wave1_reviewer`
-- **Plan author:** `plan_a_owner`
-- **Reviewed plan commit:** `72ee8fce1d4a955d100b97d47b58528374faddec`
+- **Planner:** `plan_a_owner`; amendment author: `p0a_implementer`
+- **Reviewed amendment commit:** `55e788f19d676e65a2150debd99d25aaa16f7716`
 - **Reviewed file:** `docs/plans/meco-v4-p0-phase0-scoped-package-plan-20261026.md`
-- **Git blob:** `4527835ff9d3216e0a0e9e1508edb1e25f0f5cd0`
-- **Plan file SHA-256:** `16c1fbcd881bd77adf178c8d8bf5f17bd3cf3e988cde767fbbc7731c8ff088d9`
-- **Implementation source base:** `6ed961a09c08dfc1796d98ae3566bd3f0eaaaf22`
-- **Accepted overall staged-gate plan:** commit `8efec9378d1912f0839d7c6cd8e88467fceb1d5a`, file SHA-256 `57f20a1bcfe6f229429d402140de93a0ee1780372e21a9ac3344f81c72faca90`; Pass 1 ACCEPT record commit `b0b2962d299b1ecaab053b873ef2ae09e3c5f467`, record SHA-256 `54e68870b3b95fd91b92d3f934e44d5ec9bb63e1fb6d03f67e6d95f10d3abb4a`
-- **Accepted reconciliation:** commit `03bd0a7a3ef4ea0d2506ec4f9b031745ba53ada9`, artifact SHA-256 `294a02012427c2ceeb638ea0cd337d1fa7908cf47fb9d0f07bef29ed6790510c`; profile SHA-256 `5ec637676c0acf02f9769b1629860122c6c5332914acdcfbb9c04adaafea70e3`
-- **Superseded review:** commit `da31547445646c18c659b5ce1c38180b94644cba`, record SHA-256 `af1ca6d96c0a0f203b810a7044803de6008a0c9f2540e97101ad9c4cb42dfc38`
+- **Git blob:** `13b69eefb9aae20cdbd2c23eaec0a71ec7898282`
+- **Plan file SHA-256:** `8f959afd2071970afcf2f94bf0879104dd7bcdd17ddcbd1587682d2940c00ef3`
+- **Accepted overall plan:** commit `8efec9378d1912f0839d7c6cd8e88467fceb1d5a`, file SHA-256 `57f20a1bcfe6f229429d402140de93a0ee1780372e21a9ac3344f81c72faca90`; ACCEPT review commit `b0b2962d299b1ecaab053b873ef2ae09e3c5f467`, record SHA-256 `54e68870b3b95fd91b92d3f934e44d5ec9bb63e1fb6d03f67e6d95f10d3abb4a`
+- **Prior accepted P0 amendment:** commit `72ee8fce1d4a955d100b97d47b58528374faddec`, file SHA-256 `16c1fbcd881bd77adf178c8d8bf5f17bd3cf3e988cde767fbbc7731c8ff088d9`; ACCEPT review commit `cb02ef8fd74ab4b65c4b0f86a1796eaad616e77d`, record SHA-256 `a8c5164730d62bd04c7a134e0d395a81ce8f76c1088db6e5f5a8e2b5bd62701d`
+- **Accepted P6 package plan inspected:** commit `ea51dd8c84ab4e59bf056fae8c47facaee0c1fbd`, file SHA-256 `60cb8e6126cea8d307a96caef6b3099e5db5e43efe41170df0cb4e3237462a5e`; ACCEPT review commit `f97a9ed025b892e75669b95eec4785d15f05afff`, record SHA-256 `8bee77e4ce40dbc3be0058f61f08f992f539c8ed2a57945802263ae0eecc9710`
 
 ## Review scope and evidence
 
-The corrected plan now identifies the earlier amendment's REVISE disposition and pins the exact ACCEPT record for overall plan `8efec937...`; the previous stale-status finding is resolved. P0a is bounded to one documentation-only preregistration candidate, resolves required human decisions before exact-head Pass 3, and unlocks only source/test authoring allowed by each accepted P1–P6 package. P0b is generated calibration artifacts only after P1–P6 source freeze/review and G0. P6 owns qualification v5 schema, runner, and tests, avoiding a P0/P6 cycle.
+The amendment clearly identifies two separately hashed v5 protocol records: Stage 1 qualification for `pickup_simple` and score evaluation for `full_match_offense`. It assigns distinct protocol and calibration evidence paths, has the Phase 0 artifact cross-bind both protocol digests and their roles, and keeps qualification schema/runner implementation and tests owned by P6. P0 remains documentation-only in Pass 2; P0b outputs are generated outside Git. The prior source-authoring and execution gates, G0, manual-stop and dual-lease conditions, post-G0 bridge, campaign no-contact boundary, and P0/P6 sequencing remain unchanged.
 
-The plan retains the finite phase boundaries, campaign no-contact boundary, manual-stop and independent dual-WX9100 lease-release gates, post-G0 bridge before execution/integration, and GPU-only calibration requirement. Its target mapping, immutable artifact expectations, simulator and current-dashboard evidence, and explicit human-decision limits remain intact. The current source base and reconciliation/profile pins are identified.
+### Finding: the dual-protocol dependency is not covered by the accepted P6 plan pin
+
+The amendment requires the “accepted finite allowlist and API” for P6 to support two protocol records, their Phase 0 cross-binding, and separate calibration inputs/evidence paths, and says P6 must resolve validation/runner behavior before P0b. However, the accepted P6 plan at `ea51dd8c84ab4e59bf056fae8c47facaee0c1fbd` still pins the prior P0 package plan (`13dbd7f8...`) and describes P0b as emitting a target-scoped protocol artifact. Its accepted scope does not pin this new dual-protocol contract or require the P6 schema/runner to validate both records and the cross-binding.
+
+This changes a P6-owned API/schema dependency beyond the exact accepted P6 plan. Before P0 Pass 1 ACCEPT, update the P6 plan (or a scoped P6 amendment) to pin this exact P0 successor and explicitly include both protocol identities, their independent calibration/evidence paths, the Phase 0 digest cross-binding, and schema/runner validation requirements. Obtain independent exact-head acceptance for that P6 scope, then update this P0 plan's dependency pin to the accepted P6 head and record. The existing G0/source-authoring restrictions remain necessary but do not resolve the missing accepted interface contract.
 
 ## Authority limits
 
-This ACCEPT covers only the exact plan commit/blob/hash above. It accepts a plan, not P0a protocol decisions, implementation, G0, tests, calibration, device/runtime actions, campaign access, training, or Stage 1 qualification. No tests, runtime, GPU, dashboard, simulator, or campaign actions were performed.
+This REVISE applies only to the exact P0 amendment commit/blob/hash above. It does not authorize P6 source/test changes, P0b generation, training, or any runtime action. No campaign, tests, simulator, dashboard, device, or runtime was inspected or operated.
