@@ -17,13 +17,13 @@ Date: 2026-10-26
 
 ## Disposition: PENDING
 
-I resolve the source-axis, feature-width/order, K ordinary view, continuation
-map, and mask/rank mechanics below against the accepted Plan C K-capped model
-view contract and current source. I do not adopt V4 yet: the production profile
-choice `K=16` and the canonical integer candidate-identity dictionary/code
-binding remain explicit owner decisions. V4 and the accepted K-capped plan are
-planning artifacts; neither publishes that identity dictionary or makes the
-profile normative.
+I adopt the V4 Plan C profile choice `K=16` and define the Plan C source-row,
+descriptor-code, candidate-mask, rank, and identity mappings below. The only
+remaining Plan C adoption gate is the cross-owner route-sink join: Route has
+not yet adopted the mapping from each full source-global row to its route sink
+row, target handle, and inactive-row representation. The source-local mapping
+is explicit here; V4 adoption remains pending until Route accepts the shared
+join and sentinel contract.
 
 ## Evidence and scoped findings
 
@@ -33,20 +33,24 @@ profile normative.
    lines 1291-1313, 1323-1381, 1421-1449). For the proposed `E=504` profile,
    the Plan C policy axis is `G_C=8+504+24+1=537`; the oracle pool is not part
    of that axis. Expansion rows are fixed capacity and masked when ineligible
-   or absent. V4 § Profile and §§69-87 specify those capacities, while the
-   integration sequence says the environment owner adopted E=504 but asks
-   Plan C/PPO owners to accept K=16, feature ordering, continuation mapping,
-   and the 537-row binding (lines 137-139). The 537 value is therefore
-   conditional on that pinned profile, not a general source ceiling.
-2. **Feature width and order.** `SAFE_ACTION_FEATURES` has fourteen ordered
-   fields and `EXTRA_FEATURES` six; source concatenates these as raw width 20,
-   then concatenates the missing mask for model width 40 ([`frc_defense/meco_tracks.py`](../../../frc_defense/meco_tracks.py)
-   lines 772-782; [`frc_defense/meco_candidates.py`](../../../frc_defense/meco_candidates.py)
-   lines 770-784). V4's profile row and dynamic Plan C field group specify
-   raw 20 and model 40 (V4 lines 54-58, 147-153). This establishes current
-   order/width evidence, subject to a future immutable source/profile digest.
-3. **K ordinary rows and continuation.** Current source accepts K in
-   `{8,16,32}`; it ranks the eight base rows first, eligible sensed-target
+   or absent. Environment/profile response `cd9276c62edb695715bf54ef44dcd7703183ee5b`
+   (SHA-256 `e0cac32ea061f73b96b57d378c35784f73643ea3b2dfb6fa3ca1a65e56d47a2a`)
+   adopts the V4 profile including E=504 and K=16. The 537-row axis is
+   conditional on that profile, not a general source ceiling.
+2. **Feature width and order.** The raw 20-column order is `action_index`,
+   `sensor_track_buffer_index`, `goal_x_m`, `goal_y_m`, `heading_bin`,
+   `behavior_index`, `field_length_m`, `field_width_m`, `target_distance_m`,
+   `nearby_sensed_track_count`, `track_confidence`, `track_age_s`,
+   `opponent_distance_m`, `route_time_s`, `legal_node_index`,
+   `route_distance_m`, `risk_penalty_points`, `target_heading_rad`,
+   `is_continue`, `commitment_switch_cost`; the 20 missingness indicators
+   follow in the same order to form model width 40 (`frc_defense/meco_tracks.py`
+   lines 772-782; `frc_defense/meco_candidates.py` lines 738-784, 851). This
+   matches V4's profile and field table (V4 lines 54-58, 147-153). Bind this
+   order to the Plan C descriptor schema/source digest.
+3. **K ordinary rows and continuation.** Environment/profile has adopted
+   `K=16` for this V4 profile. Current source also supports K in `{8,16,32}`;
+   it ranks the eight base rows first, eligible sensed-target
    rows next by stable distance order, then offsets, and selects the first K
    ordinary ranks. It appends `continue_index` separately and applies a
    separate continuation validity gate (meco_candidates.py lines 788-835,
@@ -65,66 +69,93 @@ profile normative.
    implement the full two-view request/row-map/descriptor protocol. This is
    contract-level mapping evidence, not evidence that the full protocol is
    implemented.
-4. **Masks, ranks and padding.** Source distinguishes fixed-spec target
-   eligibility, route feasibility, ordinary selection rank, and continuation
-   commitment validity (meco_candidates.py lines 661-725, 788-835, 1323-1381).
-   The accepted K-capped amendment specifies ordinary-prefix-only C2 context,
-   separate continuation query, mask-false zero feature padding, and `-1`
-   row-map sentinel; V4 uses separate `candidate_valid`,
-   `candidate_model_input_mask`, `candidate_selection_rank`, and
-   `candidate_policy_eligible` fields (amendment § “Decision: two K-width score
-   views”; V4 lines 147-153). The amendment also requires device guards for
-   range, uniqueness, eligibility, sentinel/mask agreement, and continuation
-   identity (amendment line 87). Thus the K-view maps, rank order and padding
-   sentinel are settled at contract level. Current source still has local
-   sentinels and ranks that are not a complete canonical ABI table; do not
-   treat source-local values as serialization rules. The proposed full source
-   table uses validity and policy/model masks as distinct columns, but the
-   exact canonical projection of all source masks/ranks into those V4 columns
-   has not been implemented or independently source-reviewed.
-5. **Identity and consumer binding.** `_device_candidate_ids` emits dynamic
-   labels based on action, target track and approach variant, uses the
-   continuation label `continue:inactive` or `continue:<candidate ID>`, and
-   suffixes duplicates with the source row index (meco_candidates.py lines
-   575-600). `DeviceCandidateBatch` retains an ordinal `candidate_index`; the
-   source row map and current string labels are not a versioned integer
-   identity registry. The accepted shared ABI defines `candidate_identity_code`
-   as an integer from a versioned static candidate dictionary/table and says
-   Plan C `source_global_row` comes through the row maps (ABI lines 39-40,
-   53). V4 also carries `candidate_identity:int64[537]` and selected
-   `candidate_identity_code` (V4 lines 152, 156). Neither source nor accepted
-   contract binds the exact dictionary/version, code allocation, or how dynamic
-   target/continuation identity and duplicate rows bind to that code. The
-   source-global row is a coordinate, not a substitute stable identity.
+4. **Mask, rank, and padding projection.** For V4's 537 source rows, preserve
+   the source tensors as follows: `candidate_valid[r] = route_available[r]`
+   before the K-prefix mask; `candidate_model_input_mask[r] = candidate_policy_mask[r]`
+   (ordinary `selection_rank < 16`, plus the reserved continuation row);
+   `candidate_selection_rank[r] = selection_rank[r]`; and
+   `candidate_policy_eligible[r] = valid_mask[r]`, where source defines
+   `valid_mask = route_available & candidate_policy_mask` (meco_candidates.py
+   lines 710-725, 788-835, 831-835, 872-884). The effective ordinary query
+   mask is `candidate_valid & candidate_model_input_mask`; the continuation
+   query mask is `candidate_valid` at `continue_index` only, as required by the
+   accepted two-view contract. Ordinary local slots follow the stable sorted
+   rank map; continuation is separate local selector slot 16. Source selection
+   ranks are preserved for ordinary rows, including its deterministic large
+   rank for ineligible extras; continuation rank remains the reserved source
+   sentinel `2**60`. The accepted K/K+1 amendment specifies masked finite-zero
+   feature padding, `-1` for unused view-map slots, no continuation view when
+   invalid, and device guards for map range/uniqueness and mask agreement
+   (amendment lines 40-43, 87). Oracle rows are outside G_C and are not copied
+   into any Plan C candidate column. V4 field semantics are pinned here as a
+   row-local contract; they do not imply that the current source serializes
+   those fields.
+5. **Descriptor and identity registry.** The accepted K-capped amendment
+   defines descriptor-v2 fields `kind:u16`, `variant:u16`,
+   `source_identity:i64`, `action_index:i16`, `target_identity:i64`,
+   `goal_ref:i32`, `route_ref:i32`, and `valid:u8`; it requires static kind and
+   variant enums and device-generated dynamic identity columns (amendment
+   lines 56-57, 85-89). I define schema ID `meco-c-source-row-v1` for E=504
+   and this numeric dictionary:
 
-## Exact remaining decision gates
+   | `kind` code | Meaning |
+   |---:|---|
+   | 0 | Reserved invalid code; never assigned to a populated source row. |
+   | 1 | Base action, rows 0-7; action index equals row index. |
+   | 2 | Sensed target, rows 8-511; row `r` targets observer buffer slot `r-8`. |
+   | 3 | Approach offset, rows 512-535; each consecutive four rows use one action, variants 1-6 in source offset order. |
+   | 4 | Continuation, row 536; action and goal variant come from the revalidated commitment. |
 
-1. **Profile selection:** explicitly adopt K=16 for this V4 profile (as
-   recommended by current trainer default and V4), or provide a versioned
-   replacement K. K=8/32 source support alone does not make those profile
-   choices equivalent.
-2. **Candidate identity registry:** assign and pin numeric values for the
-   descriptor-v2 `kind`/`variant` enum and define the exact mapping from each
-   descriptor plus dynamic target/continuation identity to V4
-   `candidate_identity` and command `candidate_identity_code`. Specify how
-   duplicate/padding rows and version mismatch behave. Preserve the
-   source-global row map as a separate coordinate; the accepted descriptor plan
-   does not define the V4 int64 code allocation.
-3. **Source-axis field projection:** map current source eligibility, route
-   feasibility, model-input membership, selection rank, and continuation
-   validity into each of V4's `candidate_valid`,
-   `candidate_model_input_mask`, `candidate_selection_rank`, and
-   `candidate_policy_eligible` columns for all 537 rows. The K-view contract
-   defines masks for model queries and selection, but does not fully specify
-   this 537-row serialized projection.
+   Variant 0 means no offset; variants 1-6 map in source order to
+   `(+.22,0)`, `(-.22,0)`, `(0,+.22)`, `(0,-.22)`, `(+.34,0)`, and
+   `(-.34,0)` meters (meco_candidates.py lines 1306-1313). The versioned
+   static row dictionary maps source-global row `r` to identity code `r+1`;
+   code 0 is invalid. Thus `candidate_identity[r]` and selected command
+   `candidate_identity_code` equal `r+1` in the range 1-537. This identifies
+   the immutable source slot; the full per-decision candidate identity is the pair
+   of that code and the target handle selected through `target_identity`.
+   `source_identity=r`, `goal_ref=r`, and `route_ref=r`; `target_identity` is
+   the observer-local buffer slot for a live target and `-1` when no target is
+   present. The full four-int handle is read from V4's `target_handle` table;
+   buffer slot alone is never treated as a lifetime-safe identity. The row's
+   descriptor `valid` byte mirrors `candidate_valid`. For rows 8-511, action
+   index is the source's selected legal collect action; for base/offset/continue
+   rows it is the current action tensor. This preserves current action, target,
+   goal, route, and continuation behavior while eliminating dynamic string IDs
+   from the V4 identity.
+6. **Cross-row consumer binding.** The accepted shared ABI maps C
+   `source_global_row` through the ordinary/continuation row maps and requires
+   `candidate_identity_code` from a versioned dictionary (ABI lines 39-40, 53).
+   PPO/RNG now ADOPTs those V4 digest contracts and defines `support_digest` over
+   the exact family-specific support/candidate content and ordering under the
+   Plan C owner's adopted contract, including profile digest, row masks, and
+   code registries (response commit `602565ef99986996d2c12d06024833247dc3d395`,
+   SHA-256 `219f3466741c17d9e49a4d402f0b3f8ae6f016f0738a068034a8ad312f610d75`).
+   Observation/native defines anonymous target handles with generation-safe
+   observer-slot identity but remains PENDING on environment-instance issuance
+   and macro trace production (response commit
+   `af0f8b4ca4759441030f2625aa23ce555a06bbac`, SHA-256
+   `ceb78d960ce29313dda5d3fe3f8e2f6a60258dfaeaf2ca96275e50698431b24a`).
+   Route remains PENDING because its response still lacks an adopted exact join
+   among full route-sink row, Plan C source-global row, ordinary/continuation
+   maps, target handle, and selected command (route response commit
+   `e44d5d2c815ee176d95cb87cb3a9ea0635c76dd9`, SHA-256
+   `e3d3102faf8476d00516e1facafdb8850e9d50a9e98dd6bd2199005bff478995`).
 
-These gates affect Plan C command selection and replay identity, Route's
-`policy_source_row`/candidate association, Observation/native target-handle
-binding, and artifact/source digests. The environment row's E=504 adoption
-sets the conditional source capacity but does not close either Plan C gate.
-A change to K or identity/mask projection requires the affected Route,
-Observation/native, PPO/RNG, and Artifact/manifest owners to re-evaluate their
-row shapes, mappings, and digests before any unified profile can be published.
+## Exact remaining cross-row gate
+
+Route owner must adopt the Plan C mapping `route_ref = source_global_row` for
+policy rows 0-536, with the V4 route sink's `policy_source_row` carrying that
+same source-global row. It must bind each policy query's `target_handle` and
+snapshot to the descriptor/target table for that source row, preserve the
+continuation at row 536, and specify inactive/oracle-row sentinels without
+reusing Plan C source identities. Until that route join and sentinel contract
+is accepted, Plan C's source-local mapping is defined but cross-row identity
+is not closed. Any change to row ordering, handle reference, or code allocation
+requires Route and PPO/RNG to update their mappings and support-digest registry;
+Artifact/manifest must then bind the resulting source/profile identity and
+payload length. No product choice or source evidence remains unresolved within
+this Plan C row.
 
 ## Scope and authority
 
