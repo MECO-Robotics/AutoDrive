@@ -49,7 +49,8 @@ codes are `1=gamepiece_actions.update_fuel_actions.vectorized_score_mutation`
 (`frc_defense/gamepiece_actions.py:476`).
 
 The adopted V4 event record is a packed, ordered 59-byte row with no implicit
-padding:
+padding. The following field order and types reproduce the pinned V4
+proposal's “Score-event table and maximum payload” section, lines 195–212:
 
 | Order | Field | Type | Bytes |
 |---:|---|---|---:|
