@@ -77,10 +77,13 @@ The current producer retains a full ordered metadata/tensor axis, assigns
 `selection_rank` and a `[1,G_policy]` `model_input_mask`, and keeps continuation
 at the source-global row after the ordinary rows. The current C1/C2 inference
 path still forms a full-width feature tensor and masks rows before model/broker
-inference; this does **not** implement the accepted two-view K-wide protocol.
-It also does not change the source table's 33+E bound or the expanded route
-pool. The PPO V3 inventory's source capacities therefore do not contradict the
-Plan C model-view contract and must not be used to widen it.
+inference; C2's current mask also admits continuation to its pooled candidate
+context. This does **not** implement the accepted two-view K-wide protocol,
+which pools ordinary rows once and scores continuation against that shared
+state. The current implementation also does not change the source table's
+33+E bound or the expanded route pool. The PPO V3 inventory's source capacities
+therefore do not contradict the Plan C model-view contract and must not be used
+to widen it.
 
 ## Source evidence at the planning base
 
