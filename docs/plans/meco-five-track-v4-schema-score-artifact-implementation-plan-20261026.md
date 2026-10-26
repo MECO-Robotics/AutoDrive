@@ -1,16 +1,19 @@
 # V4 schema, typed score-event, and artifact implementation plan
 
 **Date:** 2026-10-26  
-**Status:** Planner-authored candidate; pending independent Pass 1 review  
-**Planner/task identity:** `/root/plan_c_owner`  
+**Status:** Staged G0 execution-gate amendment; pending independent exact-head Pass 1 review
+
+**Plan author:** `/root/plan_c_owner`; **amendment author:** `/root/abi_freeze_planner`
+
+**Amends accepted P1 plan:** commit `53686a254318484f9c6bc3496ecc1c461572c53a`, plan SHA-256 `21c07b2c08d37e48ed5d0dac1f149e4a45eb89d59360f466b587f534cf81e076`
 **Implementation base:** `6ed961a09c08dfc1796d98ae3566bd3f0eaaaf22`  
 **Accepted reconciliation:** `03bd0a7a3ef4ea0d2506ec4f9b031745ba53ada9`  
 **Reconciliation file SHA-256:** `294a02012427c2ceeb638ea0cd337d1fa7908cf47fb9d0f07bef29ed6790510c`  
 **Reconciliation acceptance:** `5cb1a2d525168ff0443089cf329e66c6ecb917b8`  
 **Overall-plan P0a/P0b amendment:** commit `6325920252773cfa05d63167ba3c29a90debdb01`, file SHA-256 `9a12708980529cb03810ad40f43dbfe1e29461485a4f50fd1a7b06c7202dec5a`; Pass 1 ACCEPT record commit `be845d7fb2d2ece861dcd158ac8b8dd89e3dc59d`, file `docs/plans/reviews/meco-five-track-v4-gpu-phase0-amendment-6325920.md`, SHA-256 `5a6e94f978c8a7e18d9623897ceba6f32f5b5eadb0aba6605f21c9d1e941a886`
 **Scoped P0 package plan:** commit `13dbd7f8f953995850e811202f7e9c5264c49dca`, file `docs/plans/meco-v4-p0-phase0-scoped-package-plan-20261026.md`, SHA-256 `09ec722d64d01d99b60cc9ed52e47ce68790e548f66107cc1a19dd9a7a588adf`, Git blob `30df1bbed8657b08c1553db7487e59b8a1a0ad86`; Pass 1 ACCEPT record commit `037f0f9386cc0efadb1fb54efe5f38f097926d0e`, file `docs/plans/reviews/meco-v4-p0-phase0-scoped-package-plan-20261026.md`, SHA-256 `1ee70a6e9d24dc5201da5eec446820167cb8c4d4436fbbe013eb16de66b0280d`
-**Prior P1 Pass 1 review:** REVISE at commit `c92480036ffb41161a444184f0f488059d281452`, file `docs/plans/reviews/meco-five-track-v4-schema-score-artifact-implementation-plan-20261026.md`, SHA-256 `783d630fb33ccfb76cae17063797fb15c4cd80edb66c3220b6ac0354f32cabfc`; finding: final source-bound P0 was a prerequisite to P1.1 source discovery.
-**Latest P1 Pass 1 review:** REVISE at commit `a16cdd97742c20e18d4aec51e5c76077fd9aa46f`, same review path, SHA-256 `f7ca7739b3e2c906b55f1b6ecc6588f9c8634cf560722f04dad9fdaf2c0cf944`; finding: P1 allowlisted the shared trainer reserved to P5.
+**Prior P1 Pass 1 reviews:** REVISE at commit `c92480036ffb41161a444184f0f488059d281452` (P0 sequencing) and `a16cdd97742c20e18d4aec51e5c76077fd9aa46f` (P5 trainer ownership); superseded for the corrected base plan.
+**Prior P1 Pass 1 ACCEPT:** reviewed plan commit `53686a254318484f9c6bc3496ecc1c461572c53a`, plan SHA-256 `21c07b2c08d37e48ed5d0dac1f149e4a45eb89d59360f466b587f534cf81e076`; review record commit `854d5286947074ed33f7ac059d67f2f9ccbf9257`, record SHA-256 `0680a57e5ff0427b20a0a5bd86c224085583b241b3f57bcb18bde69cab0f158f`. That ACCEPT does not cover this staged-gate amendment; this exact revision requires fresh Pass 1.
 **Canonical reconciled profile hash:** `5ec637676c0acf02f9769b1629860122c6c5332914acdcfbb9c04adaafea70e3`  
 **V4 proposal commit / profile digest:** `6b4ce4a939a2cdea375bd4be6879f6f7bc73141b` / `0c5ba39c3a4fa7c9bdf168ccf7c1dc792f4d3e27bd6f532517a967fca4b025b6`
 
@@ -24,18 +27,22 @@ package is about producing, validating, and persisting the exact reconciled
 transition bytes, with typed score-event provenance from the simulator's
 actual scoring mutation.
 
-This document is planning only. It is not approval to edit source, run tests,
-build, use devices, run a simulator, restart a dashboard, publish ABI bytes, or
-start training. It makes no claim that the base source conforms. A distinct
+This document is planning only. It does not itself authorize source edits,
+tests, builds, device use, simulator runs, dashboard restarts, ABI publication,
+or training. It makes no claim that the base source conforms. A distinct
 implementer and independent reviewer must be assigned after Pass 1; they may
 not be the same person or agent. Each review must pin an exact pushed commit
-and file hash. This plan follows the accepted overall plan pinned above. The scoped P0
-package plan must receive Pass 1 ACCEPT before P0a work begins; this P1 plan
-and the overall plan must receive Pass 1 ACCEPT before P1 implementation.
-Source discovery, implementation, tests, and simulator regression evidence
-are gated on external G0 release and accepted P0a preregistration, not P0b.
-P0b follows the reviewed P1–P6 source freeze and gates fresh training and P6
-runtime qualification; it does not gate P1 source work or P1 validation.
+and file hash. This plan follows the accepted overall plan pinned above. The
+scoped P0 package plan must receive Pass 1 ACCEPT before P0a work begins; this
+P1 plan and the overall plan must receive Pass 1 ACCEPT before P1 work begins.
+After accepted P0a, the accepted overall plan, and an exact-head Pass 1 ACCEPT
+of this plan revision, isolated worktree source authoring and static
+source/interface review may proceed while
+supervisor PID 2750253 remains live. G0 gates every test, build, import that
+executes project code, runtime, device/GPU, simulator, dashboard, integration,
+merge, promotion, and final package acceptance. P0b follows the reviewed
+P1–P6 source freeze and gates fresh training and P6 runtime qualification; it
+does not gate isolated P1 authoring or pre-G0 source/interface disposition.
 
 ## Contract pins
 
@@ -69,15 +76,26 @@ change stops work and returns to reconciliation with a new profile hash.
 
 ## Hard prerequisites and stop conditions
 
-### G0: campaign and resource release
+### G0: runtime, integration, and promotion release
 
-The eventual implementer must verify the accepted implementation plan's G0
-conditions before source work: the active campaign has been stopped by the
-user, and the assigned GPU leases have been independently confirmed released.
-No task in this plan may inspect, stop, signal, reconfigure, evaluate through,
-or otherwise touch an active campaign or its dashboard, workers, checkpoints,
-output paths, leases, or devices. Do not infer G0 from elapsed time or from
-absence of a process observed in this planning task.
+G0 is not a prerequisite for isolated source authoring or static source/interface
+review after accepted P0a, the accepted overall plan, and this exact P1 plan
+revision's Pass 1. Those tasks use a separate HDD worktree/branch and must not access or
+modify the campaign checkout, dashboard, workers, checkpoints, outputs, leases,
+or devices. While supervisor PID 2750253 is live, the allowed activity is
+limited to source inspection, source-only edits within this plan's allowlist,
+static review of pinned diffs/interface dispositions, and documentation/hash
+checks that do not execute project code.
+
+Before running any test/build/import of project code, GPU/device work, simulator,
+dashboard operation, branch integration, merge, promotion, or final acceptance,
+the user must manually stop the campaign and both WX9100 leases must be
+independently confirmed released by their lease owners. Never stop or signal the
+campaign as part of this plan. Do not infer G0 from elapsed time, missing
+telemetry, an absent process observation, or device utilization. Record the
+manual stop evidence and each released device UUID/lease identity in the
+post-G0 acceptance record. Until then, no integration checkout or publication
+of the candidate API/ABI is permitted.
 
 ### P0a: approved preregistration before source work
 
@@ -178,9 +196,11 @@ total stops the sequence pending reconciliation.
 
 ### P1.1 — Read-only source map and interface decision record
 
-**Dependency:** G0 and accepted P0a preregistration. No source edits or
-runtime work. This read-only source map is required input to P0b; it is not
-gated on the final calibrated P0b artifact.
+**Dependency:** accepted P0a preregistration, accepted overall plan, and this
+P1 plan's exact-head Pass 1 ACCEPT. G0 is not required for source inspection
+or this static record. No tests, builds, imports, runtime, device, simulator,
+dashboard, integration, merge, or promotion. This read-only source map is
+required input to P0b; it is not gated on the final calibrated P0b artifact.
 
 Trace each producer, mutation, reset, and consumer from the base tree. Record
 the exact path/line, device/dtype/shape, source event, physical piece identity,
@@ -283,10 +303,11 @@ it from the shared trainer/evaluation caller without P1 edits to that caller.
 
 ### P1.5 — Exact-head review, seeded simulator and dashboard evidence
 
-**Dependencies:** P1.1–P1.4 accepted; G0 and accepted P0a remain satisfied;
-current checkout integrated from the exact reviewed commits. This is
-implementation regression evidence, not final P0b calibration or training/
-qualification.
+**Dependencies:** P1.1–P1.4 have pre-G0 source/interface disposition; G0 has
+been independently evidenced; accepted P0a remains pinned; the reviewed source
+commits are integrated into a fresh current checkout only after G0. This is
+post-G0 implementation regression evidence, not final P0b calibration or
+training/qualification.
 
 Run only the package-authorized schema/event tests and representative
 end-to-end simulator evaluations. Use the P0a-frozen scenario/seed IDs; include
@@ -371,7 +392,7 @@ Pass 2 must add deterministic fixtures for:
    fixtures. Any host reference encoder is test-only and may not enter the
    live producer, digest, reader, or decision path.
 
-**Pass 2 ACCEPT evidence must include:** exact P0a preregistration URI/hash and
+**Final post-G0 acceptance evidence must include:** exact P0a preregistration URI/hash and
 approval provenance; exact source map; accepted P1.1 decision record; exact base and
 profile hashes; per-package pushed commits and file allowlist; all fixture
 results; GPU UUID/runtime evidence for both WX9100s; no-CPU transfer/sync trace
@@ -379,6 +400,19 @@ for the event-to-artifact path; and exact artifact/manifest hashes. Pass 3 must
 re-open the exact pushed head/blob, review all allowlist changes and fixture
 results, and return a persisted ACCEPT/REVISE. No mutable branch-tip review is
 accepted.
+
+**Pre-G0 Pass 3 is source/interface disposition only.** It may inspect the
+exact pushed isolated candidate, its source diff, schema/interface consistency,
+allowlist, and static provenance. It must not run code, fixtures, tests, builds,
+imports, or runtime checks. Record its result as `PRE_G0_SOURCE_INTERFACE_ACCEPT`
+or `REVISE`; that result is not P1 completion, implementation validation, merge
+approval, promotion, or evidence of simulator/GPU/dashboard correctness. Any
+source change after that disposition requires another exact-head pre-G0 review.
+After G0, perform P1.5's required tests, both-WX9100 no-CPU evidence, seeded
+simulator/replay evaluation, and current dashboard/backend/frontend checks.
+An independent reviewer then reopens the exact integrated head and those
+runtime records for `POST_G0_FINAL_ACCEPT` or `REVISE`. Only the latter can
+close P1.
 
 For every test that checks scoring or other simulated behavior, evidence must
 also contain the representative seeded simulator evaluation and inspected
@@ -408,8 +442,9 @@ or simulator/dashboard regression evidence.
 ## Risks and explicit open decisions
 
 - **P0 sequencing:** No accepted P0a preregistration was supplied. P1 source
-  discovery, implementation, and validation cannot start until P0a and G0 are
-  accepted. P1.1 feeds source identity to P0b. P0b closes after all P1–P6
+  discovery and isolated source authoring require accepted P0a and the exact
+  plan prerequisites; tests, builds, runtime validation, integration, merge,
+  promotion, and final acceptance require G0. P1.1 feeds source identity to P0b. P0b closes after all P1–P6
   sources are frozen/reviewed and gates fresh training and P6 runtime
   qualification, not P1 source work or validation.
 - **Source mismatch:** The accepted owner response describes a named recorder
@@ -442,13 +477,16 @@ or simulator/dashboard regression evidence.
 
 ## Completion and non-goals
 
-P1 implementation and validation are complete when the exact reconciled
+P1 implementation and validation are complete only after G0, when the exact reconciled
 profile is implemented for schema, score-event producer and consumer, and
 bundle/manifest; exact-byte, digest, failure, and source-identity fixtures
 pass; required seeded simulator records/replays show the changed scoring
 behavior; both assigned GPUs are verified; and the current dashboard
 backend/frontend pass freshness and endpoint checks. These P1 gates depend on
-accepted P0a and G0, not P0b. P1 completion supplies frozen source and the
+accepted P0a and G0, not P0b. A pre-G0 source/interface ACCEPT is only a review
+checkpoint and cannot be reported as P1 completion. Integration and merge are
+allowed only after manual stop and independent release of both WX9100 leases.
+P1 completion supplies frozen source and the
 source map to P0b. Under the accepted overall plan, P0b closes after all P1–P6
 sources are frozen and reviewed, then gates fresh training and P6 runtime
 qualification. Neither training nor P6 runtime qualification is authorized by
