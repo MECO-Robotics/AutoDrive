@@ -50,13 +50,17 @@ head and ACCEPT verdict.
 ## Reconciled profile declaration
 
 The following single-line UTF-8 JSON byte sequence, excluding the Markdown
-fence and with no trailing newline, is the canonical profile/field-layout
-declaration. Integers are decimal, arrays preserve the specified axis/order,
-and JSON keys are in the exact order shown. Its SHA-256 is the V4
-`profile_digest` and the final reconciled profile hash.
+fence and with no trailing newline, is the canonical reconciled
+profile/field-layout declaration. Integers are decimal, arrays preserve the
+specified axis/order, and JSON keys are in the exact order shown. Its SHA-256
+is the `reconciled_profile_hash` to pin the subsequent implementation plan.
+The V4 envelope's `profile_digest` is a separate value fixed by the adopted
+Artifact/manifest row: SHA-256 of the raw bytes of the exact pinned V4 proposal
+file, without extraction or re-encoding, namely
+`0c5ba39c3a4fa7c9bdf168ccf7c1dc792f4d3e27bd6f532517a967fca4b025b6`.
 
 ```json
-{"abi":"FiveTrackPpoTransitionV4","envelope":"FiveTrackPpoBatchV4","envelope_version":2,"schema_version":4,"profile_id":"meco-five-track-shared-command-v4","track_codes":{"A1":1,"A2":2,"A3":3,"C1":4,"C2":5},"N":1,"S":6,"R":32,"T":12,"E":504,"K":16,"raster":{"shape":[6,25,51],"dtype":"float32","global_shape":[7],"global_order":["x","y","sin_heading","cos_heading","load","signed_hub_timer","match_remaining"]},"plan_a":{"nodes":12096,"support_rows":96768,"edges_per_node":10,"ancestor_levels":14,"cost_dtype":"float64"},"plan_c":{"source_rows":537,"raw_width":20,"model_width":40,"route_rows":9681,"route_chunks":152,"route_chunk_capacity":64,"path_points":73},"row_bytes":9822906,"rows_bytes":314332992,"score_event":{"slots":2304,"record_bytes":59,"table_bytes":135936},"static_identity_bytes":123,"payload_bytes":314469051,"header_bytes":96,"bundle_bytes":314469147,"encoding":"packed-little-endian-no-padding-float32-ieee754-valid-finite-mask-false-zero-signed-zero-preserved"}
+{"abi":"FiveTrackPpoTransitionV4","envelope":"FiveTrackPpoBatchV4","envelope_version":2,"schema_version":4,"v4_profile_digest":"0c5ba39c3a4fa7c9bdf168ccf7c1dc792f4d3e27bd6f532517a967fca4b025b6","profile_id":"meco-five-track-shared-command-v4","track_codes":{"A1":1,"A2":2,"A3":3,"C1":4,"C2":5},"N":1,"S":6,"R":32,"T":12,"E":504,"K":16,"raster":{"shape":[6,25,51],"dtype":"float32","global_shape":[7],"global_order":["x","y","sin_heading","cos_heading","load","signed_hub_timer","match_remaining"]},"plan_a":{"nodes":12096,"support_rows":96768,"edges_per_node":10,"ancestor_levels":14,"cost_dtype":"float64"},"plan_c":{"source_rows":537,"raw_width":20,"model_width":40,"route_rows":9681,"route_chunks":152,"route_chunk_capacity":64,"path_points":73},"row_bytes":9822906,"rows_bytes":314332992,"score_event":{"slots":2304,"record_bytes":59,"table_bytes":135936},"static_identity_bytes":123,"payload_bytes":314469051,"header_bytes":96,"bundle_bytes":314469147,"encoding":"packed-little-endian-no-padding-float32-ieee754-valid-finite-mask-false-zero-signed-zero-preserved"}
 ```
 
 ### Capacity and field compatibility
@@ -73,11 +77,13 @@ and JSON keys are in the exact order shown. Its SHA-256 is the V4
 | Artifact/manifest | Envelope v2 uses the 96-byte little-endian header, 123-byte static identity prefix, exact payload size 314,469,051, and exact full bundle size 314,469,147. Full fixed-capacity event table; source/config/checkpoint digest spans and strict version-first exact-length fail-closed reader predicate are adopted. |
 | Evaluation/curriculum | User selected the limited `simulated_match_score`: accepted active-HUB FUEL awards only, not official match points. User selected fixed strategic-horizon gross reward with route/risk costs separate and confirmed current counterfactual defaults: 160 physics ticks, at most 12 ticks per macro (last may be partial), gamma 0.993 per macro with first branch exponent 0 and one increment per continuation decision. Route and risk costs retain their separate units above. |
 
-The canonical declaration hash is computed over only the exact JSON content
-inside the fenced block, with no leading/trailing whitespace or newline. Its
-SHA-256, which is the final reconciled profile hash, is
-`25c03d281f8866714bc8b58308373de827c0e6fb926d5f498497c9af685cb476`. The
-review record pins this file's immutable SHA-256 and this declaration hash.
+The reconciled-profile hash is computed over only the exact JSON content inside
+the fenced block, with no leading/trailing whitespace or newline. This
+supplemental implementation-plan identity is distinct from the V4 envelope's
+`profile_digest` above. Its SHA-256 is
+`5ec637676c0acf02f9769b1629860122c6c5332914acdcfbb9c04adaafea70e3`. The
+review record pins this file's immutable SHA-256, the reconciled-profile hash,
+and the raw-proposal V4 `profile_digest`.
 
 ## Byte derivation
 
@@ -105,7 +111,7 @@ implicit alignment, struct padding, or trailing bytes are included.
 `2,304 × 59 = 135,936` bytes. Static source/config/checkpoint digests and RNG
 identity total 123 bytes. Thus payload is
 `314,332,992 + 135,936 + 123 = 314,469,051` bytes. The 96-byte envelope makes
-the complete bundle `314,469,051 + 96 = 314,469,147` bytes (299.9012 MiB).
+the complete bundle `314,469,051 + 96 = 314,469,147` bytes (299.9011 MiB).
 
 The arithmetic is independently checked against the V4 owner response and
 review. The declaration's `row_bytes`, `rows_bytes`, `score_event.table_bytes`,
