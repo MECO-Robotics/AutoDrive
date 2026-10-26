@@ -1,7 +1,7 @@
 # MECO V4 Phase 0 preregistration candidate (P0a)
 
 **Status:** Candidate for maintainer decisions and independent exact-head review; not approved for calibration, training, qualification, or runtime use.
-**Package plan:** `docs/plans/meco-v4-p0-phase0-scoped-package-plan-20261026.md` at `72ee8fce1d4a955d100b97d47b58528374faddec`.
+**Package plan:** `docs/plans/meco-v4-p0-phase0-scoped-package-plan-20261026.md` at `72ee8fce1d4a955d100b97d47b58528374faddec`; Pass 1 ACCEPT record commit `cb02ef8fd` (record SHA-256 `a8c5164730d62bd04c7a134e0d395a81ce8f76c1088db6e5f5a8e2b5bd62701d`).
 **Overall plan:** `docs/plans/meco-five-track-v4-gpu-implementation-plan-20261026.md` at `8efec9378d1912f0839d7c6cd8e88467fceb1d5a`, SHA-256 `57f20a1bcfe6f229429d402140de93a0ee1780372e21a9ac3344f81c72faca90`.
 **Source reference base:** `6ed961a09c08dfc1796d98ae3566bd3f0eaaaf22`.
 **Reconciled profile:** SHA-256 `5ec637676c0acf02f9769b1629860122c6c5332914acdcfbb9c04adaafea70e3`.
@@ -16,19 +16,19 @@ Evaluate all five planned tracks—A1, A2, A3, C1, and C2—against the stronges
 
 The principal outcome is accepted active-HUB FUEL awards for the controlled robot/team, counted from the simulator's authoritative accepted-award event. This is a limited simulated proxy, not official match points. P1 must bind the event producer and all consumers to the exact reviewed source; if that map changes the meaning or aggregation, return the protocol to maintainer review before P0b.
 
-The primary product question follows `docs/MECO_AutoDrive_Learning_Tracks_Evaluation_Plan.md`: whether a learned architecture beats the strongest matched deterministic baseline on held-out outcomes, with paired initial states/opponent seeds and bootstrap confidence intervals, without increased safety violations. The estimand is award count per complete 160-strategic-tick episode. Secondary outcomes include award rate over the same fixed horizon, FUEL-per-second, scoring/ferry efficiency, failed collection attempts, defensive exposure/interception, route feasibility, candidate recall, policy switching, reliability/fallback behavior, and end-to-end compute latency. These secondary metrics cannot replace the primary outcome.
+The primary product question follows `docs/MECO_AutoDrive_Learning_Tracks_Evaluation_Plan.md`: whether a learned architecture beats the strongest matched deterministic baseline on held-out outcomes, with paired initial states/opponent seeds and bootstrap confidence intervals, without increased safety violations. The estimand is award count per complete 160-physics-tick strategic episode. Secondary outcomes include award rate over the same fixed horizon, FUEL-per-second, scoring/ferry efficiency, failed collection attempts, defensive exposure/interception, route feasibility, candidate recall, policy switching, reliability/fallback behavior, and end-to-end compute latency. These secondary metrics cannot replace the primary outcome.
 
 ## 2. Reward and decision contract
 
 Use the maintainer-confirmed gross-reward contract and current counterfactual defaults:
 
-- strategic reward horizon: 160 strategic ticks;
-- macro action duration: at most 12 simulator ticks;
+- strategic episode horizon: 160 physics ticks;
+- macro action duration: at most 12 physics ticks, with a partial final macro when the remaining episode horizon is shorter;
 - discount factor: gamma `0.993`;
 - gross accepted active-HUB FUEL-award reward; route and risk costs remain separate quantities and are not subtracted from this reward target;
 - retain the current counterfactual default reward definitions and signs; P1/P5 must bind their exact implementation/profile identity before source freeze and P0b.
 
-The exact tick-to-time interpretation and reward aggregation at macro boundaries must match the pinned profile and P5 implementation. P0b fails closed on any mismatch. Curriculum/task reward, throughput, score differential, and official match points are not substitutes for this estimand. Route cost and risk are reported separately, so no comparator may quietly mix them into a candidate's gross-reward label while another does not.
+The return is duration-aware at macro boundaries: the first reward contribution on each macro branch uses discount exponent zero; each continuation decision advances gamma by one exponent regardless of that macro's physics-tick duration. A truncated final macro executes only the remaining physics ticks and closes the 160-physics-tick episode. P1/P5 must bind this branch/exponent rule and reward aggregation to the pinned profile and implementation; P0b fails closed on any mismatch. Curriculum/task reward, throughput, score differential, and official match points are not substitutes for this estimand. Route cost and risk are reported separately, so no comparator may quietly mix them into a candidate's gross-reward label while another does not.
 
 ## 3. Experimental unit, pairing, and policy set
 
@@ -40,9 +40,9 @@ The track set is exactly A1/A2/A3/C1/C2. The deterministic candidates are D0/D1/
 
 Four disjoint partitions are required: training, calibration, validation, and final test. Their scenario cells and seed lists must be frozen as canonical bytes before training. No seed, initial state, or opponent-policy instance may cross partitions. Hold out complete opponent-policy families and map/start situations from training, not only random seeds. Calibration may estimate baseline variance, uncertainty, and margins and select the strongest deterministic comparator. Validation is for predeclared interim diagnostics only. Final test is opened once after all policies, comparator identity, source, profile, and decision rules are frozen.
 
-For each approved cell, derive a 64-bit episode seed as the first eight bytes (big-endian) of `SHA256(UTF8("MECO-V4-SEED\0") || canonical_json({"partition": P, "scenario_id": S, "pair_id": Q, "replicate": R}))`. Canonical JSON uses UTF-8, sorted object keys, no insignificant whitespace, and integer replicate values. The resulting integer is the simulator seed. Store the canonical preimage, digest, and integer in the protocol. Reject duplicate seed integers across all partitions; resolve collisions by incrementing the replicate field and recording the resulting preimage before any outcomes exist. A single cell seed is shared across all policies in that paired block.
+Use the deterministic seed construction already present at the source reference base as the default: `training_curriculum.seed_partition(scenario_id, split, count, master_seed=...)`, with `meco_qualification.protocol_cases` stratum namespace construction. Proposed master seed: `20261024`; proposed count: 100 seeds per category/stratum, matching the existing `MIN_EPISODES` floor. Preserve the function's stable 63-bit seed values and split bits, retain exact generated seed lists in canonical protocol bytes, and share each cell seed across all policies in its paired block. P6 must revalidate the source functions against the exact frozen integration base and bind their implementation digest; if v5 changes the seed algorithm, stop for renewed preregistration approval.
 
-The seed derivation rule is a proposal. The specific partition membership, IDs, counts, and collision-resolution approval remain subject to the maintainer decisions in §10. The seed generator is not evidence that the case matrix has been selected.
+The seed derivation rule and default master seed/count are proposals. The specific partition membership, IDs, counts, and collision handling remain subject to the maintainer decisions in §10. The seed generator is not evidence that the case matrix has been selected.
 
 ## 5. Metrics and safety
 
@@ -102,22 +102,41 @@ The final audit record includes the exact protocol hash, source/profile/rules/de
 
 These questions are intentionally open because the approved product document does not name a finite held-out set or fully define all protocol mappings. Record selected values and rationale in a decision record attached to this exact candidate before Pass 3. No implementing agent may guess these values.
 
+### Repository inventory and proposed finite default (for approval)
+
+The source reference base registers 12 curriculum scenarios in `frc_defense/training_curriculum.py`; `full_match_offense` is the only registered complete-schedule target and its transitive prerequisite closure is all 12 scenarios, in registry order: `pickup_simple`, `pickup_scattered`, `pickup_multi_zone`, `active_carry_to_zone`, `active_shoot_preloaded`, `inactive_ferry_preloaded`, `active_collect_carry_score`, `inactive_collect_ferry`, `hub_transition_cycles`, `offense_vs_scripted_pressure`, `team_delivery_cycles`, `full_match_offense`. The scenario-specific category lists are finite in that module; the selected protocol expands every category for each target/closure scenario rather than inventing category names. This is the recommended primary evaluation target because it covers a complete match schedule and has an active-HUB scoring outcome. It is a proposed mapping and still requires maintainer approval.
+
+The existing qualification source provides these applicable axes: layouts `2026_rebuilt`, `2026_rebuilt_shifted_structures_v1`, `_v2`, and `_v3`; defender families `category_scripted`, `orbiting_interceptor`, and `split_chaser`; starts `scenario_defined`, `offset_upper_lane`, and `offset_lower_lane`; sensor profiles `standard` and `noisy`. `meco_qualification.py` also defines 100 episodes as the minimum per category/stratum, a 10,000-replicate bootstrap default, `meco-safety-rates-v1`, and metric IDs `safety_robot_contact_rate`, `safety_field_contact_rate`, and `safety_wall_contact_rate`. These are existing v4 identifiers/defaults, not automatically accepted v5 semantics.
+
+Proposed finite axis matrix (apply each row across the full target prerequisite closure and every registered category; pair every policy on the same row and seed):
+
+| Partition | Layout | Defender family | Start condition | Sensor profile | Proposed episodes per category/stratum |
+|---|---|---|---|---|---:|
+| train | `2026_rebuilt` | `category_scripted` | `scenario_defined` | `standard` | existing training protocol |
+| calibration | `2026_rebuilt_shifted_structures_v1` | `orbiting_interceptor` | `offset_upper_lane` | `noisy` | 100 |
+| validation | `2026_rebuilt_shifted_structures_v2` | `orbiting_interceptor` | `offset_upper_lane` | `noisy` | 100 |
+| final test | `2026_rebuilt_shifted_structures_v3` | `split_chaser` | `offset_lower_lane` | `noisy` | 100 |
+
+The proposed partitions use distinct layout IDs; the final-test opponent family `split_chaser` is absent from training, calibration, and validation; calibration and validation use disjoint `calibration` and `validation` seed partitions. Use master seed `20261024` and the existing `seed_partition`/`protocol_cases` deterministic namespace rule. The matrix narrows the legacy validation family list, which currently includes `split_chaser`, to meet the evaluation plan's whole-family holdout requirement. Case identity is the canonical tuple `(scenario_id, category, layout_id, defender_family, start_condition, sensor_profile)`; freeze the exact expanded tuple and seed table as canonical bytes before training.
+
+Existing safety candidate IDs are the three contact rates listed above. Existing curriculum failure semantics include timeout or failure of the stated physical outcome; current evaluation records also name `selected_target_lost`, `native_behavior_preempted_selected_goal`, `action_was_remasked`, and policy-inference fallback reasons. These do not yet define a complete v5 episode-level failure taxonomy. Proposed v5 finite disposition classes are `complete`, `timeout`, `safety_stop`, `simulator_error`, `worker_or_device_error`, `invalid_or_stale_record`, and `incomplete_episode`; map lower-level execution reasons into these classes with the original reason retained. This mapping and whether each class counts as a safety event or makes a pair non-evaluable require maintainer approval and source-bound implementation by P6.
+
 | Decision | Required maintainer selection |
 |---|---|
-| Outcome aggregation scope | Accepted active-HUB FUEL awards for controlled robot or whole allied team; specify event ownership and tie/duplicate treatment. The estimand remains a limited proxy, not official match points. |
-| Stage 1 target mapping | Exact v5 target ID, transitive prerequisite closure, and five-track comparison target. |
-| Held-out maps and starts | Finite map/layout and initial robot/game-state IDs, including whether any map variations are distinct holdout domains. |
-| Held-out opponents | Finite opponent-family IDs and frozen policy/checkpoint/config identities; identify families wholly excluded from training. |
-| Case matrix | Finite case IDs and their map, start, opponent family, sensor profile, teammate behavior, and paired block structure. |
-| Partition membership | Exact train/calibration/validation/final-test case and seed membership, counts, and immutable canonical bytes. |
-| Repeat/sample floor | Minimum paired blocks and calibration episodes per approved stratum; policy for inadequate calibration evidence. |
-| Primary uncertainty | Approve percentile paired bootstrap or specify replacement; resampling unit, replicate count, two-sided 95% interval, stratification and five-comparison multiplicity method. |
-| Safety metrics and vetoes | Exact metric IDs/scopes and which critical events veto regardless of score. |
-| Missing/failure mapping | Finite failure taxonomy and rule for its effect on safety and primary paired estimate. |
-| Reward implementation identity | Confirm source/profile binding of current counterfactual defaults and exact aggregation across macros under 160 strategic ticks, max macro 12, gamma .993, gross reward. |
+| Outcome aggregation scope | Accept the active-HUB FUEL award event aggregation scope for the controlled robot/team; specify event ownership and tie/duplicate treatment. The estimand remains a limited proxy, not official match points. |
+| Stage 1 target mapping | Accept `full_match_offense` with the listed 12-scenario closure, or select another exact v5 target and closure. |
+| Held-out maps and starts | Accept the proposed v1/v2/v3 layout split and upper/lower-lane starts, or specify exact alternatives and initial state IDs. |
+| Held-out opponents | Accept `category_scripted` for train, `orbiting_interceptor` for calibration/validation, and wholly held-out `split_chaser` for final test; provide frozen policy/checkpoint/config identities. |
+| Case matrix | Accept the proposed Cartesian expansion of every registered category across the target closure and one axis row per partition, or specify finite alternative tuples including teammate behavior and paired block structure. |
+| Partition membership | Accept exact expanded tuples and derived seed bytes after generation, including 100 episodes per category/stratum for calibration, validation and final test; training uses the existing training protocol. |
+| Repeat/sample floor | Accept 100 episodes per category/stratum and existing calibration repetition minimum of two, or specify alternatives and the inadequate-evidence rule. |
+| Primary uncertainty | Approve the existing 10,000-replicate bootstrap as count default and select percentile paired bootstrap or specify replacement; freeze resampling unit, two-sided 95% interval, stratification and five-comparison multiplicity method. |
+| Safety metrics and vetoes | Accept the three existing contact-rate IDs and source-bound definitions, plus exact critical-event vetoes; specify any additions/omissions and scope. |
+| Missing/failure mapping | Accept the proposed finite episode disposition classes and define the effect of each on safety and the primary paired estimate. |
+| Reward implementation identity | Confirm source/profile binding of current counterfactual defaults and exact aggregation across macros under 160 physics ticks per strategic episode, max macro 12 physics ticks with partial final macro, gamma .993 with branch exponent zero and one exponent increment per continuation decision, gross reward. |
 | D3 | Confirm exclusion from the primary comparator set or amend before any candidate outcomes are seen. |
 
-This candidate adopts the already confirmed fixed horizon, macro limit, discount factor, gross-reward semantics, and active-HUB FUEL-award proxy. It does not infer answers for the remaining rows. If any decision is deferred, P0a remains pending and P1–P6 source authoring that depends on the unresolved item must wait.
+This candidate adopts the already confirmed fixed strategic episode horizon, macro limit, discount factor, gross-reward semantics, and active-HUB FUEL-award proxy. It proposes a finite, source-grounded matrix but does not treat it as approved. If any decision is deferred, P0a remains pending and P1–P6 source authoring that depends on the unresolved item must wait.
 
 ## 11. P0a/P0b acceptance boundary
 
