@@ -2520,13 +2520,16 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
         chunk_target = update + config.updates
         while update < chunk_target and not (stop_path and stop_path.exists()) \
                 and sibling_abort_marker() is None:
+            # Source identity hashes the trainer and native sources. Check once
+            # per PPO update rather than once per rollout row; check again
+            # before persisting the resulting checkpoint below.
+            if source_identity() != sources:
+                raise RuntimeError("source/runtime changed during MECO training; stopping before checkpoint write")
             rows = []
             update_empty_support_events = []
             rollout_model_fingerprint = (_model_id(model)
                 if config.track in ("C1", "C2") else None)
             for _ in range(config.rollout_steps):
-                if source_identity() != sources:
-                    raise RuntimeError("source/runtime changed during MECO training; stopping before checkpoint write")
                 try:
                     with torch.no_grad():
                         prepared = _prepare_decision(config.track, model, env, graph,
@@ -2812,6 +2815,8 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                     row["candidate_recall"]["candidate_recall"]
                     for row in rows) / len(rows)
             history.append(stats)
+            if source_identity() != sources:
+                raise RuntimeError("source/runtime changed during MECO training; stopping before checkpoint write")
             payload = {"schema_version": 1, "config": asdict(config),
                 "prediction_contract": prediction_contract(config.prediction_mode),
                 "qualification_protocol_id": qualification_protocol_id,
