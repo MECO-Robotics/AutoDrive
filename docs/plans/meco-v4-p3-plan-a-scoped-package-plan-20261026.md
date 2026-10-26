@@ -72,7 +72,7 @@ The three network implementations currently reside in `frc_defense/meco_tracks.p
 
 ## Finite Pass 2 allowlist
 
-P3 Pass 2 may modify only the following paths in a fresh implementation worktree based on the exact accepted integration head. No additional path is implied by “integration”; if discovery proves another path necessary, stop and request a reviewed plan amendment first.
+Before G0, P3 Pass 2 may author only the following paths in a fresh isolated implementation worktree based on the approved source base `6ed961a09c08dfc1796d98ae3566bd3f0eaaaf22`, using exact P1/P2 candidate interface pins that have independent SOURCE/API ACCEPT. Do not merge, copy, or integrate candidate APIs into that worktree. After G0, the exact accepted integration head and reviewed contract-anchor bridge become the base for rebasing/cherry-picking and runtime validation; integration is deferred until final Pass 3 ACCEPT. No additional path is implied by the allowlist; if discovery proves another path necessary, stop and request a reviewed plan amendment first.
 
 | Path | P3 authority |
 |---|---|
