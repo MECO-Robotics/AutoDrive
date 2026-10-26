@@ -50,9 +50,10 @@ merge, and promotion remain behind the accepted G0 and reviewed bridge gates.
   SOURCE/API ACCEPT review commit
   `abc4a3d712bf829d0af5ec7a3ece9e173f7039c3`.
 - Accepted profile byte totals: 32 rows × 9,822,906 = 314,332,992 bytes.
-  The accepted static identity prefix is 123 bytes and precedes row 0, so the
-  row block follows that prefix at payload-relative offset 123 in the proposed
-  layouts. This slice returns only the row block, never the payload.
+  The accepted static identity prefix is 123 bytes and precedes row 0. The
+  row block's eventual payload-relative offset depends on the pending owner
+  choice of section order. This slice returns only the row block, never the
+  payload.
 
 Start implementation at the exact accepted schema head
 `38fdb1d0423f0e723c4e1fb533e36eb7b88c4715` in a fresh ZFS worktree. This
