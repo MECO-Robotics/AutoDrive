@@ -25,3 +25,19 @@ Revise the table introduction and its “Required before P6 Pass 2” cells to d
 ## Review limits
 
 This REVISE applies only to the exact commit and file hash above. It does not reject the P6 scope or grant implementation/runtime authority. No tests, source edits, builds, runtime, simulator, device/GPU, dashboard, campaign or training actions were performed.
+
+## Successor review: staged dependency correction
+
+- **Verdict:** ACCEPT (Pass 1 plan review)
+- **Reviewed commit:** `ea51dd8c84ab4e59bf056fae8c47facaee0c1fbd`
+- **Reviewed file:** `docs/plans/meco-v4-p6-five-track-supervisor-qualification-package-plan-20261026.md`
+- **Git blob:** `c1a37041890a826fdf282baa0b109c6a5cc74588`
+- **File SHA-256:** `60cb8e6126cea8d307a96caef6b3099e5db5e43efe41170df0cb4e3237462a5e`
+- **Reviewer identity:** `plan_a_owner`
+- **Planner:** `/root/closure_wave1_reviewer` (planning only)
+
+I fetched the named remote plan branch and recomputed the exact file SHA-256 before review. The successor corrects the prior blocker: its P3/P4/P5 dependency table now requires exact candidate source/API heads with independent structural SOURCE/API ACCEPT before P6 source authoring, and reserves final integrated heads and post-G0 review for runtime validation and final P6 acceptance. This matches the source-only gate; accepted plan artifacts are not represented as accepted implementation APIs.
+
+I rechecked the accepted overall-plan pin and ACCEPT record, the accepted package-plan references, and the distinction between those plan approvals and still-pending implementation heads. The plan preserves the G0 boundary: no execution, build, test, simulator, device/GPU, dashboard, training, evaluation, checkpoint mutation, integration, merge or promotion before the user's manual stop of PID `2750253` and independent release confirmation for both WX9100 leases. It requires the reviewed contract-anchor bridge and final P1–P5 integration pins after G0, before runtime validation. P0a precedes source work; P0b follows frozen/reviewed P1–P6 source; P6 runtime follows P0b, so there is no P0b/P6 source cycle. It retains continuous training until manual user stop and read-only evaluation from immutable snapshots.
+
+**Disposition support and limits:** ACCEPT is supported for the P6 Pass 1 plan artifact at this exact successor head. This is not human approval, implementation/API acceptance, runtime evidence, G0 satisfaction, or authorization to integrate or operate training. No tests, source edits, builds, runtime, simulator, device/GPU, dashboard, campaign or training actions were performed. This ACCEPT supersedes the earlier REVISE only for the corrected successor; the prior REVISE remains the record for commit `364c0a31fcb80aab9af31d7a09006eea45009b12`.
