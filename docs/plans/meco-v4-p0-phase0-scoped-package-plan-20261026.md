@@ -1,7 +1,7 @@
 # P0 Phase 0 preregistration and finalization package plan
 
 **Date:** 2026-10-26
-**Status:** Original package plan ACCEPT at `13dbd7f8f953995850e811202f7e9c5264c49dca`; the G0/source-authoring amendment at `c4f136b267f8e41e0baec53394f28fac28f16eb5` received REVISE (review commit `da3154744`, stale overall-plan status pin). Corrected successor and fresh exact-head Pass 1 review are pending.
+**Status:** Accepted plan scope retained; this doc-only dual-protocol artifact-allowlist amendment is pending independent exact-head Pass 1 review. The earlier G0/source-authoring amendment at `c4f136b267f8e41e0baec53394f28fac28f16eb5` received REVISE (review commit `da3154744`); its overall-plan status pin was corrected in the accepted overall plan.
 **Planner identity:** `plan_a_owner` (planner only; not implementer, reviewer, or human approver)
 **Accepted overall plan:** commit `8efec9378d1912f0839d7c6cd8e88467fceb1d5a`, file SHA-256 `57f20a1bcfe6f229429d402140de93a0ee1780372e21a9ac3344f81c72faca90`; exact Pass 1 ACCEPT record commit `b0b2962d299b1ecaab053b873ef2ae09e3c5f467`, record SHA-256 `54e68870b3b95fd91b92d3f934e44d5ec9bb63e1fb6d03f67e6d95f10d3abb4a`
 **Overall plan file:** `docs/plans/meco-five-track-v4-gpu-implementation-plan-20261026.md`
@@ -26,7 +26,7 @@ The amended overall plan's sequencing governs. P0a Pass 2 produces a documentati
 
 Read-only inspection was performed against the implementation checkout at the pinned source base. Relevant direct source evidence:
 
-- `frc_defense/meco_qualification.py:28-40` declares protocol versions v1 through v4, `MIN_EPISODES=100`, a 100-item training seed pool and five policy codes. This is not the reconciled target-scoped v5 protocol. The calibration validator at lines 214-240 checks at least 100 episodes and at least two repetitions; this is evidence of current v4 requirements, not approval to carry them into v5.
+- `frc_defense/meco_qualification.py:28-40` declares protocol versions v1 through v4, `MIN_EPISODES=100`, a 100-item training seed pool and five policy codes. This is not the reconciled v5 qualification protocol; P6 must implement the separate Stage 1 and score-evaluation bindings specified below. The calibration validator at lines 214-240 checks at least 100 episodes and at least two repetitions; this is evidence of current v4 requirements, not approval to carry them into v5.
 - `frc_defense/meco_qualification.py:241-280` checks calibration cases, repeated raw rows and source identity. Runtime-device identity checks are at lines 282-298. The `calibrate-d0` command requires an explicit indexed GPU argument and defaults to 100 episodes/3 repetitions at lines 5044-5051. This does not itself bind a two-WX9100 pair or prove all numerical work stays GPU-resident, so the v5 runner and P0b evidence must enforce and demonstrate both.
 - Target and prerequisite scoping is implemented in current v4 protocol construction and validation through `protocol_cases` and `_scenario_closure` (see `frc_defense/meco_qualification.py` protocol builder/validator and `frc_defense/meco_stage1_preflight_contract.py`). Existing target closure must be compared with the accepted reconciliation's required v5 semantics; it is not presumed equivalent.
 - `frc_defense/meco_task_scheduler.py:16-18` imports the qualification seed-pool size and case builder. Its assignment validation at lines 90-97 derives and checks seeds from the frozen protocol pool. This is a current coupling to qualification protocol APIs; P6's source package plan must include a compatibility decision and finite allowlist if the v5 API changes.
@@ -71,7 +71,7 @@ After P1–P6 source and integration commits are frozen and exact-head reviewed,
 1. recompute the frozen source/rules/profile/device identity and verify it matches P0a's declared source inputs and P1's reviewed score producer/consumer map;
 2. run only preregistered D0 calibration cases/seeds/repeats on both assigned WX9100 devices, with no CPU numerical fallback, retaining complete immutable raw records;
 3. recompute the preregistered variance/uncertainty and margins, validate seed partition disjointness, and record any required human decision separately;
-4. emit the immutable Phase 0 artifact and target-scoped v5 protocol bound to the exact P1–P6 integration source, reconciled profile, device pair, scoring rules, cases/seeds, calibration, margins and approvals; and
+4. emit the immutable Phase 0 artifact cross-binding two separately hashed v5 protocol records: the Stage 1 qualification protocol for `pickup_simple` and the primary score-evaluation protocol for `full_match_offense`, each bound to exact P1–P6 integration source, reconciled profile, device pair, its target closure, cases/seeds, calibration, margins and approvals; and
 5. pass independent exact-head review of hashes, recomputation, completeness, source binding and approvals before fresh training or P6 qualification.
 
 Any relevant source/rules/case change after P0b invalidates its source binding. Re-freeze/review the source and regenerate P0b artifacts before any fresh training or qualification. No old protocol or calibration output is overwritten.
@@ -80,17 +80,19 @@ Any relevant source/rules/case change after P0b invalidates its source binding. 
 
 Pass 2 for P0a starts after this package plan receives independent Pass 1 ACCEPT and distinct P0a author/reviewer identities are assigned; G0 is not a prerequisite. P0a Pass 2 output is exactly one documentation-only candidate file: `docs/plans/v4-phase0-preregistration-candidate-20261026.md`, created in a fresh ZFS-backed worktree based on the accepted planning head. Do not add source or test files. Required authorized-human decisions are resolved and recorded against this candidate before its exact-head Pass 3 review; P1–P6 source-only authoring unlocks after that ACCEPT and each package's own plan/prerequisites, while all execution and integration remain G0-gated.
 
-P0b is a separate, later operational action. It may begin only after reviewed P1–P6 source freeze and renewed G0 device/lease readiness. Its only outputs are generated calibration records and these immutable artifacts outside Git:
+P0b is a separate, later operational action. It may begin only after reviewed P1–P6 source freeze and renewed G0 device/lease readiness. Its only outputs are generated calibration records and these immutable artifacts outside Git. The `phase0-artifact.json` records both protocol paths and their exact digests; neither protocol may stand in for the other:
 
-- `qualifications/meco/v5/<protocol-id>/phase0-artifact.json`
-- `qualifications/meco/v5/<protocol-id>/protocol.json`
-- `qualifications/meco/v5/<protocol-id>/calibration/<case-id>/<unique-run-id>/...`
+- `qualifications/meco/v5/<stage1-protocol-id>/phase0-artifact.json` — binds the two protocol digests and their separate target/evidence roles.
+- `qualifications/meco/v5/<stage1-protocol-id>/protocol.json` — Stage 1 qualification target `pickup_simple`, with its curriculum acquisition/retention predicate and qualification evidence.
+- `qualifications/meco/v5/<stage1-protocol-id>/score-evaluation-protocol.json` — primary `simulated_match_score` evaluation target `full_match_offense`, with accepted active-HUB FUEL award outcome and score-evaluation evidence.
+- `qualifications/meco/v5/<stage1-protocol-id>/stage1-calibration/<case-id>/<unique-run-id>/...`
+- `qualifications/meco/v5/<stage1-protocol-id>/score-calibration/<case-id>/<unique-run-id>/...`
 
-These are generated outputs, not source commits. Do not overwrite existing `qualifications/meco/protocol.json`, old reports, checkpoints, output directories or campaign data. P0 owns no code paths. P6's separate package plan must carry the finite allowlist for v5 schema/runner implementation and tests, including `frc_defense/meco_qualification.py` and its qualification tests. P0 does not edit `meco_task_scheduler.py`, `docs/MECO_QUALIFICATION.md`, `gamepiece_actions.py`, `tensor_3v3.py`, `curriculum_metrics.py`, `meco_metric_ledger.py`, `meco_track_training.py`, or P6 supervisor/report paths.
+These are generated outputs, not source commits. Do not overwrite existing `qualifications/meco/protocol.json`, old reports, checkpoints, output directories or campaign data. P0 owns no code paths. P6 owns the v5 schema/runner implementation and tests. Its accepted finite allowlist and API must support both protocol records, the Phase 0 cross-binding, and separate calibration inputs/evidence paths; P6 must resolve schema validation and runner behavior for this two-target binding before P0b. This plan amendment does not authorize changes to P6 source or tests. P0 does not edit `meco_task_scheduler.py`, `docs/MECO_QUALIFICATION.md`, `gamepiece_actions.py`, `tensor_3v3.py`, `curriculum_metrics.py`, `meco_metric_ledger.py`, `meco_track_training.py`, or P6 supervisor/report paths.
 
 ## Pass 2 delivery and commit cadence
 
-The P0a author records the exact plan base and commits only the candidate preregistration document. The authorized maintainer records required decisions; the independent reviewer records exact-head Pass 3 verdict. P0b is a separately scheduled and authorized runtime operation by the assigned operator using the reviewed P6 runner. It cannot start before P1–P6 source freeze, P0a ACCEPT, G0 and independently available device leases. Generated P0b outputs stay outside Git. Any request for P0 source/tests changes requires a new scoped Pass 1 plan; qualification code/tests belong to P6.
+The P0a author records the exact plan base and commits only the candidate preregistration document. The authorized maintainer records required decisions; the independent reviewer records exact-head Pass 3 verdict. P0b is a separately scheduled and authorized runtime operation by the assigned operator using the reviewed P6 runner. It cannot start before P1–P6 source freeze, P0a ACCEPT, G0 and independently available device leases. Generated P0b outputs stay outside Git. P0 owns no source or tests; qualification code/tests and the dual-protocol schema/runner compatibility work belong to P6. Any further P0 scope expansion requires a new scoped Pass 1 plan.
 
 ## Validation and acceptance evidence
 
@@ -120,7 +122,7 @@ No tests, simulation, calibration, dashboard operation, or device use has been r
 - **Finite Stage 1 mapping:** the product objective and five-track set are stated in the evaluation plan. The exact held-out opponent/map/start set and mapping into v5 target scenarios remain explicit human decisions; stop before P0a Pass 3 if unresolved.
 - **Score-source ambiguity:** no dedicated score-ledger module exists at the source base. P1 must confirm every accepted award source and consumer. Do not use curriculum reward, event counters of uncertain semantics or official-score claims as a substitute.
 - **P0/P6 cycle:** avoided only by separating P0a from P0b and P6 source implementation from P6 runtime qualification. If P6 source scope changes metrics/rules, freeze it before P0b; any later relevant edit invalidates P0b.
-- **Protocol compatibility:** scheduler currently imports qualification APIs. P6's package plan must preserve or explicitly migrate this interface; P0 cannot edit scheduler or qualification source.
+- **Protocol compatibility:** scheduler currently imports qualification APIs. P6's package plan must preserve or explicitly migrate this interface and support both protocol records plus the Phase 0 cross-binding; P0 cannot edit scheduler or qualification source.
 - **Device fallback:** current qualification CLI requires an explicit indexed GPU but does not bind both WX9100 devices or prove the full algorithmic path is GPU-resident; older protocol versions are not v5 qualification. Device identity loss or unsupported numeric work is a gate failure.
 - **Approval provenance:** agent-generated manifests and hashes are not human approval/signatures. Required decisions must be recorded by the authorized maintainer.
 - **Live campaign/G0:** this planning work does not satisfy manual stop or lease release. P0a document authoring may proceed after plan acceptance, but P0b calibration and all build/test/runtime/device/dashboard/integration/merge/promotion actions remain blocked until G0 is evidenced.
