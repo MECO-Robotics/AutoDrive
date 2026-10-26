@@ -9,7 +9,8 @@
 **Reconciliation acceptance:** `5cb1a2d525168ff0443089cf329e66c6ecb917b8`  
 **Overall-plan P0a/P0b amendment:** commit `6325920252773cfa05d63167ba3c29a90debdb01`, file SHA-256 `9a12708980529cb03810ad40f43dbfe1e29461485a4f50fd1a7b06c7202dec5a`; Pass 1 ACCEPT record commit `be845d7fb2d2ece861dcd158ac8b8dd89e3dc59d`, file `docs/plans/reviews/meco-five-track-v4-gpu-phase0-amendment-6325920.md`, SHA-256 `5a6e94f978c8a7e18d9623897ceba6f32f5b5eadb0aba6605f21c9d1e941a886`
 **Scoped P0 package plan:** commit `13dbd7f8f953995850e811202f7e9c5264c49dca`, file `docs/plans/meco-v4-p0-phase0-scoped-package-plan-20261026.md`, SHA-256 `09ec722d64d01d99b60cc9ed52e47ce68790e548f66107cc1a19dd9a7a588adf`, Git blob `30df1bbed8657b08c1553db7487e59b8a1a0ad86`; Pass 1 ACCEPT record commit `037f0f9386cc0efadb1fb54efe5f38f097926d0e`, file `docs/plans/reviews/meco-v4-p0-phase0-scoped-package-plan-20261026.md`, SHA-256 `1ee70a6e9d24dc5201da5eec446820167cb8c4d4436fbbe013eb16de66b0280d`
-**Prior P1 Pass 1 review:** REVISE at commit `c92480036ffb41161a444184f0f488059d281452`, file `docs/plans/reviews/meco-five-track-v4-schema-score-artifact-implementation-plan-20261026.md`, SHA-256 `783d630fb33ccfb76cae17063797fb15c4cd80edb66c3220b6ac0354f32cabfc`; finding: final source-bound P0 was a prerequisite to P1.1’s required source discovery, creating circular sequencing.
+**Prior P1 Pass 1 review:** REVISE at commit `c92480036ffb41161a444184f0f488059d281452`, file `docs/plans/reviews/meco-five-track-v4-schema-score-artifact-implementation-plan-20261026.md`, SHA-256 `783d630fb33ccfb76cae17063797fb15c4cd80edb66c3220b6ac0354f32cabfc`; finding: final source-bound P0 was a prerequisite to P1.1 source discovery.
+**Latest P1 Pass 1 review:** REVISE at commit `a16cdd97742c20e18d4aec51e5c76077fd9aa46f`, same review path, SHA-256 `f7ca7739b3e2c906b55f1b6ecc6588f9c8634cf560722f04dad9fdaf2c0cf944`; finding: P1 allowlisted the shared trainer reserved to P5.
 **Canonical reconciled profile hash:** `5ec637676c0acf02f9769b1629860122c6c5332914acdcfbb9c04adaafea70e3`  
 **V4 proposal commit / profile digest:** `6b4ce4a939a2cdea375bd4be6879f6f7bc73141b` / `0c5ba39c3a4fa7c9bdf168ccf7c1dc792f4d3e27bd6f532517a967fca4b025b6`
 
@@ -211,16 +212,18 @@ device-side validity checks and digest computation, and an exact-length
 version-first reader. Keep the 59-byte record packed without implicit native
 struct alignment. The reader rejects unsupported versions before parsing
 payload fields; mismatched profile, lengths, codes, digests, reserved bits,
-invalid valid-fields, or overflow reject the whole batch before any action,
-optimizer, RNG, or checkpoint state changes. Unused event records are fully
-zeroed apart from `valid=0`. Persist the exact opaque bundle; no host-side
+invalid valid-fields, or overflow reject the whole batch without returning a
+validated typed view. Caller-side no-mutation behavior belongs to P5 tests.
+Unused event records are fully zeroed apart from `valid=0`. Persist the exact opaque bundle; no host-side
 repair, hash, decode, aggregation, or selection of live payload values.
 
-**Output/interface:** one GPU-resident V4 batch object accepted by the trainer
-and artifact writer, and a strict reader that returns validated typed views
-only after version, length, digest, profile, registry, and mask checks. The
-artifact writer returns the exact immutable bundle bytes and manifest identity;
-it may stage a file write but may not publish a partial bundle.
+**Output/interface:** a standalone GPU-resident V4 batch and manifest API,
+with a strict reader that returns validated typed views only after version,
+length, digest, profile, registry, and mask checks. The artifact writer
+returns exact immutable bundle bytes and manifest identity; it may stage a file
+write but may not publish a partial bundle. This is the API boundary P5 will
+consume after this P1 API head is independently accepted. P1 does not modify
+trainer callers or their integration tests.
 
 ### P1.3 — Physical score identity and device-native event staging
 
@@ -249,20 +252,23 @@ not claim rollback of already executed physics ticks. Runtime capture and
 validation must remain on the assigned GPU, with no Python scalar extraction
 or CPU-list path for live event values.
 
-**Output/interface:** the simulator produces only typed staged V4 score rows
-plus explicit failure status. The consumer receives the same committed event
-rows used by the aggregate score update; it must not reconstruct physical
-piece identity from aggregate `fuel_scored_event` counters.
+**Output/interface:** the simulator exposes only typed staged V4 score rows
+plus explicit failure status through the standalone API. The API exposes the
+same committed event rows used by aggregate score projection; it must not
+reconstruct physical piece identity from aggregate `fuel_scored_event`
+counters. Caller-side trainer integration is owned by P5.
 
 ### P1.4 — Consumer, bundle assembly, and checkpoint/manifest binding
 
 **Dependencies:** accepted P1.2 and P1.3 interfaces.
 
-Connect the event table to the reconciled transition-row assembly and to the
-source/rules-bound score consumer identified in P1.1. Prove that event count
-and event-derived `simulated_match_score` agree with the preregistered P0a
-rule, while route/risk shaping and official-score representations remain
-separate.
+Assemble and validate the standalone V4 batch from the transition and event
+tensors at the P1-owned simulator/API seam; expose the source/rules-bound score
+projection through the API identified in P1.1. Prove that event count and
+event-derived `simulated_match_score` agree with the preregistered P0a rule,
+while route/risk shaping and official-score representations remain separate.
+P1 does not insert this batch into a trainer rollout buffer. P5 alone connects
+the accepted API to shared trainer callers and owns those integration tests.
 Bind the profile, source, configuration, checkpoint, track, schema/envelope,
 protocol, and payload digest fields exactly as adopted. Use a versioned V4
 manifest/reader contract; the base's schema-version-1 checkpoint or any JSON
@@ -270,10 +276,10 @@ metric ledger is not a V4 substitute. Preserve atomic publication and
 all-or-nothing state handling. Do not change PPO reward, GAE, terminal,
 truncation, optimizer, curriculum, or model behavior in this package.
 
-**Output/interface:** a validated transition batch and immutable matching
-manifest, linked by exact source/config/checkpoint/profile/protocol identity
-and byte digests, consumable by the separately owned trainer/evaluation
-integration at its agreed boundary.
+**Output/interface:** a validated standalone transition batch and immutable
+matching manifest, linked by exact source/config/checkpoint/profile/protocol
+identity and byte digests. This exact API head is a P5 dependency; P5 consumes
+it from the shared trainer/evaluation caller without P1 edits to that caller.
 
 ### P1.5 — Exact-head review, seeded simulator and dashboard evidence
 
@@ -307,7 +313,9 @@ endpoint results in the review evidence.
 ## Exact implementation allowlist
 
 Pass 2 may modify only these paths. No other source, schema, test, dashboard,
-campaign, checkpoint, or data path is authorized by this plan.
+campaign, checkpoint, or data path is authorized by this plan. Shared trainer
+caller code (`frc_defense/meco_track_training.py`) and all trainer
+integration tests are expressly excluded and belong solely to P5.
 
 | Path | P1 authority |
 |---|---|
@@ -316,10 +324,9 @@ campaign, checkpoint, or data path is authorized by this plan.
 | `frc_defense/gamepiece_actions.py` | Capture and stage only at proven score-mutation sites; preserve existing scoring behavior. |
 | `frc_defense/_tensor_3v3_gamepieces.py` | Physical score-generation lifecycle only after source discovery resolves initialization/reset ownership. |
 | `frc_defense/tensor_3v3.py` | V4-scoped event/generation buffers, reset integration, and typed transition output seam only. |
-| `frc_defense/meco_track_training.py` | V4 batch packing and manifest boundary only; no PPO/model/reward/GAE/curriculum edits. |
 | `tests/test_meco_transition_v4.py` | New schema, exact-byte, digest, length, and reader fixtures. |
 | `tests/test_meco_score_events_v4.py` | New event ordering, identity/generation, reset, capacity, and atomic-failure fixtures. |
-| `tests/test_meco_transition_v4_simulator.py` | New seeded end-to-end score mutation/replay fixture. |
+| `tests/test_meco_transition_v4_simulator.py` | New seeded end-to-end standalone producer/artifact and score-mutation/replay fixture; it must not invoke trainer callers. |
 | `tests/test_fuel_physics_integration.py` | Existing integration assertions only if required for source-site behavior coverage. |
 | `tests/test_tensor_3v3_physical_constraints.py` | Existing scoring regression assertions only if required for source-site behavior coverage. |
 
@@ -355,10 +362,11 @@ Pass 2 must add deterministic fixtures for:
    not a fabricated expected value.
 4. Fault injection before and during staging, before score-state commit, and
    before artifact rename/publication. Assert the specified no-op state for
-   score counters, piece ownership/respawn, event table, artifact, optimizer,
-   RNG, and checkpoint as applicable. If a physical tick already mutated and
-   cannot be rolled back, the implementation must demonstrate it stages the
-   package-owned score mutation before that boundary or halt for redesign.
+   score counters, piece ownership/respawn, event table, and artifact
+   publication. Optimizer, RNG, checkpoint, and other trainer-caller invariants
+   are tested by P5 under its exclusive trainer ownership. If a physical tick
+   already mutated and cannot be rolled back, P1 must demonstrate staging of
+   the package-owned score mutation before that boundary or halt for redesign.
 5. A byte-identical GPU-produced bundle and digest against fixed independent
    fixtures. Any host reference encoder is test-only and may not enter the
    live producer, digest, reader, or decision path.
@@ -423,11 +431,14 @@ or simulator/dashboard regression evidence.
   placement on the assigned WX9100s. If capacity cannot fit without copies or
   changing the profile, stop for reconciliation; do not silently shrink,
   truncate, or use CPU.
-- **Concurrency:** `gamepiece_actions.py`, `tensor_3v3.py`, and
-  `meco_track_training.py` have other owners. The implementation coordinator
-  must reserve these paths to this package for the specified hunks or defer
-  conflicting edits. PPO, curriculum, dashboard, and campaign work remain
-  outside the allowlist.
+- **Package boundary:** P1 publishes the standalone typed batch/manifest API
+  and producer/artifact fixtures. P5 is the sole owner of
+  `frc_defense/meco_track_training.py` and trainer integration tests. P5 must
+  depend on this exact P1 API head after independent acceptance; any API change
+  after that pin requires P5 to re-review/rebase before integration. P1 must not
+  edit shared trainer callers or tests. `gamepiece_actions.py` and
+  `tensor_3v3.py` may have other owners; reserve only the scoped P1 hunks or
+  defer conflicting edits through the package coordinator.
 
 ## Completion and non-goals
 
