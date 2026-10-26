@@ -1,35 +1,31 @@
-# Independent Pass 1 review: five-track V4 GPU implementation plan
+# Independent Pass 1 review: V4 implementation-plan gate amendment
 
-- **Verdict:** ACCEPT
+- **Verdict:** REVISE
 - **Review date:** 2026-10-26
 - **Reviewer identity:** `/root/closure_wave1_reviewer`
-- **Reviewer task:** independent Pass 1 plan review assigned by `/root`
-- **Plan author:** `plan_a_owner` (planner, not implementer or human approver)
-- **Reviewed plan commit:** `223ac4a3f3c657193ef5623b383716364a9395d5`
+- **Reviewer task:** independent exact-head review assigned by `/root`
+- **Plan author:** `plan_a_owner`
+- **Reviewed commit:** `5b25eb1cfba7850a871b9024d834457d0fb755a4`
+- **Parent:** `6325920252773cfa05d63167ba3c29a90debdb01`
 - **Reviewed file:** `docs/plans/meco-five-track-v4-gpu-implementation-plan-20261026.md`
-- **Git blob:** `7f57f33f9afc1ef35eff17a50b4f9d84a351d8bc`
-- **Plan file SHA-256:** `42b138445c25dffad7402e70faa16c6fb5a142f43497353aa08741a70e75e6aa`
-- **Pinned source base:** `6ed961a09c08dfc1796d98ae3566bd3f0eaaaf22`
-- **Pinned reconciliation:** commit `03bd0a7a3ef4ea0d2506ec4f9b031745ba53ada9`, file SHA-256 `294a02012427c2ceeb638ea0cd337d1fa7908cf47fb9d0f07bef29ed6790510c`; exact Pass 3 ACCEPT record commit `5cb1a2d525168ff0443089cf329e66c6ecb917b8`, record SHA-256 `0df700dcaef1ed35672efc468bdcfd78fac829c31bcf7a88b3c51f1951f06c32`.
-- **Reconciled profile hash:** `5ec637676c0acf02f9769b1629860122c6c5332914acdcfbb9c04adaafea70e3`
-- **V4 envelope profile digest:** `0c5ba39c3a4fa7c9bdf168ccf7c1dc792f4d3e27bd6f532517a967fca4b025b6`
+- **Git blob:** `68c351c72eae07323d65d95d54375e9fea7ff668`
+- **File SHA-256:** `f5d1751ae6ca02452f286d756116859f176558a5822711a48f2b1aa4d734b43a`
+- **Source base:** `6ed961a09c08dfc1796d98ae3566bd3f0eaaaf22`
+- **Accepted reconciliation:** commit `03bd0a7a3ef4ea0d2506ec4f9b031745ba53ada9`, artifact SHA-256 `294a02012427c2ceeb638ea0cd337d1fa7908cf47fb9d0f07bef29ed6790510c`; canonical profile hash `5ec637676c0acf02f9769b1629860122c6c5332914acdcfbb9c04adaafea70e`; envelope digest `0c5ba39c3a4fa7c9bdf168ccf7c1dc792f4d3e27bd6f532517a967fca4b025b6`.
+- **Previously accepted top-level amendment:** commit `6325920252773cfa05d63167ba3c29a90debdb01`, file SHA-256 `9a12708980529cb03810ad40f43dbfe1e29461485a4f50fd1a7b06c7202dec5a`; Pass 1 ACCEPT record commit `be845d7fb2d2ece861dcd158ac8b8dd89e3dc59d`, record SHA-256 `5a6e94f978c8a7e18d9623897ceba6f32f5b5eadb0aba6605f21c9d1e941a886`.
+
+## Finding
+
+**F1 — The pre-G0 source-authoring allowance conflicts with the contract-anchor bridge prerequisite.** The revised hard boundary permits isolated source and test-file authoring before G0. The revised G0 section still requires the reviewed docs-only contract-anchor integration to be created “before source/schema packages start,” and says that bridge becomes the implementation worktree base. These clauses leave it unclear whether pre-G0 P1 or other source-package authoring may start from the pinned source base without the bridge, or whether the bridge must precede that authoring even though integration is explicitly barred until G0. P1's source-only authoring dependency lists P0a and the exact reconciliation/profile pin, but does not resolve this base/bridge conflict. Clarify which milestone “package start” means and specify the exact pre-G0 source-authoring base and reconciliation artifact access, while retaining the prohibition on pre-G0 integration and on all execution.
 
 ## Review scope and evidence
 
-The plan commit is a direct child of the exact pinned source base, and its sole change is this planning document. I verified that the reconciliation commit is not an ancestor of the source base and that its artifact is absent there. The plan handles this reproducibly: before implementation packages start, it requires a docs-only contract-anchor bridge, exact artifact/profile hash checks, proof that the source tree remains identical to base, and independent review of that bridge. It prohibits importing unrelated reconciliation-branch source history.
+The amendment cleanly separates source-file authoring and static source/diff review from build/compile, test execution, simulation, calibration, evaluation, dashboard operation, device/GPU use, qualification, training, checkpoint mutation, integration, merge and promotion. It preserves the no-contact boundary for campaign PID `2750253` and requires manual user stop plus independently verified release of both WX9100 leases before execution. It prohibits CPU numerical fallback, CPU simulation/scoring and P600 fallback, and says five-track training continues until the user manually stops it. It retains the accepted active-HUB FUEL award estimand, 160-physics-tick horizon, up to 12 ticks per macro (partial final macro allowed), gamma 0.993, branch exponent zero and continuation increment convention.
 
-The plan correctly separates the accepted reconciliation artifact, canonical reconciled profile hash, and raw V4 envelope `profile_digest`. The hashes match the exact artifact and its accepted review. It defines a coherent staged path with gates and acceptance evidence: G0 protects the active diagnostic campaign and leases; P0 establishes immutable score/rules, seed partitions, calibration, margins, protocol v5, approvals, and the two-device supervisor configuration; P1 covers typed schema, device-side score events and artifacts; P2 covers full-path device residency; P3 covers A1/A2/A3; P4 covers C1/C2; P5 covers PPO, end causes, RNG and atomic checkpoints; and P6 covers five-lane training, read-only evaluation and qualification. Each package must get its own finite allowlist, named distinct planner/implementer/reviewer, exact base and Pass 1 plan before it starts. The shared trainer has one package owner, integration occurs in dependency order, and each changed integration head is reviewed anew.
+The two-stage review rule is explicit: pre-G0 source-scope/interface review cannot authorize integration or downstream API use; final exact-head acceptance of tests, device evidence and simulator/dashboard evidence happens after G0. P0b remains after frozen/reviewed P1–P6 source, while P6 runtime qualification waits for P0b, avoiding a P0/P6 cycle. No human approval, source conformance, campaign stop, lease release, training or validation is claimed.
 
-The operating boundary is clear and fits the active campaign constraint. The plan explicitly prohibits touching campaign PID `2750253`, its dashboard, workers, checkpoints, output, leases or devices until the user manually stops it and both GPU leases are independently confirmed released. G0 additionally requires separate authorization before starting the new implementation campaign. No work is claimed already complete. Training after those gates is to continue until the user's manual stop; evaluations use immutable snapshots, declare their GPU share and cannot mutate trainer state.
-
-GPU-only scope is explicit for algorithmic training, simulation, scoring, candidate/route work, PPO, RNG, evaluation, calibration and qualification on the two assigned WX9100 devices. CPU numerical fallback, CPU simulation/scoring and silent migration are disallowed, and unavailable devices cause a stop/replan gate rather than P600/CPU fallback. The plan restricts CPU to supervision, configuration, I/O and noncomputing control, and requires UUID/runtime pinning, full-path transfer/synchronization evidence, per-kernel placement/memory records and evaluation-throughput accounting.
-
-All five tracks are named consistently as A1, A2, A3, C1 and C2, with their implementation packages, shared profile/task/seed controls, per-track checkpoints and failure isolation. P0 freezes disjoint seed partitions and calibration-derived margins before candidate results. P6 requires the frozen target-scoped v5 protocol, bound checkpoint/source artifacts, all applicable category/layout/defender/safety/paired-control/score/progress/confidence gates, and three consecutive passing Stage 1 rounds for each track. It excludes legacy protocols, diagnostic chunks, prior 100/100 reports and partial updates as qualification evidence; a failed case or changed protocol/checkpoint resets the affected streak. Final-test isolation is explicit.
-
-The validation plan covers the project AGENTS.md requirements: every behavior test that exercises simulator/game behavior is paired with a representative seeded end-to-end simulator evaluation, and the scenario, seed, fresh replay ID, provenance and result are recorded. Before any dashboard replay is generated or reviewed, serving services must be restarted after code changes; backend and frontend must be verified from the current integration checkout, services active and endpoints responsive; a fresh replay must then be generated. Stale replays are marked outdated. The plan requires reporting tests, simulator evaluations, replay/scenario IDs, seeds and dashboard currentness. These are future scoped validation gates, not activity performed by this plan review.
-
-The plan is complete for the requested planning scope: it addresses all five approaches and Stage 1 qualification while preserving implementation, campaign, device, dashboard and qualification gates. It does not claim source conformance, a completed qualification result, human approval or ABI publication. No blocking Pass 1 finding remains.
+The amendment's substantive gate split is sound, but F1 leaves the source branch base and contract-anchor sequencing internally ambiguous. The exact head should be clarified and reviewed again before its overall-plan ACCEPT is renewed.
 
 ## Review limits
 
-This ACCEPT applies only to the exact planning artifact and authorizes only progression through the plan's stated review gates. It does not authorize implementation, tests, builds, device/runtime work, training, evaluation, dashboard actions, ABI publication or qualification. No tests or runtime actions were performed during review.
+This REVISE applies only to the exact plan commit/file hash above. No source, test, build, runtime, simulator, device/GPU, dashboard, qualification, campaign or training actions were performed during this review.
