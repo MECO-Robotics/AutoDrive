@@ -1,5 +1,14 @@
 # P1.2 fixed-layout codec, device checks, and opaque persistence plan
 
+> **Superseded candidate:** This full-bundle plan received REVISE at exact
+> head `16fba26b8875c42b11e43f25d8afe297711116ff` because the accepted
+> contract does not pin the score-event table's payload placement. Do not use
+> it to authorize full-bundle codec, payload digest, reader, or persistence
+> work. The separate proposal at
+> `docs/plans/meco-v4-payload-section-order-owner-amendment-20261026.md`
+> requests an owner decision; the current narrow successor is
+> `docs/plans/meco-v4-p1-2-transition-row-block-codec-plan-20261026.md`.
+
 **Date:** 2026-10-26  
 **Status:** Pass 1 implementation-plan candidate; planning only  
 **Package:** P1.2 V4 fixed-layout codec and bundle persistence  
