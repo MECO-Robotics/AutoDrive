@@ -18,7 +18,7 @@
 
 Implement the accepted Plan C policy/model path for C1 and C2 against the exact reconciled `E=504`, `K=16` profile. P4 consumes observation, fixed candidate descriptors, route results, masks and cost tensors from P2; it does not create or mutate the candidate generator, observer/target handles, route/search kernels or shared PPO trainer. P4 provides identical policy-facing row maps, descriptors, candidate validity and route/risk inputs to both architectures and to D1. C1 scores engineered candidate features. C2 additionally encodes the raster and uses candidate-to-map attention. Both return gross strategic utility through one deterministic Plan C arbiter that applies route and risk costs once, respects the accepted feasible-action mask and fallback/hysteresis contract, and leaves native execution safety authoritative.
 
-This document authorizes only a future bounded source package after independent Pass 1 ACCEPT and all stated gates. It does not authorize source edits, tests, builds, simulator, GPU, dashboard, training, campaign, qualification or checkpoint activity. Do not inspect, stop, signal, reconfigure or evaluate through the live diagnostic campaign PID `2750253`, its workers, outputs, dashboard, checkpoints, device leases or GPUs. G0 requires the user's manual campaign stop, independently confirmed lease release, maintainer authorization and reviewed contract-anchor integration before any package execution.
+This document authorizes a staged package. After this exact plan receives Pass 1 ACCEPT, accepted P0a decisions are recorded, and exact accepted P1/P2/P3 interface heads are pinned, the assigned implementer may author the allowlisted source and test files in an isolated ZFS worktree while diagnostic campaign PID `2750253` continues. Before G0, activity is limited to source authoring, documentation and static review of exact diffs/API structure. Do not inspect, stop, signal, reconfigure or evaluate through the live campaign process, its workers, outputs, dashboard, checkpoints, device leases or GPUs. No test, build, runtime, GPU, simulator, dashboard, integration, merge or promotion activity is permitted until the user manually stops the campaign, both WX9100 leases are independently confirmed released, the maintainer authorization is recorded, and the contract-anchor integration is reviewed. G0 opens those execution and integration gates; it is not a prerequisite for isolated authoring or structural review.
 
 ## Pinned Plan C contract
 
@@ -53,7 +53,7 @@ P4 Pass 2 requires all of the following exact reviewed heads, recorded in the im
 
 | Gate | Required evidence before implementation | Status at this plan head |
 |---|---|---|
-| G0 and P0a | Overall-plan G0 evidence; accepted P0a preregistration and required maintainer decisions. P0b is downstream of the P1–P6 source freeze and does not block P4 source implementation/tests. | Not claimed complete; blocks implementation. |
+| G0 and P0a | Accepted P0a preregistration and required maintainer decisions are required before source authoring. G0 (manual campaign stop, independent release evidence for both WX9100 leases, maintainer authorization and reviewed contract-anchor integration) is required before any test/build/runtime/device/simulator/dashboard execution, integration, merge or promotion. P0b is downstream of the P1–P6 source freeze. | P0a and G0 are not claimed complete. P0a gates authoring; G0 gates execution and integration. |
 | P1 | Accepted standalone transition/feature/artifact schema API, exact file/blob hashes and Pass 3 review, including Plan C field and digest bindings. | P1 plan accepted; implementation/API head not yet available. |
 | P2 | Accepted device-resident observation, target-handle, fixed candidate/descriptor/mask/rank/map and full route-sink producer API, with exact shape/dtype/device/error contracts and source/blob hashes. | P2 plan accepted; implementation/API head not yet available. P2 exclusively owns `meco_candidates.py`, route/search and observation producers. |
 | P3 | Accepted Plan A interface head and review, with documented ownership boundaries for any shared code. | P3 plan accepted; implementation/API head not yet available. P3 owns only its Plan A adapter and must not change Plan C behavior. |
@@ -74,7 +74,7 @@ D1 is the deterministic comparator over the same feasible source rows, maps, rou
 
 ## Finite Pass 2 allowlist
 
-Pass 2 may edit only these files in a fresh, ZFS-backed worktree from the exact accepted integration head containing G0's reviewed contract bridge and accepted P1/P2/P3 interfaces:
+Pass 2 may author only these files in a fresh, isolated ZFS-backed worktree after Pass 1 ACCEPT, accepted P0a decisions, and exact accepted P1/P2/P3 interface heads are recorded. Before G0, the worktree is a review branch only: do not merge dependency commits, run tests/builds, or execute the code. After G0 and the reviewed contract bridge, rebase/integrate the exact dependency heads and obtain fresh structural review before testing:
 
 - `frc_defense/meco_plan_c_v4.py` — new GPU-resident C1/C2 model wrappers and typed fixed-axis feature/view adapter, common Plan C score arbiter and D1 adapter. Do not generate candidates/routes or duplicate P2 tensors.
 - `frc_defense/meco_tracks.py` — C1/C2 class/factory/score-adapter hunks only, if needed to preserve existing public model construction. No A1/A2/A3 classes, shared generic trainer helpers, shared sampler, or unrelated model code may change. If C-specific factory integration cannot be isolated, stop for plan amendment.
@@ -85,13 +85,13 @@ No other path is authorized. In particular do not edit `frc_defense/meco_candida
 
 ## Worktree and three-pass cadence
 
-After Pass 1 ACCEPT and gates, the implementer creates a fresh ZFS worktree at `.worktrees/autodrive-v4-p4-plan-c-impl` on branch `codex/v4-p4-plan-c-impl-YYYYMMDD`, based on the exact accepted integration commit. Do not reuse this planning worktree, the active campaign checkout or its outputs. The implementer records exact dependency commits/blobs and review records before editing. Push coherent, reviewable slices before dependent work: typed row/view contract; C1 and C2 model adapters; common arbiter/D1 parity; GPU-residency fixtures; seeded simulator evidence. Every slice changes only the finite allowlist. Rebase or dependency changes require a new exact-head review.
+After Pass 1 ACCEPT, accepted P0a decisions and exact accepted P1/P2/P3 interface heads are recorded, the implementer may create a fresh isolated ZFS worktree at `.worktrees/autodrive-v4-p4-plan-c-impl` on branch `codex/v4-p4-plan-c-impl-YYYYMMDD`, using the pinned source base and interface contracts. Do not reuse this planning worktree, the active campaign checkout or its outputs. Before G0, author and push coherent source/API slices for static review only; do not merge dependency commits, run tests/builds, execute code, or touch the campaign or devices. After G0 and contract-bridge review, rebase the exact accepted dependency heads, re-review the integrated structure, then run the validation gates. Slices are ordered: typed row/view contract; C1 and C2 model adapters; common arbiter/D1 parity; GPU-residency fixtures; seeded simulator evidence. Every slice changes only the finite allowlist. Any rebase or dependency change requires a new exact-head review.
 
-Pass 1 planner is `plan_c_owner`. Pass 2 implementer is unassigned. Pass 3 reviewer is unassigned and must be distinct from planner and implementer. The reviewer checks exact commit/blob hashes, allowlist, accepted P1/P2/P3 interface pins, Plan C row mapping and profile bytes, C1/C2 input parity, D1 and arbiter consistency, GPU evidence, tests, seeded simulator/replay, current dashboard provenance and no P5/P2/P3/P6 ownership leakage. An ACCEPT applies only to that exact head and does not itself authorize training or qualification.
+Pass 1 planner is `plan_c_owner`. Pass 2 implementer is unassigned. Pass 3 reviewer is unassigned and must be distinct from planner and implementer. Pass 3 is staged. Before G0, the reviewer may issue only a **structural ACCEPT** for the exact pushed head: source/API shape, finite allowlist, dependency pins, row mapping/profile contract, and ownership boundaries. That verdict is not final package acceptance and cannot authorize execution, integration, merge or promotion. After G0, the exact integrated head must receive a fresh final Pass 3 review that also checks approved tests, GPU evidence, seeded simulator/replay and current dashboard provenance. Final ACCEPT applies only to that exact head and does not itself authorize training or qualification.
 
 ## Required validation and acceptance evidence
 
-All validation is future-gated; no tests or runtime work were performed for this plan.
+All execution validation is future-gated; no tests or runtime work were performed for this plan. Before G0, static source and API review is permitted only. The following tests, builds and runtime checks may run only after campaign stop, independently verified release of both WX9100 leases, recorded maintainer authorization and reviewed contract-anchor integration:
 
 1. **Contract fixtures:** assert exactly 537 rows and all row mappings, including variant-major rows 512–535 and continuation 536; exact 20 raw feature names/order and matching 20 missingness bits; identity codes 1–537 and invalid zero; descriptor field widths; generation-safe target handles; no oracle inclusion in policy rows.
 2. **Selection fixtures:** verify K=16 ordinary rows, separate continuation slot, stable sort/tie-break, ordinary/continuation maps, `-1` unused map slots, no invalid continuation view, `candidate_valid`, model-input and policy-eligible masks, rank sentinel, finite-zero masked features, uniqueness/range guards and no truncation.
@@ -102,7 +102,7 @@ All validation is future-gated; no tests or runtime work were performed for this
 7. **Dashboard provenance:** before generating or reviewing a replay, restart the relevant dashboard services from the exact current integration checkout. Verify each service active, backend endpoint success, backend code/head and frontend asset identity. Generate a fresh replay after restart, inspect provenance, and mark prior-code replays outdated. If simulator, device, dashboard or replay evidence is unavailable, report validation incomplete.
 8. **Two-device evidence:** demonstrate approved P4 algorithmic work runs on both assigned WX9100 devices with UUID/runtime/PyTorch/HIP details and per-kernel placement; no CPU/P600 fallback, silent migration or host-side dynamic tensor reads. Do not claim one simulation jointly uses both devices unless the accepted implementation proves it.
 
-G0 and the accepted overall plan prohibit all source/test/build/runtime/device/dashboard/simulator/training work before campaign stop and lease-release evidence and the reviewed contract bridge. These validation requirements are future acceptance gates, not permission to bypass G0.
+Before G0, isolated allowlisted source authoring and static review are permitted under the gates above. G0 continues to block all tests, builds, runtime, device, dashboard, simulator, integration, merge, promotion, training and qualification work until campaign stop, independent release evidence for both WX9100 leases, maintainer authorization and reviewed contract-anchor integration. These execution requirements are future acceptance gates, not permission to bypass G0.
 
 ## Risks and stop conditions
 
@@ -113,12 +113,12 @@ G0 and the accepted overall plan prohibit all source/test/build/runtime/device/d
 - Route/risk costs must be applied exactly once, and model scores cannot replace P2/native legal and safety checks. A score parity fixture must detect duplicate subtraction or mask widening.
 - Existing D1 loops over host objects. Preserve its exact deterministic rule while moving computation to the accepted device interface; if parity cannot be demonstrated within the allowlist, stop for amendment.
 - P5 alone owns the shared trainer. P4 publishes only a standalone model/scoring API; P5 integration is a downstream package and exact-head review.
-- This plan does not satisfy G0/P0a, authorize implementation or devices, establish GPU residency, validate simulator behavior, publish V4, or claim human approval or qualification.
+- This plan does not satisfy G0/P0a, authorize execution or devices, establish GPU residency, validate simulator behavior, publish V4, or claim human approval or qualification. Its pre-G0 authorization is limited to isolated source authoring and static review after the stated Pass 1/P0a/interface gates.
 
 ## Three-pass disposition
 
 - Pass 1 planner: `plan_c_owner`; cannot implement or review P4.
-- Pass 2 implementer: unassigned; must use the exact accepted integration head and finite allowlist.
-- Pass 3 reviewer: unassigned; must be independent of planner and implementer and review exact pushed evidence.
+- Pass 2 implementer: unassigned; before G0 uses an isolated source-base worktree and the pinned accepted interface contracts, with no execution or integration; after G0 uses the exact accepted integration head and finite allowlist.
+- Pass 3 reviewer: unassigned; must be independent of planner and implementer. Before G0, may issue only structural ACCEPT; final ACCEPT follows G0 and review of the exact integrated head with deferred runtime/simulator/dashboard evidence.
 
-Planner disposition: **PENDING independent exact-head Pass 1 review.** No source edits, tests, runtime, device use, simulator/dashboard validation, training, qualification or human approval is claimed.
+Planner disposition: **PENDING independent exact-head Pass 1 review.** This plan revision contains no source edits and claims no tests, runtime, device use, simulator/dashboard validation, training, qualification or human approval.
