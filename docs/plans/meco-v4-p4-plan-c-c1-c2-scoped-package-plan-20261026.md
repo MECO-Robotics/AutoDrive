@@ -4,7 +4,7 @@
 **Status:** Pass 1 planner-authored candidate; pending independent exact-head review  
 **Planner identity:** `plan_c_owner` (planner only; not implementer, reviewer, or human approver)  
 **Implementation source base:** `6ed961a09c08dfc1796d98ae3566bd3f0eaaaf22`  
-**Accepted overall plan:** `6325920252773cfa05d63167ba3c29a90debdb01`; file SHA-256 `9a12708980529cb03810ad40f43dbfe1e29461485a4f50fd1a7b06c7202dec5a`  
+**Accepted overall plan:** `8efec9378d1912f0839d7c6cd8e88467fceb1d5a`; file SHA-256 `57f20a1bcfe6f229429d402140de93a0ee1780372e21a9ac3344f81c72faca90`
 **Accepted P0 package plan:** `13dbd7f8f953995850e811202f7e9c5264c49dca`; file SHA-256 `09ec722d64d01d99b60cc9ed52e47ce68790e548f66107cc1a19dd9a7a588adf`  
 **Accepted P1 package plan:** `53686a254318484f9c6bc3496ecc1c461572c53a`; file SHA-256 `21c07b2c08d37e48ed5d0dac1f149e4a45eb89d59360f466b587f534cf81e076`  
 **Accepted P2 package plan:** `8d0727f10d46bfc5fee2810a1ec7fa7987ecaf91`; file SHA-256 `5eddd42914ab74426257ab8c1ff883b25c0c39aaa40bf7c40ccc2e363fbb3957`  
@@ -87,7 +87,7 @@ No other path is authorized. In particular do not edit `frc_defense/meco_candida
 
 After Pass 1 ACCEPT, accepted P0a decisions and exact accepted P1/P2/P3 interface heads are recorded, the implementer may create a fresh isolated ZFS worktree at `.worktrees/autodrive-v4-p4-plan-c-impl` on branch `codex/v4-p4-plan-c-impl-YYYYMMDD`, using the pinned source base and interface contracts. Do not reuse this planning worktree, the active campaign checkout or its outputs. Before G0, author and push coherent source/API slices for static review only; do not merge dependency commits, run tests/builds, execute code, or touch the campaign or devices. After G0 and contract-bridge review, rebase the exact accepted dependency heads, re-review the integrated structure, then run the validation gates. Slices are ordered: typed row/view contract; C1 and C2 model adapters; common arbiter/D1 parity; GPU-residency fixtures; seeded simulator evidence. Every slice changes only the finite allowlist. Any rebase or dependency change requires a new exact-head review.
 
-Pass 1 planner is `plan_c_owner`. Pass 2 implementer is unassigned. Pass 3 reviewer is unassigned and must be distinct from planner and implementer. Pass 3 is staged. Before G0, the reviewer may issue only a **structural ACCEPT** for the exact pushed head: source/API shape, finite allowlist, dependency pins, row mapping/profile contract, and ownership boundaries. That verdict is not final package acceptance and cannot authorize execution, integration, merge or promotion. After G0, the exact integrated head must receive a fresh final Pass 3 review that also checks approved tests, GPU evidence, seeded simulator/replay and current dashboard provenance. Final ACCEPT applies only to that exact head and does not itself authorize training or qualification.
+Pass 1 planner is `plan_c_owner`. Pass 2 implementer is unassigned. Pass 3 reviewer is unassigned and must be distinct from planner and implementer. Pass 3 is staged. Before G0, the reviewer may issue only a **SOURCE/API ACCEPT** for the exact pushed head: source/API shape, finite allowlist, dependency pins, row mapping/profile contract, and ownership boundaries. That verdict is not final package acceptance and cannot authorize execution, integration, merge or promotion. After G0, the exact integrated head must receive a fresh final Pass 3 review that also checks approved tests, GPU evidence, seeded simulator/replay and current dashboard provenance. Final ACCEPT applies only to that exact head and does not itself authorize training or qualification.
 
 ## Required validation and acceptance evidence
 
@@ -119,6 +119,6 @@ Before G0, isolated allowlisted source authoring and static review are permitted
 
 - Pass 1 planner: `plan_c_owner`; cannot implement or review P4.
 - Pass 2 implementer: unassigned; before G0 uses an isolated source-base worktree and the pinned accepted interface contracts, with no execution or integration; after G0 uses the exact accepted integration head and finite allowlist.
-- Pass 3 reviewer: unassigned; must be independent of planner and implementer. Before G0, may issue only structural ACCEPT; final ACCEPT follows G0 and review of the exact integrated head with deferred runtime/simulator/dashboard evidence.
+- Pass 3 reviewer: unassigned; must be independent of planner and implementer. Before G0, may issue only SOURCE/API ACCEPT; final ACCEPT follows G0 and review of the exact integrated head with deferred runtime/simulator/dashboard evidence.
 
 Planner disposition: **PENDING independent exact-head Pass 1 review.** This plan revision contains no source edits and claims no tests, runtime, device use, simulator/dashboard validation, training, qualification or human approval.
