@@ -1,7 +1,7 @@
 # P0 Phase 0 preregistration and finalization package plan
 
 **Date:** 2026-10-26
-**Status:** Corrected after Pass 1 REVISE (review record `0bf700af1`); pending fresh independent exact-head Pass 1 review
+**Status:** Original package plan ACCEPT at `13dbd7f8f953995850e811202f7e9c5264c49dca`; this G0/source-authoring amendment is pending fresh independent exact-head Pass 1 review
 **Planner identity:** `plan_a_owner` (planner only; not implementer, reviewer, or human approver)
 **Overall plan commit:** `8efec9378d1912f0839d7c6cd8e88467fceb1d5a` (docs-only G0/source-authoring amendment; pending fresh independent review)
 **Overall plan file:** `docs/plans/meco-five-track-v4-gpu-implementation-plan-20261026.md`
