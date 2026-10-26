@@ -1,10 +1,16 @@
 # P1 V4 schema and score-event source package plan
 
-**Date:** 2026-10-26  
-**Status:** Pass 1 successor candidate; pending independent exact-head review  
-**Planner:** `/root/p1_p2_planner` (planner only)  
-**Package:** P1 — V4 schema, typed score events, envelope and artifact API  
+**Date:** 2026-10-26
+**Status:** Revised Pass 1 successor candidate; previous exact-head review requested revision
+**Planner:** `/root/p1_p2_planner` (planner only)
+**Package:** P1 — V4 schema, typed score events, envelope and artifact API
 **Implementation base:** `6ed961a09c08dfc1796d98ae3566bd3f0eaaaf22`
+
+**Prior exact-head review:** REVISE at review commit
+`1f201f611920948f79234426dd425a8664aeab03` for candidate commit
+`376f3913976839a1c6043915c7b7854d449c921b`; the findings on complete G0
+authorization, reviewed contract-anchor bridge, and two-WX9100 residency are
+addressed in this revision.
 
 ## Relationship to accepted plans and authority
 
@@ -219,16 +225,43 @@ workers, checkpoints, dashboard, devices, or leases.
 
 ### Post-G0 package acceptance
 
-Only after the user manually stops the campaign and both WX9100 leases are
-independently confirmed released may package validation begin. Run the exact
-accepted tests plus a reproducible end-to-end simulator evaluation covering
-both score branches, event identity, and record/replay reconstruction. Restart
-the dashboard services from the current checkout before replay review; verify
-backend/frontend provenance, service health, and endpoints; generate a fresh
-replay and verify its source. Record tests, scenario, seed, replay ID, source
-and event hashes, device UUID/runtime, dashboard currentness, and outcomes.
-The final independent exact-head Pass 3 review is required before integration.
-No runtime, simulator, GPU, or dashboard evidence exists as part of this plan.
+No validation, runtime/device operation, dashboard operation, or integration
+may begin until all G0 evidence is recorded: (1) the user has manually stopped
+campaign PID `2750253`; (2) both assigned WX9100 leases are independently
+confirmed released by their lease owners; and (3) the user or repository
+maintainer explicitly authorizes runtime/device/integration work. Do not infer
+any condition from elapsed time or telemetry.
+
+After those G0 conditions, create a docs-only contract-anchor bridge that adds
+the exact accepted reconciliation artifact bytes at their pinned path. Verify
+the artifact SHA-256 remains
+`294a02012427c2ceeb638ea0cd337d1fa7908cf47fb9d0f07bef29ed6790510c`, the
+canonical profile hash is unchanged, and the implementation source tree is
+identical to `6ed961a09c08dfc1796d98ae3566bd3f0eaaaf22`. An independent
+reviewer must accept that exact bridge head before it becomes the integration
+and validation base. No P1 validation or integration may start before this
+reviewed bridge.
+
+All P1 algorithmic score/event/digest computation must execute on each of the
+two assigned AMD WX9100 devices under recorded UUID/runtime identity. CPU
+numerical computation, CPU score/event validation or digesting, P600
+substitution, and silent device migration are prohibited. CPU use is limited
+to process supervision, configuration, and opaque filesystem/network I/O.
+If either WX9100 or a required HIP kernel path is unavailable, fail closed and
+stop; do not fall back. Retain per-process device identity, kernel/device
+placement, memory ownership, and transfer/synchronization evidence for both
+devices.
+
+After the reviewed bridge, run the exact accepted tests plus a reproducible
+end-to-end simulator evaluation covering both score branches, event identity,
+and record/replay reconstruction. Restart the dashboard services from the
+current integration checkout before replay review; verify backend/frontend
+provenance, service health, and endpoints; generate a fresh replay and verify
+its source. Record tests, scenario, seed, replay ID, source and event hashes,
+both device UUIDs/runtime identities and residency evidence, dashboard
+currentness, and outcomes. The final independent exact-head Pass 3 review is
+required before integration. No runtime, simulator, GPU, or dashboard evidence
+exists as part of this plan.
 
 ## Reviewer / implementer roles
 
