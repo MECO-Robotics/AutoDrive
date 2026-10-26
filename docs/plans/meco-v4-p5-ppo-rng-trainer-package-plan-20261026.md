@@ -7,8 +7,10 @@
 **Accepted overall plan:** 6325920252773cfa05d63167ba3c29a90debdb01; file SHA-256 9a12708980529cb03810ad40f43dbfe1e29461485a4f50fd1a7b06c7202dec5a  
 **Accepted P0 package plan:** 13dbd7f8f953995850e811202f7e9c5264c49dca; file SHA-256 09ec722d64d01d99b60cc9ed52e47ce68790e548f66107cc1a19dd9a7a588adf  
 **Accepted P1 package plan:** 53686a254318484f9c6bc3496ecc1c461572c53a; file SHA-256 21c07b2c08d37e48ed5d0dac1f149e4a45eb89d59360f466b587f534cf81e076; exact Pass 1 ACCEPT record 854d5286947074ed33f7ac059d67f2f9ccbf9257  
-**P2 interface package:** plan commit 8d0727f10d46bfc5fee2810a1ec7fa7987ecaf91, pending independent Pass 1 review  
-**P3/P4 interface packages:** not yet accepted or pinned; required before P5 Pass 2  
+**P2 package plan:** ACCEPT at commit 8d0727f10d46bfc5fee2810a1ec7fa7987ecaf91; independent Pass 1 record commit 0292f01638bf3180b4952721f5692a4446841013. Plan file SHA-256 5eddd42914ab74426257ab8c1ff883b25c0c39aaa40bf7c40ccc2e363fbb3957. Its implementation/API head remains pending.
+**P3 package plan:** ACCEPT at commit 8b641ccc56b7c73a880a095b3c6940cb03b617f3; independent Pass 1 record commit a11e68b6240c6701a14d6fafe932f65f0b05d6e2. Plan file SHA-256 6958cb883a339a251e6069378d8ebb853be97e4965d30ca0eba8d3003fbc0a9b. Its implementation/API head remains pending.
+**P4 package plan/API:** in progress; no accepted plan or implementation/API head is pinned.
+This dependency-status update supersedes the prior candidate's P2/P3 pending-review statements; it does not change P5 scope or unblock implementation.
 **Accepted reconciliation:** 03bd0a7a3ef4ea0d2506ec4f9b031745ba53ada9; artifact SHA-256 294a02012427c2ceeb638ea0cd337d1fa7908cf47fb9d0f07bef29ed6790510c  
 **Canonical profile SHA-256:** 5ec637676c0acf02f9769b1629860122c6c5332914acdcfbb9c04adaafea70e3  
 **V4 proposal SHA-256:** 0c5ba39c3a4fa7c9bdf168ccf7c1dc792f4d3e27bd6f532517a967fca4b025b6  
@@ -18,7 +20,7 @@
 
 Implement the accepted P5 transition/PPO caller integration for A1/A2/A3/C1/C2: the 160-physics-tick strategic horizon, at most 12 ticks per macro with a partial final macro, gamma 0.993 per macro under the adopted branch/continuation exponent convention, distinct terminal/truncation/bootstrap semantics, typed end cause, action/log-probability/command linkage, two independent GPU Philox streams, all-or-none PPO updates, and five source-bound checkpoint manifests and continuations.
 
-P5 consumes the exact accepted P1 standalone V4 transition/event/artifact API. It does not reimplement or alter P1 field order, profile, byte totals, event schema, reader, digests or manifest encoding. It does not assume future P2/P3/P4 interfaces have been accepted. Pass 2 stays blocked until this plan is independently accepted, G0 and P0a are satisfied, P1's exact API implementation head is independently accepted and integrated, and P2/P3/P4 have independently accepted interface heads that P5 can pin. Those P2/P3/P4 interfaces remain pending at this plan's authorship; no compatibility is inferred from plan names or moving branches.
+P5 consumes the exact accepted P1 standalone V4 transition/event/artifact API. It does not reimplement or alter P1 field order, profile, byte totals, event schema, reader, digests or manifest encoding. P2 and P3 package plans are now independently accepted, but their implementation/API heads remain pending; P4 is in progress and has no accepted plan or API head. Pass 2 stays blocked until this plan is independently accepted, G0 and P0a are satisfied, P1's exact API implementation head is independently accepted and integrated, and P2/P3/P4 have independently accepted interface heads that P5 can pin. No compatibility is inferred from plan names or moving branches.
 
 This is a package plan only. It authorizes no source edits, tests, builds, simulator/runtime, GPU, dashboard, training, evaluation, checkpoint mutation, campaign inspection or qualification. Do not touch live diagnostic campaign PID 2750253, its dashboard, workers, outputs, checkpoints, devices or leases. The user must stop it manually and GPU lease release must be independently confirmed before any implementation or validation. G0, P0a and all package-specific gates remain in force.
 
@@ -47,7 +49,7 @@ P5 implementation requires:
 1. G0 complete and still satisfied, including manual campaign stop, independent lease-release evidence, explicit maintainer authorization and reviewed contract-anchor integration base.
 2. P0a candidate and required human decisions accepted at exact head. P0b is not needed to implement/test P5 source; it is required before fresh training or qualification.
 3. P1 implementation independently accepted and integrated. Record its exact transition/event/manifest API commit and blobs. The accepted P1 plan is not an implemented API.
-4. Accepted P2, P3 and P4 plans and interfaces. Record their exact interface heads and confirm action order, observation/route inputs and output ownership. P2 plan commit 8d0727f10d46bfc5fee2810a1ec7fa7987ecaf91 is pending review; P3/P4 accepted heads are not yet pinned. P5 Pass 2 remains blocked until these heads exist and shared-file boundaries are resolved.
+4. Accepted P2, P3 and P4 plans and interfaces. P2 plan 8d0727f10d46bfc5fee2810a1ec7fa7987ecaf91 (file SHA-256 5eddd42914ab74426257ab8c1ff883b25c0c39aaa40bf7c40ccc2e363fbb3957) is ACCEPT with review record 0292f01638bf3180b4952721f5692a4446841013. P3 plan 8b641ccc56b7c73a880a095b3c6940cb03b617f3 (file SHA-256 6958cb883a339a251e6069378d8ebb853be97e4965d30ca0eba8d3003fbc0a9b) is ACCEPT with review record a11e68b6240c6701a14d6fafe932f65f0b05d6e2. These are planning approvals only: P2 and P3 implementation/API heads remain pending. P4 is in progress and has neither accepted plan nor API head. Pin the exact implementation/API heads and confirm action order, observation/route inputs and output ownership before P5 Pass 2; shared-file boundaries must be resolved.
 5. This plan receives independent Pass 1 ACCEPT. Named Pass 2 implementer and Pass 3 reviewer are distinct from each other and from planner.
 
 Create a fresh ZFS-backed worktree from the exact integration head containing accepted P0a, P1, P2, P3 and P4; proposed path .worktrees/autodrive-v4-p5-ppo-rng and branch codex/v4-p5-ppo-rng-YYYYMMDD. Do not use the live campaign checkout. Pin each prerequisite before editing. P5 is sole owner of frc_defense/meco_track_training.py. P5 owns its counterfactual end-cause integration in frc_defense/meco_counterfactual.py. Other packages consume reviewed P5 interfaces and may not duplicate trainer/RNG/checkpoint logic.
@@ -126,7 +128,7 @@ Pass 3 independently checks exact commit/blob hashes, allowlist, P0a/P1/P2/P3/P4
 
 ## Risks and stop conditions
 
-- P2 is pending review; P3/P4 interfaces are not pinned. Do not begin implementation until exact heads and ownership boundaries are accepted.
+- P2 and P3 plans are accepted, but their implementation/API heads are pending; P4 is in progress. Do not begin implementation until exact heads and ownership boundaries are accepted.
 - End-cause status must use accepted V4/P1 registries; no local enum renumbering, extra fields or byte changes.
 - Rollback of model/Adam state can require substantial memory. Measure it, but do not weaken atomic semantics to reduce memory.
 - PPO rollback cannot undo simulator ticks. Stop and reconstruct only from the last committed checkpoint and frozen task seed.
