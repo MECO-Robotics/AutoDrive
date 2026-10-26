@@ -40,11 +40,15 @@ profile hash before code continues.
 The live diagnostic campaign PID `2750253` is outside this plan's authority.
 Do not stop, signal, reconfigure, evaluate through, restart, or otherwise touch
 that process, its dashboard, workers, checkpoints, output directory, GPU
-leases, or devices until the user manually stops the campaign and the GPU
-leases have been independently confirmed released. No CPU or GPU algorithm,
-test, build, calibration, simulation, evaluation, training, or dashboard
-operation is authorized by this document. The plan author did not perform any
-of those operations.
+leases, or devices. Before the G0 execution gate is satisfied, only isolated,
+docs-authorized source and test-file authoring plus static source/diff review
+may proceed after the applicable package plan and prerequisites are accepted.
+This does not authorize build or compile, test execution, numerical work,
+simulator, calibration, evaluation, dashboard operation, device or GPU use,
+training, checkpoint mutation, integration, merge, or promotion. None of those
+operations may begin until the user manually stops the campaign and both
+WX9100 leases are independently confirmed released. The plan author did not
+perform any of those operations.
 
 After those release conditions and plan acceptance, all numerical and
 algorithmic computation in training, simulation, scoring, candidate/route
@@ -111,21 +115,28 @@ Every code/schema package uses three distinct roles and exact-head artifacts:
    prerequisites, interface, acceptance evidence, and risk gates. The planner
    does not implement or review its own package.
 2. **Pass 2 implementer:** works in a new ZFS-backed worktree and branch from
-   the exact approved integration base. The implementer changes only the
-   package allowlist, writes focused tests/fixtures as authorized by the
-   package, records every commit, and pushes each reviewable slice before
-   beginning dependent work.
-3. **Pass 3 reviewer:** a different agent checks the exact commit and blob
-   hashes, source scope, tests, device-residency evidence, and required
-   simulator/dashboard evidence. It writes an exact-head review record. An
-   ACCEPT allows integration of that exact head; REVISE requires a corrected
-   commit and a new review record at the same path. Authors do not review
-   their own work.
+   the exact approved integration base. Before G0, the implementer may author
+   only files in the accepted package allowlist and perform static source/diff
+   review; no build, compilation, test execution, numerical/runtime work,
+   device use, or integration is allowed. Record and push each reviewable
+   source-only slice. After G0, package validation may begin under its
+   accepted plan.
+3. **Pass 3 reviewer:** a different agent first performs a source-scope and
+   interface review of the exact source-only candidate head. This review may
+   record a candidate API identity and source-scope disposition, but it is not
+   final ACCEPT and does not permit dependent packages to integrate or use the
+   API. After G0, the reviewer checks exact hashes, tests, device-residency
+   evidence, and required simulator/dashboard evidence; only the final exact-
+   head ACCEPT permits integration. REVISE requires a corrected commit and a
+   new review record. Authors do not review their own work.
 
 Worktree paths below are proposed unique locations under the repository's
 ZFS-backed `.worktrees/` parent. Branch names include the package ID and date.
-Create them only after Pass 1 accepts this plan and the campaign/device gate
-is open. Do not reuse the live campaign checkout or its output directory.
+Create them after the applicable package plan and dependencies are accepted,
+in fresh ZFS-backed worktrees that do not use the live campaign checkout or
+output directory. G0 is required before any build, test execution, simulator,
+calibration, evaluation, dashboard, device/GPU use, integration, merge or
+promotion.
 
 | Package | Planner | Pass 2 worktree / branch | Pass 3 reviewer | Main owned scope |
 |---|---|---|---|---|
@@ -150,7 +161,7 @@ or active campaign files enter source commits.
 
 ## Work packages, dependencies, and acceptance gates
 
-### Gate G0 — plan and campaign release
+### Gate G0 — runtime, device and integration release
 
 **Prerequisites:** independent Pass 1 ACCEPT of this exact plan; the user has
 manually stopped diagnostic campaign PID `2750253`; GPU leases have been
@@ -174,13 +185,18 @@ for implementation worktrees.
 **Acceptance:** accepted plan commit/hash, campaign stop evidence from the
 authorized operator, separate lease-release evidence, named package
 owners/reviewers, reviewed contract-anchor bridge commit, and exact integration
-base. Until G0 is complete, no source,
-test, build, runtime, device, dashboard, qualification, or training work
-begins. This plan does not claim G0 is satisfied.
+base. Until G0 is complete, isolated source/test authoring and static review
+may proceed only under the accepted package plans and prerequisites. No build
+or compile, test execution, simulator/numerical work, device/GPU use,
+dashboard, calibration, evaluation, qualification, training, checkpoint
+mutation, integration, merge or promotion may begin. This plan does not claim
+G0 is satisfied.
 
 ### P0a — preregister Phase 0 rules and protocol before source implementation
 
-**Dependencies:** G0. This is a documentation/configuration decision package;
+**Dependencies:** accepted P0 package plan and named distinct owner/reviewer.
+G0 is not required to author or review this docs-only candidate. This is a
+documentation/configuration decision package;
 it precedes P1–P6 source implementation. It does not run calibration or emit
 the final Phase 0 artifact or protocol.
 
@@ -221,7 +237,9 @@ candidate preregistration containing the proposed schema requirements,
 estimand/rules, cases/seeds and statistical method. The authorized maintainer
 resolves all required product/rules decisions against that candidate before
 Pass 3 review. Pass 3 ACCEPT applies only to the exact candidate plus recorded
-decisions; it unlocks P1–P6 source work once G0 is also satisfied. P0a has no
+decisions; it unlocks P1–P6 source-only authoring when each package plan and
+its other dependencies are accepted. G0 remains mandatory before package
+validation, integration, merge or promotion. P0a has no
 source or test allowlist and produces no calibration results, final Phase 0
 artifact, protocol instance, training or qualification result.
 
@@ -270,8 +288,10 @@ protocol.
 
 ### P1 — V4 typed schema, device-native score events and artifacts
 
-**Dependencies:** G0, accepted P0a preregistration for score source/rules, exact
-reconciliation/profile hash. P1 begins with source tracing because the named
+**Source-only authoring dependencies:** accepted P0a preregistration for score
+source/rules and exact reconciliation/profile hash. G0 is required before
+P1 builds, test execution, device/numerical validation, integration, merge or
+promotion. P1 begins with source tracing because the named
 score-ledger file is absent from the base checkout.
 
 1. Trace every authoritative event source and sink in the current simulator,
@@ -485,14 +505,18 @@ workers.
 ## Shared commit, review, and integration cadence
 
 - Planner pushes its complete plan and pins the commit/blob SHA before Pass 1.
-- Implementer begins only after plan ACCEPT, release gates and named ownership.
+- Source-only authoring begins only after package plan ACCEPT, applicable
+  prerequisites (including P0a where required), exact isolated worktree/base,
+  and named ownership. G0 gates all execution and integration actions.
   Make one coherent, reviewable commit per interface, kernel, error contract,
   or fixture; push each commit before beginning its dependent slice. Every
   commit records source/profile/protocol identity changes and migration impact.
-- Pass 3 reviewer checks exact pushed commit and file blob hashes, package
-  allowlist, invariants, any tests requested by that package, and required
-  simulation evidence. Persist ACCEPT/REVISE on the same review path; reviewers
-  must not accept a moving branch name or stale commit.
+- Pass 3 first records a source-scope/interface disposition on the exact
+  source-only candidate head. It is not final ACCEPT and cannot authorize
+  dependent-package integration/use. After G0, Pass 3 checks exact pushed
+  hashes, allowlist, invariants, required tests, device traces and simulator/
+  dashboard evidence; only this final ACCEPT allows integration. Persist both
+  dispositions and do not accept a moving branch or stale commit.
 - After ACCEPT, integration owner merges the exact reviewed head, records the
   integration commit and pins it as the next package base. Any conflict
   resolution creates a new head and must be reviewed again. Never push shared
