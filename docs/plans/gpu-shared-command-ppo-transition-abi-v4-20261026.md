@@ -54,11 +54,11 @@ mean the profile is already production-frozen.
 | Target/fuel slots `E` | 504 | Current ThreeVsThree allocation default (`tensor_3v3.py:47,72-80,368-378`); source ceiling is 600, not this profile value. |
 | Plan C model width `K` | 16 | Current default/allowed K set (`meco_track_training.py:139,154-155`); selector width is K+1. |
 | Raster | `[6,25,51]` float32 | Field 16.54 m × 8.07 m and 0.3302 m cell (`tensor_3v3.py:64-65`, `learning_inputs.py:12,75-127`). |
-| Plan A legal lattice | `A_N=12,096` nodes; `A_G=96,768` ordered support rows | 56×27 grid × 8 headings; 8 ordered descriptors/node (`tensor_adstar.py:254-284`, `meco_pose_graph.py:142-179`, `meco_plan_a_policy.py:359-378`). |
+| Plan A padded graph/node capacity | `A_N=12,096` nodes; `A_G=96,768` ordered support rows | 56×27 grid × 8 headings; 8 ordered descriptors/capacity row (`tensor_adstar.py:254-284`, `meco_pose_graph.py:142-179`, `meco_plan_a_policy.py:359-378`). Actual legal nodes are the subset selected by `node_valid`; 12,096 is not a claim that every node is legal. |
 | Plan C source table | `G_C=537` rows; raw 20, serialized 40 float features | `8 + E + 24 + 1`; widths and order in `meco_candidates.py:1291-1313,1417-1420`, `meco_tracks.py:772-782`. |
 | Plan C route pool | `Q_C=105+19E=9,681` ordered rows; 152 chunks of at most 64; `P=73` points | Source candidate/route count and accepted route contract. This capacity is **Plan C only**. |
-| Plan A graph edges | 10 candidate edges/node | Source creates eight translation and two heading edges (`meco_pose_graph.py` graph builder). Exact fixed capacity is `A_N×10=120,960`; valid-edge mask controls use. |
-| Plan A ancestor-jump levels | 14 | Source loop grows powers of two until covering 12,096 nodes (`meco_plan_a_policy.py` support construction); proposed field is `[14,A_N]`. |
+| Plan A graph edges | 10 candidate edges per padded node | Source creates eight translation and two heading edges (`meco_pose_graph.py:181-209`). Exact fixed capacity is `A_N×10=120,960`; `node_valid` and `edge_mask` control use. |
+| Plan A ancestor-jump levels | 14 | Source loop grows powers of two until covering the padded capacity of 12,096 nodes (`meco_plan_a_policy.py:399-428`); proposed field is `[14,A_N]`. |
 | GRU hidden | 64 float32 values | Current model (`meco_tracks.py:771,826-837`). |
 
 The active user objective is the authorization basis for using these source
@@ -71,9 +71,12 @@ code for its lifetime: `1=A1, 2=A2, 3=A3, 4=C1, 5=C2`; zero is invalid.
 The ABI carries two separate policy families. Their index spaces and storage
 are not interchangeable.
 
-* **Plan A:** the static legal-pose lattice is `[A_N=12,096]`, with 10
-  candidate directed edges per node and `[A_G=96,768]` ordered node/behavior
-  support rows. The dynamic PPO record stores its full support-valid mask,
+* **Plan A:** the static padded graph/node capacity is `[A_N=12,096]`; the
+  actual legal-node subset is selected by the source `node_valid` mask. The
+  graph has capacity for 10 candidate directed edges per node and
+  `[A_G=96,768]` ordered node/behavior support rows. `node_valid` is fixed by
+  the bound map/robot profile and included in its digest; it is not inferred
+  from capacity. The dynamic PPO record stores its full support-valid mask,
   per-node search costs/parents/traversal order, 14-level ancestor table, and
   policy utility output. Its graph/search evidence is not included in `Q_C`.
 * **Plan C:** the immutable full source-policy axis is `[G_C=537]`; K-wide
@@ -143,12 +146,12 @@ prefix are excluded from this per-row subtotal and accounted separately.
 
 | Field group and exact fields | Type and shape per row | Bytes/row |
 |---|---|---:|
-| Identity/schema: `schema_version:uint16`, `track_code:uint8`; `rollout_slot`, `rollout_generation`, `decision_ordinal`, `world_slot`, `robot_slot`, `episode_generation`, `world_reset_generation`, `observation_sequence`: `int64`; `environment_instance_id:uint64[2]`; masks `row_valid`, `actor_valid`, `critic_valid`, `command_valid`, `terminal`, `truncated`, `transition_finished`, `bootstrap_continuation`, `reset_mask`, `recurrent_available`, `route_active`: `bool` | scalars; 8×int64; uint64[2]; 11×bool | 94 |
+| Identity/schema: `schema_version:uint16`, `track_code:uint8`; `rollout_slot`, `rollout_generation`, `decision_ordinal`, `world_slot`, `robot_slot`, `world_reset_generation`: `int64`; `episode_generation`, `observation_sequence`: `uint64`; `environment_instance_id:uint64[2]`; masks `row_valid`, `actor_valid`, `critic_valid`, `command_valid`, `terminal`, `truncated`, `transition_finished`, `bootstrap_continuation`, `reset_mask`, `recurrent_available`, `route_active`: `bool` | scalars; 6×int64; 2×uint64; uint64[2]; 11×bool | 94 |
 | Observation: `observation_raster`, `observation_globals` in channel order `(x,y,sin_heading,cos_heading,load,signed_hub_timer,match_remaining)` | float32[6,25,51], float32[7] | 30,628 |
 | Recurrent state: `recurrent_hidden_before`, `recurrent_hidden_after` | float32[64] each | 512 |
 | Plan C values: `candidate_raw`, `candidate_missing`, `candidate_model_input`, `candidate_valid`, `candidate_identity`, `ordinary_row_map`, `continuation_row_map`, `candidate_model_input_mask`, `candidate_selection_rank`, `candidate_policy_eligible` | float32[537,20]; bool[537,20]; float32[537,40]; bool[537]; int64[537]; int64[16]; int64[1]; bool[537]; int64[537]; bool[537] | 149,959 |
 | Observed target table for this row's observer: `target_xy`, `target_velocity`, `target_age`, `target_confidence`, `target_valid`, `target_handle=(reset_generation,observer_slot,buffer_slot,slot_generation)` | float32[504,2] each for xy/velocity; float32[504] each for age/confidence; bool[504]; int64[504,4] | 28,728 |
-| Plan A dynamic support/search: `support_valid`; `distance_m`, `route_cost`, `parent_edge_m`; `parent_node`, `traversal_order`; `ancestor_jumps`; `node_utility`; `behavior_logits` | bool[96,768]; float64[12,096] each ×3; int64[12,096] each ×2; int64[14,12,096]; float32[12,096]; float32[5] | 1,983,764 |
+| Plan A dynamic support/search: `support_valid`; `distance_m`, `route_cost`, `parent_edge_m`; `parent_node`, `traversal_order`; `ancestor_jumps`; `node_utility`; `behavior_logits` | bool[96,768]; proposed float64[12,096] each ×3; int64[12,096] each ×2; int64[14,12,096]; float32[12,096]; float32[5] | 1,983,764 |
 | Plan C full route sink, each of Q=9,681 ordered rows: `query_kind:uint8`, `policy_source_row:int64`, `oracle_identity_code:int64`, `route_variant:int64`, `target_handle:int64[4]`, `goal_xy:float32[2]`, `query_active:bool`, `status_code:int64`, `feasible:bool`, `path_xy:float32[73,2]`, `path_length:int64`, `distance_m`, `endpoint_error_m`, `weighted_cost_grid_edges`, `bump_cost_grid_edges`, `learned_cost_grid_edges`: float64 each, `candidate_index:int64`, `path_point_mask:bool[73]` | 788 bytes/query × 9,681 | 7,628,628 |
 | Common selected command, exact V1 fields: `schema_version:uint16`, `track_code:uint8`, `decision_valid:bool`, `policy_local_index`, `source_global_row`, `candidate_identity_code`, `action_id`: int64; `goal_xy:float32[2]`, `goal_heading:float32`, `target_identity:int64`, `route_override:bool`, `fallback:bool`, `route_status:uint8`, `route_cost:float32`, `risk_cost:float32`, `legal_node_id`, `behavior_id`, `descriptor_id:int64`, `selected_U:float32`, `selected_P:float32` | scalar fields as named | 99 |
 | PPO values: `reward`, `old_log_probability`, `entropy`, `value`, `old_value`, `return`, `advantage` | float32 each | 28 |
@@ -158,6 +161,17 @@ prefix are excluded from this per-row subtotal and accounted separately.
 
 The exact per-row byte sum is 9,822,906. For the complete batch it is
 `9,822,906 × 32 = 314,332,992` bytes.
+
+The three Plan A cost columns are a proposed V4 storage promotion to float64,
+not a claim about current tensor dtype. The source builds the pose graph using
+`env.sim.pose.dtype` (`meco_pose_graph.py:158`) and explicitly casts
+`physical_distances`, `distances`, and `parent_edge_m` to `graph.xy.dtype`
+(`meco_plan_a_policy.py:381,404-413`). The Plan A owner must accept the proposed
+float64 promotion for recorded replay evidence or publish a replacement dtype
+with a recalculated payload size. The source `node_valid` tensor is a
+capacity-sized mask (`meco_pose_graph.py:142-179`); this proposal binds its
+fixed profile value in the profile digest and never equates padded capacity
+with the runtime legal count.
 
 ### Score-event table and maximum payload
 
@@ -295,7 +309,7 @@ contract, not just agreeing that this is a useful plan.
 | Owner | Required explicit decision |
 |---|---|
 | Environment/profile | Accept/reject proposed profile `N1/S6/R32/T12/E504/K16`, field/raster/grid identity, and one-track-per-run binding. |
-| Plan A | Accept/reject A-only `A_N=12,096`, 10 edges/node, `A_G=96,768`, 14 ancestor levels, cost dtypes, full dynamic search evidence, and static-table digest boundary. |
+| Plan A | Accept/reject A-only `A_N=12,096` padded capacity (with runtime legal subset selected by `node_valid`), 10 edges/capacity node, `A_G=96,768`, 14 ancestor levels, the proposed float64 cost promotion, full dynamic search evidence, and digest binding for profile-fixed `node_valid`. |
 | Plan C | Accept/reject `G_C=537`, raw/model widths 20/40, K=16 ordinary map plus continuation map, full table masks/ranks, and source-row identity. |
 | Route | Accept/reject C-only `Q_C=9,681`, 152 direct-scatter chunks, all inactive/policy/oracle path rows retained, five float64 cost columns, and no A-route conflation. |
 | Observation/native | Accept/reject target handle/snapshot schema, generation rules, track values, fail-closed behavior, and the fixed 12-tick outputs. |
@@ -321,8 +335,9 @@ Independent Pass 1 review should verify:
    unchanged.
 2. Proposed defaults are clearly task-scoped recommendations, not human owner
    acceptance or production configuration.
-3. Plan A's `A_N/A_G/edge/jump` capacities and Plan C's `G_C/Q_C/K` capacities
-   are distinct; no C route bound is applied to A support/search.
+3. Plan A's `A_N` padded node capacity, runtime `node_valid` subset,
+   `A_G/edge/jump` capacities and Plan C's `G_C/Q_C/K` capacities are
+   distinct; no C route bound is applied to A support/search.
 4. The V4 field table covers every required transition group, preserves the
    existing command fields and route status semantics, and includes full C
    policy/oracle route results and paths.
