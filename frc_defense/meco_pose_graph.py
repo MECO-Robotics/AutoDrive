@@ -35,6 +35,7 @@ def compact_legal_pose_mask(legal: torch.Tensor):
 class LegalPoseGraph:
     xy: torch.Tensor                 # [N,2], field meters
     heading_bin: torch.Tensor        # [N]
+    grid_pose_index: torch.Tensor    # [N], canonical source-grid row; -1 for padding
     heading: torch.Tensor            # [N], radians
     edges: torch.Tensor              # [1,N,D], legal destination node IDs
     edge_mask: torch.Tensor          # [1,N,D]
@@ -56,6 +57,42 @@ class LegalPoseGraph:
     @property
     def valid_count(self) -> torch.Tensor:
         return self.node_valid.sum()
+
+    @property
+    def route_source(self) -> str:
+        """This is the legal SE(2) support graph, not the simulator XY AD* route."""
+        return "legal_se2_pose_graph"
+
+    def require_device(self, device) -> None:
+        """Validate graph tensor placement and row-map shapes without data reads."""
+        selected = torch.device(device)
+        fields = ("xy", "heading_bin", "grid_pose_index", "heading", "edges",
+                  "edge_mask", "node_valid", "region_ids", "coarse_edges",
+                  "coarse_edge_mask", "lookup", "graph_status")
+        for name in fields:
+            value = getattr(self, name)
+            if not torch.is_tensor(value) or value.device != selected:
+                raise RuntimeError(f"legal pose graph field {name} is not on {selected}")
+        n = self.node_capacity
+        if (self.xy.shape != (n, 2) or self.grid_pose_index.shape != (n,) or
+                self.grid_pose_index.dtype != torch.long or
+                self.heading_bin.shape != (n,) or self.heading.shape != (n,) or
+                self.node_valid.shape != (1, n) or
+                self.node_valid.dtype != torch.bool or
+                self.edges.shape != (1, n, 10) or
+                self.edge_mask.shape != self.edges.shape or
+                self.edges.dtype != torch.long or self.edge_mask.dtype != torch.bool):
+            raise RuntimeError("legal pose graph row or edge contract is malformed")
+        if (self.region_ids.shape != (1, n) or self.region_ids.dtype != torch.long or
+                self.coarse_edges.ndim != 3 or
+                self.coarse_edges.shape[:2] != (1, self.region_count) or
+                self.coarse_edge_mask.shape != self.coarse_edges.shape or
+                self.coarse_edges.dtype != torch.long or
+                self.coarse_edge_mask.dtype != torch.bool or
+                self.lookup.shape != (HEADING_BINS, self.nx, self.ny) or
+                self.lookup.dtype != torch.long or self.graph_status.shape != () or
+                self.graph_status.dtype != torch.long):
+            raise RuntimeError("legal pose graph connectivity contract is malformed")
 
     def node_features(self, env, raster: torch.Tensor, *, world: int = 0,
                       slot: int = 3) -> torch.Tensor:
@@ -269,8 +306,32 @@ def build_legal_pose_graph(env, *, slot: int = 3, resolution_m: float | None = N
                 coarse_mask[region, :len(ordered)] = True
     else:
         raise RuntimeError("Plan A pose graph requires HIP; CUDA must not use CPU graph fallback")
-    return LegalPoseGraph(
-        xy=node_grid, heading_bin=heading_bins, heading=headings,
+    source_pose_index = torch.where(node_valid, permutation,
+                                    torch.full_like(permutation, -1))
+    compact_positions = torch.arange(capacity, device=device, dtype=torch.long)
+    compact_prefix = compact_positions < node_valid.sum()
+    row_map_valid = ((node_valid == compact_prefix) &
+                     (node_valid == (source_pose_index >= 0)) &
+                     (~node_valid | (source_pose_index < capacity))).all()
+    source_order_valid = ((~(node_valid[1:] & node_valid[:-1])) |
+                          (source_pose_index[1:] >= source_pose_index[:-1])).all()
+    edge_in_range = (edges >= 0) & (edges < capacity)
+    safe_edge = edges.clamp(0, capacity - 1)
+    destination_valid = node_valid[safe_edge]
+    active_edges_valid = ((~edge_mask) | (edge_in_range & destination_valid)).all()
+    source_edges_valid = ((~edge_mask) | node_valid[:, None]).all()
+    coarse_in_range = (coarse_edges >= 0) & (coarse_edges < region_count)
+    active_coarse_valid = ((~coarse_mask) | coarse_in_range).all()
+    graph_inputs_finite = torch.isfinite(node_grid).all() & torch.isfinite(headings).all()
+    graph_contract_valid = (row_map_valid & source_order_valid &
+        active_edges_valid & source_edges_valid & active_coarse_valid &
+        graph_inputs_finite)
+    graph_status = torch.where((graph_status == 0) & graph_contract_valid,
+                               graph_status, torch.ones_like(graph_status))
+    graph = LegalPoseGraph(
+        xy=node_grid, heading_bin=heading_bins,
+        grid_pose_index=source_pose_index,
+        heading=headings,
         edges=edges[None],
         edge_mask=edge_mask[None],
         node_valid=node_valid[None],
@@ -279,3 +340,5 @@ def build_legal_pose_graph(env, *, slot: int = 3, resolution_m: float | None = N
         coarse_edge_mask=coarse_mask[None],
         lookup=lookup, nx=nx, ny=ny, resolution_m=planner.resolution,
         region_count=region_count, graph_status=graph_status)
+    graph.require_device(device)
+    return graph

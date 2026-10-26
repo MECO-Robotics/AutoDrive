@@ -60,3 +60,48 @@ def extension():
     finally:
         cpp_extension.TORCH_LIB_PATH, cpp_extension.ROCM_HOME, cpp_extension.HIP_HOME = old
     return _EXTENSION
+
+
+def dijkstra_graph(xy, heading, edge_dst, edge_allowed, node_valid, root,
+                   root_start_cost, root_connector_m):
+    """Run the tensor-root graph kernel under the closed-by-default gate.
+
+    Every input remains on the selected device. This wrapper validates only
+    static shape, dtype and placement metadata; kernel status stays a device
+    tensor and no scalar is read back to Python.
+    """
+    import torch
+
+    from .meco_plan_a_shortest_path import (PLAN_A_HIP_PARITY_PROFILE_GATE_PASSED,
+        _require_wx9100_device)
+    if not PLAN_A_HIP_PARITY_PROFILE_GATE_PASSED:
+        raise RuntimeError("Plan A HIP dispatch is disabled pending WX9100 parity and profiling")
+    if (not torch.is_tensor(xy) or xy.ndim != 2 or xy.shape[1] != 2 or
+            xy.dtype not in (torch.float32, torch.float64) or not xy.is_cuda):
+        raise ValueError("xy must be HIP float32/float64 [N,2]")
+    device = xy.device
+    n = xy.shape[0]
+    if (not torch.is_tensor(heading) or heading.shape != (n,) or
+            heading.dtype not in (torch.float32, torch.float64) or
+            not torch.is_tensor(edge_dst) or edge_dst.ndim != 2 or
+            edge_dst.shape[0] != n or edge_dst.dtype != torch.int64 or
+            not torch.is_tensor(edge_allowed) or edge_allowed.shape != edge_dst.shape or
+            edge_allowed.dtype != torch.bool or
+            not torch.is_tensor(node_valid) or node_valid.shape != (n,) or
+            node_valid.dtype != torch.bool or
+            not torch.is_tensor(root) or root.shape != () or root.dtype != torch.int64 or
+            not torch.is_tensor(root_start_cost) or root_start_cost.shape != () or
+            root_start_cost.dtype != torch.float64 or
+            not torch.is_tensor(root_connector_m) or root_connector_m.shape != () or
+            root_connector_m.dtype != torch.float64):
+        raise ValueError("Plan A HIP graph tensors have an invalid shape or dtype")
+    if n < 1 or edge_dst.shape[1] < 1:
+        raise ValueError("Plan A HIP graph capacity and degree must be positive")
+    tensors = (heading, edge_dst, edge_allowed, node_valid, root,
+               root_start_cost, root_connector_m)
+    if any(value.device != device for value in tensors):
+        raise ValueError("Plan A HIP graph tensors must share the XY device")
+    _require_wx9100_device(device)
+    return extension().dijkstra_graph(xy.contiguous(), heading.contiguous(),
+        edge_dst.contiguous(), edge_allowed.contiguous(), node_valid.contiguous(),
+        root.contiguous(), root_start_cost.contiguous(), root_connector_m.contiguous())

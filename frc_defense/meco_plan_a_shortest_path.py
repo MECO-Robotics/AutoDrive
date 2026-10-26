@@ -1,10 +1,11 @@
 """Exact-weight Plan A shortest-path primitives and gated HIP heap prototype.
 
-Runtime support construction continues to use the existing CPU heap until
-the separately exposed HIP prototype passes WX9100 parity and profiling.
+The CPU heap is an offline/reference path. Live HIP support dispatch remains
+fail-closed until the WX9100 parity/profile gate is independently accepted.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 import heapq
 import math
 import threading
@@ -13,6 +14,243 @@ import weakref
 _EDGE_WEIGHT_CACHE = {}
 _EDGE_WEIGHT_CACHE_LOCK = threading.RLock()
 PLAN_A_HIP_PARITY_PROFILE_GATE_PASSED = False
+
+
+@dataclass(frozen=True)
+class PlanARootBinding:
+    """Device root and connector values for one canonical pose graph."""
+
+    root_index: "torch.Tensor"
+    root_start_cost: "torch.Tensor"
+    root_connector_m: "torch.Tensor"
+    valid: "torch.Tensor"
+
+
+@dataclass(frozen=True)
+class PlanARouteChunkMap:
+    """Shared route chunk coordinates plus Plan A support-to-node mapping."""
+
+    row_count: int
+    spans: tuple[tuple[int, int], ...]
+    global_row: "torch.Tensor"
+    chunk_index: "torch.Tensor"
+    local_row: "torch.Tensor"
+    support_to_route_row: "torch.Tensor"
+    support_route_row_valid: "torch.Tensor"
+
+    def __post_init__(self):
+        import torch
+        from .experimental_route_evaluation import MAX_ROUTE_QUERY_BATCH
+
+        if type(self.row_count) is not int or self.row_count < 1:
+            raise ValueError("Plan A route row count must be a positive static integer")
+        expected = tuple((start, min(start + MAX_ROUTE_QUERY_BATCH, self.row_count))
+                         for start in range(0, self.row_count, MAX_ROUTE_QUERY_BATCH))
+        if self.spans != expected:
+            raise ValueError("Plan A route chunk spans must be contiguous and complete")
+        if any(not torch.is_tensor(value) for value in
+               (self.global_row, self.chunk_index, self.local_row,
+                self.support_to_route_row, self.support_route_row_valid)):
+            raise ValueError("Plan A route chunk mappings must be device tensors")
+        if any(value.shape != (self.row_count,) for value in
+               (self.global_row, self.chunk_index, self.local_row)):
+            raise ValueError("Plan A global/chunk/local maps must be [N]")
+        if (self.support_to_route_row.ndim != 1 or
+                self.support_route_row_valid.shape != self.support_to_route_row.shape):
+            raise ValueError("Plan A support route map must be [P]")
+        if any(value.dtype != torch.long for value in
+               (self.global_row, self.chunk_index, self.local_row,
+                self.support_to_route_row)) or \
+                self.support_route_row_valid.dtype != torch.bool:
+            raise ValueError("Plan A route map indices/mask have invalid dtypes")
+        if any(value.device != self.global_row.device for value in
+               (self.chunk_index, self.local_row, self.support_to_route_row,
+                self.support_route_row_valid)):
+            raise ValueError("Plan A route mappings must share one device")
+
+
+@dataclass(frozen=True)
+class PlanASupportRouteRows:
+    """Route tensors gathered from legal-node order into Plan A pair order."""
+
+    status_code: "torch.Tensor"
+    feasible: "torch.Tensor"
+    path_xy: "torch.Tensor"
+    path_length: "torch.Tensor"
+    distance_m: "torch.Tensor"
+    endpoint_error_m: "torch.Tensor"
+    weighted_cost_grid_edges: "torch.Tensor"
+    bump_cost_grid_edges: "torch.Tensor | None"
+    learned_cost_grid_edges: "torch.Tensor | None"
+    valid_mask: "torch.Tensor"
+    batch_valid: "torch.Tensor"
+
+
+def plan_a_root_binding(graph, pose, *, device) -> PlanARootBinding:
+    """Select the nearest legal SE(2) root and connector entirely on-device.
+
+    The root tie break is the first canonical graph row, matching ``argmin`` in
+    the existing Plan A support builder. ``valid`` remains a device predicate;
+    callers must bind it into path status instead of reading it on the host.
+    """
+    import torch
+
+    selected = torch.device(device)
+    graph.require_device(selected)
+    if (not torch.is_tensor(pose) or pose.shape != (3,) or
+            pose.device != selected or graph.xy.device != selected or
+            not torch.is_floating_point(pose) or
+            graph.node_valid.shape != (1, graph.node_capacity)):
+        raise ValueError("Plan A root selection requires one same-device [x,y,heading] pose")
+    angle = torch.atan2(torch.sin(graph.heading - pose[2]),
+                        torch.cos(graph.heading - pose[2])).abs()
+    start_cost = (graph.xy - pose[:2]).norm(dim=-1) + angle * .25
+    start_cost = start_cost.masked_fill(~graph.node_valid[0], torch.inf)
+    root = start_cost.argmin()
+    root_start_cost = start_cost.index_select(0, root.reshape(1)).reshape(()).to(torch.float64)
+    root_xy = graph.xy.index_select(0, root.reshape(1)).reshape(2)
+    root_connector_m = (pose[:2] - root_xy).norm().to(torch.float64)
+    valid = (graph.graph_status == 0) & graph.node_valid[0].any() & \
+        torch.isfinite(pose).all() & torch.isfinite(root_start_cost) & \
+        torch.isfinite(root_connector_m) & (root_start_cost >= 0.) & \
+        (root_connector_m >= 0.)
+    return PlanARootBinding(root.to(torch.int64), root_start_cost,
+                            root_connector_m, valid)
+
+
+def make_plan_a_route_chunk_map(route_row_count: int, support_to_route_row,
+                                *, device) -> PlanARouteChunkMap:
+    """Bind legal-node route rows to the shared deterministic 64-row map."""
+    import torch
+    from .experimental_route_evaluation import make_device_route_chunk_map
+
+    if type(route_row_count) is not int or route_row_count < 1:
+        raise ValueError("Plan A route row count must be a positive static integer")
+    selected = torch.device(device)
+    if (not torch.is_tensor(support_to_route_row) or
+            support_to_route_row.ndim != 1 or
+            support_to_route_row.dtype != torch.long or
+            support_to_route_row.device != selected):
+        raise ValueError("Plan A support-to-route rows must be same-device int64 [P]")
+    mapping = make_device_route_chunk_map(route_row_count, device=selected)
+    support_valid = ((support_to_route_row >= 0) &
+                     (support_to_route_row < route_row_count))
+    return PlanARouteChunkMap(route_row_count, mapping.spans,
+        mapping.global_row, mapping.chunk_index, mapping.local_row,
+        support_to_route_row, support_valid)
+
+
+def plan_a_route_batch_validity(batch, mapping: PlanARouteChunkMap, queries, *, device):
+    """Return a device scalar for full ordered route/chunk contract validity."""
+    import torch
+    from .experimental_route_evaluation import (DeviceRouteBatch,
+        validate_device_route_batch)
+
+    target = torch.device(device)
+    if not isinstance(batch, DeviceRouteBatch):
+        raise TypeError("Plan A route result must be a DeviceRouteBatch")
+    count = mapping.row_count
+    if (batch.device != target or len(batch.queries) != count or
+            mapping.global_row.device != target or
+            batch.queries != tuple(queries) or
+            batch.candidate_index.shape != (count,) or
+            batch.candidate_index.dtype != torch.long or
+            batch.status_code.shape != (count,) or
+            batch.feasible.shape != (count,) or batch.path_xy.ndim != 3 or
+            batch.path_xy.shape[0] != count or batch.path_xy.shape[2] != 2 or
+            batch.path_length.shape != (count,) or
+            batch.distance_m.shape != (count,) or
+            batch.endpoint_error_m.shape != (count,) or
+            batch.weighted_cost_grid_edges.shape != (count,)):
+        raise ValueError("Plan A route batch shape or device differs from its chunk map")
+    api_valid = validate_device_route_batch(batch, tuple(queries), device=target)
+    global_rows = torch.arange(count, device=target, dtype=torch.long)
+    # The shared chunk map uses one fixed maximum, including a short final
+    # span. Its device row coordinates must agree with those immutable spans.
+    from .experimental_route_evaluation import MAX_ROUTE_QUERY_BATCH
+    chunk_map_valid = ((mapping.global_row == global_rows).all() &
+        (mapping.chunk_index == torch.div(global_rows, MAX_ROUTE_QUERY_BATCH,
+                                          rounding_mode="floor")).all() &
+        (mapping.local_row == global_rows.remainder(MAX_ROUTE_QUERY_BATCH)).all())
+    order_valid = (batch.candidate_index == mapping.global_row).all()
+    support_map_valid = mapping.support_route_row_valid.all()
+    optional_costs_finite = torch.ones((), device=target, dtype=torch.bool)
+    for value in (batch.bump_cost_grid_edges, batch.learned_cost_grid_edges):
+        if value is not None:
+            if value.shape != (count,) or value.device != target:
+                raise ValueError("Plan A optional route-cost shape/device is malformed")
+            optional_costs_finite &= torch.isfinite(value).all()
+    return (api_valid & chunk_map_valid & order_valid & support_map_valid &
+            optional_costs_finite)
+
+
+def evaluate_plan_a_route_chunks(env, graph, queries, support_to_route_row, **kwargs):
+    """Run the shared bounded route evaluator and preserve Plan A row mapping.
+
+    Route evaluation, chunk ordering and concatenation stay owned by the shared
+    API. This wrapper only binds its global node rows to Plan A's canonical pair
+    rows and returns a device validity predicate for the complete batch. Route
+    goal order is taken directly from the legal graph's canonical node table.
+    """
+    from .experimental_route_evaluation import evaluate_device_route_chunks
+
+    items = tuple(queries)
+    graph.require_device(env.device)
+    mapping = make_plan_a_route_chunk_map(graph.node_capacity,
+        support_to_route_row, device=env.device)
+    if len(items) != mapping.row_count:
+        raise ValueError("Plan A route queries must cover canonical graph row order")
+    if not graph.xy.is_floating_point():
+        raise ValueError("Plan A route graph coordinates must be floating point")
+    batch = evaluate_device_route_chunks(env, items, graph.xy, **kwargs)
+    batch_valid = plan_a_route_batch_validity(batch, mapping, items,
+                                              device=env.device)
+    return batch, mapping, batch_valid
+
+
+def reassemble_plan_a_route_support(batch, mapping: PlanARouteChunkMap,
+                                    batch_valid) -> PlanASupportRouteRows:
+    """Gather node-level route rows into canonical node/behavior support order."""
+    import torch
+    from .experimental_route_evaluation import DeviceRouteBatch
+
+    if not isinstance(batch, DeviceRouteBatch):
+        raise TypeError("Plan A route result must be a DeviceRouteBatch")
+    device = batch.device
+    if (batch_valid.shape != () or batch_valid.dtype != torch.bool or
+            batch_valid.device != device or mapping.global_row.device != device or
+            mapping.chunk_index.device != device or mapping.local_row.device != device or
+            mapping.support_to_route_row.device != device or
+            mapping.support_route_row_valid.device != device or
+            batch.candidate_index.shape != (mapping.row_count,)):
+        raise ValueError("Plan A route assembly inputs do not share one device contract")
+    safe_rows = mapping.support_to_route_row.clamp(0, mapping.row_count - 1)
+    status = batch.status_code.index_select(0, safe_rows)
+    feasible = batch.feasible.index_select(0, safe_rows)
+    path_xy = batch.path_xy.index_select(0, safe_rows)
+    path_length = batch.path_length.index_select(0, safe_rows)
+    distance = batch.distance_m.index_select(0, safe_rows)
+    endpoint_error = batch.endpoint_error_m.index_select(0, safe_rows)
+    weighted_cost = batch.weighted_cost_grid_edges.index_select(0, safe_rows)
+    valid = mapping.support_route_row_valid & feasible & batch_valid
+    status = torch.where(batch_valid, status,
+        torch.full_like(status, DeviceRouteBatch.INVALID))
+    path_xy = torch.where(batch_valid, path_xy, torch.zeros_like(path_xy))
+    path_length = torch.where(batch_valid, path_length,
+                              torch.zeros_like(path_length))
+    infinity = torch.full_like(distance, torch.inf)
+    distance = torch.where(batch_valid, distance, infinity)
+    endpoint_error = torch.where(batch_valid, endpoint_error, infinity)
+    weighted_cost = torch.where(batch_valid, weighted_cost, infinity)
+    bump_cost = (None if batch.bump_cost_grid_edges is None else
+        torch.where(batch_valid,
+            batch.bump_cost_grid_edges.index_select(0, safe_rows), infinity))
+    learned_cost = (None if batch.learned_cost_grid_edges is None else
+        torch.where(batch_valid,
+            batch.learned_cost_grid_edges.index_select(0, safe_rows), infinity))
+    return PlanASupportRouteRows(status, feasible & batch_valid, path_xy,
+        path_length, distance, endpoint_error, weighted_cost, bump_cost,
+        learned_cost, valid, batch_valid)
 
 
 def _require_wx9100_device(device):
@@ -185,30 +423,32 @@ def plan_a_dijkstra_hip(edge_dst, edge_costs, edge_lengths, edge_allowed, *, roo
 
 
 def plan_a_dijkstra_hip_for_graph(graph, *, device, root, root_start_cost,
-                                  root_connector_m):
+                                  root_connector_m, root_valid=None):
     """Run exact graph geometry and Dijkstra on device without host graph copies.
 
-    This is an explicit prototype entry point. Runtime support construction
-    remains on the CPU oracle until WX9100 parity and profile evidence opens
-    the dispatch gate.
+    This prototype entry remains disabled for live support until WX9100
+    parity/profile evidence opens the dispatch gate. Root validity, graph
+    validity and the kernel status are combined on-device; a failed route
+    returns only invalid sentinels rather than a partial shortest-path tree.
     """
     import torch
 
     if not PLAN_A_HIP_PARITY_PROFILE_GATE_PASSED:
         raise RuntimeError("Plan A HIP dispatch is disabled pending WX9100 parity and profiling")
-    device = torch.device(device)
-    selected = _require_wx9100_device(device)
+    selected = torch.device(device)
     xy = graph.xy
     heading = graph.heading
     edge_dst = graph.edges[0]
     edge_allowed = graph.edge_mask[0]
     n = int(graph.node_capacity)
     if (not all(torch.is_tensor(value) and value.device == selected for value in
-                (xy, heading, edge_dst, edge_allowed, graph.node_valid[0])) or
+                (xy, heading, edge_dst, edge_allowed, graph.node_valid[0],
+                 graph.graph_status)) or
             xy.shape != (n, 2) or heading.shape != (n,) or
             edge_dst.ndim != 2 or edge_dst.shape[0] != n or
             edge_allowed.shape != edge_dst.shape or
             graph.node_valid.shape != (1, n) or graph.node_valid.dtype != torch.bool or
+            graph.graph_status.shape != () or graph.graph_status.dtype != torch.long or
             edge_dst.dtype != torch.int64 or edge_allowed.dtype != torch.bool or
             xy.dtype not in (torch.float32, torch.float64) or
             heading.dtype not in (torch.float32, torch.float64) or
@@ -220,12 +460,62 @@ def plan_a_dijkstra_hip_for_graph(graph, *, device, root, root_start_cost,
             root.device != selected or root_start_cost.device != selected or
             root_connector_m.device != selected):
         raise ValueError("HIP graph route requires valid same-device graph tensors and root costs")
-    from .meco_plan_a_shortest_path_hip import extension
-    route, physical, parent, parent_length, settled, status = extension().dijkstra_graph(
-        xy.contiguous(), heading.contiguous(), edge_dst.contiguous(),
-        edge_allowed.contiguous(), graph.node_valid[0].contiguous(),
-        root.contiguous(), root_start_cost.contiguous(),
-        root_connector_m.contiguous())
+    if n < 1 or edge_dst.shape[1] < 1:
+        raise ValueError("HIP graph route requires positive node capacity and degree")
+    if root_valid is not None and (not torch.is_tensor(root_valid) or
+            root_valid.shape != () or root_valid.dtype != torch.bool or
+            root_valid.device != selected):
+        raise ValueError("HIP root validity must be a same-device bool scalar")
+    from .meco_plan_a_shortest_path_hip import dijkstra_graph
+    route, physical, parent, parent_length, settled, status = dijkstra_graph(
+        xy, heading, edge_dst, edge_allowed, graph.node_valid[0], root,
+        root_start_cost, root_connector_m)
+    destination_in_range = (edge_dst >= 0) & (edge_dst < n)
+    safe_destination = edge_dst.clamp(0, n - 1)
+    destination_valid = graph.node_valid[0].index_select(
+        0, safe_destination.reshape(-1)).reshape_as(edge_dst)
+    active_edges_valid = ((~edge_allowed) |
+                          (destination_in_range & destination_valid)).all()
+    active_sources_valid = ((~edge_allowed) | graph.node_valid[0][:, None]).all()
+    root_in_range = (root >= 0) & (root < n)
+    safe_root = root.clamp(0, n - 1)
+    root_node_valid = graph.node_valid[0].index_select(
+        0, safe_root.reshape(1)).reshape(())
+    inputs_valid = (torch.isfinite(xy).all() & torch.isfinite(heading).all() &
+        active_edges_valid & active_sources_valid & root_in_range & root_node_valid &
+        (graph.graph_status == 0) & torch.isfinite(root_start_cost) &
+        torch.isfinite(root_connector_m) & (root_start_cost >= 0.) &
+        (root_connector_m >= 0.))
+    if root_valid is not None:
+        inputs_valid = inputs_valid & root_valid
+    parent_valid = (parent == -1) | ((parent >= 0) & (parent < n))
+    traversal_valid = (settled == -1) | ((settled >= 0) & (settled < n))
+    route_outputs_valid = ((~torch.isnan(route)).all() &
+        (~torch.isnan(physical)).all() & torch.isfinite(parent_length).all() &
+        (parent_length >= 0.).all() & parent_valid.all() & traversal_valid.all() &
+        ((~torch.isfinite(route)) | torch.isfinite(physical)).all())
+    status = torch.where(inputs_valid & route_outputs_valid, status,
+                         torch.ones_like(status))
+    result_valid = status == 0
+    route = torch.where(result_valid, route, torch.full_like(route, torch.inf))
+    physical = torch.where(result_valid, physical,
+                           torch.full_like(physical, torch.inf))
+    parent = torch.where(result_valid, parent, torch.full_like(parent, -1))
+    parent_length = torch.where(result_valid, parent_length,
+                                torch.zeros_like(parent_length))
+    settled = torch.where(result_valid, settled, torch.full_like(settled, -1))
     return {"route_cost": route, "physical_distance": physical,
         "parent_ids": parent, "parent_edge_m": parent_length,
-        "traversal_order": settled, "status": status}
+        "traversal_order": settled, "status": status, "valid": result_valid}
+
+
+def plan_a_dijkstra_hip_for_root_binding(graph, *, device,
+                                         root_binding: PlanARootBinding):
+    """Consume a device-computed root binding without scalar projection."""
+    if not isinstance(root_binding, PlanARootBinding):
+        raise TypeError("root_binding must be a PlanARootBinding")
+    return plan_a_dijkstra_hip_for_graph(graph, device=device,
+        root=root_binding.root_index,
+        root_start_cost=root_binding.root_start_cost,
+        root_connector_m=root_binding.root_connector_m,
+        root_valid=root_binding.valid)
