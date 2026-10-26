@@ -196,6 +196,21 @@ until those gates pass. The training objective's Stage 1 and uninterrupted
 five-track continuation evidence remain separate runtime gates; this planning
 acceptance establishes neither.
 
+### V4 owner-adoption matrix review status (2026-10-26)
+
+The V4 owner-adoption matrix received independent exact-head Pass 1
+**ACCEPT** as a planning workflow only:
+`docs/plans/gpu-shared-command-ppo-transition-abi-v4-owner-adoption-matrix-20261026.md`,
+candidate commit `ee234b2c5162038e6fcfff6d9551d80f443f6d82`, artifact SHA-256
+`9888eb2a8d5e63b04aa328dca222dd08520a709e2ee78684f9d2dc07aafede53`.
+All nine owner dispositions and the cross-owner immutable ABI publication
+gate remain **PENDING**. Review acceptance does not constitute owner adoption,
+change the V4 proposal into a normative ABI, or authorize schema/source
+implementation, tests, runtime, device, simulator, dashboard, checkpoint,
+campaign, training, or evaluation work. A separately reviewed schema plan
+remains gated on explicit owner decisions and publication of one adopted
+immutable ABI/profile hash.
+
 ### Refreshed dependency order and campaign boundary
 
 1. Keep the active two-WX9100 campaign and its live checkout, supervisor,
