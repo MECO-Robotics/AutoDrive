@@ -1,6 +1,6 @@
 # PPO Transition ABI V4 Delegated Owner Response Plan
 
-Date: 2026-10-26  
+Date: 2026-10-26
 Status: **Pass 1 planning candidate; owner responses not started; all dispositions PENDING**
 
 ## Purpose and pinned evidence
