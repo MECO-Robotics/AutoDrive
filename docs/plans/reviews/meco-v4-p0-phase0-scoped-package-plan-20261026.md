@@ -1,6 +1,6 @@
 # Independent Pass 1 review: scoped P0 Phase 0 package plan
 
-- **Verdict:** ACCEPT (applies to this exact G0/source-authoring amendment; the earlier ACCEPT was for the prior plan head)
+- **Verdict:** REVISE (supersedes the ACCEPT for this exact P0 amendment; the package gates otherwise pass)
 - **Review date:** 2026-10-26
 - **Reviewer identity:** `/root/closure_wave1_reviewer`
 - **Reviewer task:** independent exact-head staged-gate review assigned by `/root`
@@ -17,14 +17,14 @@
 
 ## Review scope and evidence
 
-The amendment pins the accepted overall staged-gate plan and preserves P0's bounded ownership: P0a authors exactly one documentation-only preregistration candidate, and P0b produces generated calibration records/artifacts only after reviewed P1–P6 source freeze and G0. The source base, reconciliation artifact, profile, reward estimand, and product target remain consistent with accepted pins. P0 still owns no implementation or test code; P6 owns qualification v5 schema, runner, and tests.
+The amendment otherwise stages P0 correctly. P0a remains one documentation-only preregistration candidate, requires human decisions before its exact-head Pass 3 ACCEPT, and unlocks only each package's permitted source/test-file authoring. P0b remains generated calibration records/artifacts only after reviewed P1–P6 source freeze and G0. P6 owns qualification v5 schema, runner and tests. The dependency graph is acyclic; the campaign boundary, manual stop, independent release of both WX9100 leases, maintainer authorization, post-G0 contract bridge, and no-CPU calibration boundary are explicit. P0's finite scope, human decision requirements and simulator/dashboard evidence gates are preserved.
 
-The sequencing is acyclic. Required human decisions are resolved before P0a's exact-head Pass 3 ACCEPT. That ACCEPT unlocks only each package's permitted isolated source/test-file authoring, subject to that package's own plan and interface gates. G0 blocks builds, test execution, numerical/simulator work, device/GPU use, dashboard operation, calibration/evaluation, integration, merge, and promotion. P0b follows P1–P6 source freeze and review, and P6 runtime qualification follows P0b ACCEPT; neither depends on the other's downstream result.
+### Finding: correct the overall-plan review status and pin
 
-The campaign boundary is explicit: no inspection or control of PID `2750253`, workers, outputs, checkpoints, dashboard, leases, or devices; only a manual user stop and independent release of both WX9100 leases can satisfy G0. Explicit maintainer authorization and the post-G0 reviewed contract-anchor bridge are included. No action is inferred from elapsed time or absent telemetry. P0b retains both-WX9100/no-CPU calibration evidence and the repository's seeded simulator/replay and current-dashboard requirements. This review performed no operational validation.
+The plan header pins the correct overall plan commit and file hash, but labels its G0/source-authoring amendment as “pending fresh independent review.” That exact overall plan has already received Pass 1 ACCEPT at `b0b2962d299b1ecaab053b873ef2ae09e3c5f467` (record SHA-256 `54e68870...`). Since P0 states that the amended overall plan's sequencing governs P0a/P0b and P1–P6 gates, its dependency status must match the accepted exact head. Replace the stale pending label with the ACCEPT disposition and pin the exact review record/hash above. Until corrected, the P0 plan does not provide a reliable authority/status chain for its newly staged pre-G0 source permission.
 
-No blocking Pass 1 finding remains for this exact P0 amendment. It authorizes only the documented future P0a/P0b gates; it does not record human decisions, G0, calibration, implementation, training, or qualification as complete.
+This is a documentation pin correction only. No P0 source, test, calibration, device, runtime or campaign action is authorized by this review.
 
 ## Review limits
 
-This ACCEPT applies only to the exact P0 plan commit, blob, and file hash above. No source, tests, runtime, GPU, simulator, dashboard, campaign, or training actions were performed.
+This review applies only to the exact P0 plan commit, blob, and file hash above. No source, tests, runtime, GPU, simulator, dashboard, campaign, or training actions were performed.

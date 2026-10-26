@@ -1,9 +1,9 @@
 # Independent Pass 1 review: P2 GPU-resident environment and route package plan
 
-- **Verdict:** ACCEPT (supersedes the REVISE for P2 gate amendment `1f918a9e0f99ec49a0baf4c3ce69649c4f095a2a`; does not change the earlier ACCEPT scope)
+- **Verdict:** REVISE (supersedes the ACCEPT for exact P2 head `09cf081a4b47b66a9b3fcecf3c3748eda5722465`; its dependency staging and package scope otherwise pass)
 - **Review date:** 2026-10-26
 - **Reviewer identity:** `/root/closure_wave1_reviewer`
-- **Reviewer task:** fresh independent exact-head review assigned by `/root`
+- **Reviewer task:** independent exact-head staged-gate review assigned by `/root`
 - **Plan author:** `plan_a_owner`
 - **Reviewed plan commit:** `09cf081a4b47b66a9b3fcecf3c3748eda5722465`
 - **Reviewed file:** `docs/plans/meco-v4-p2-gpu-resident-environment-route-package-plan-20261026.md`
@@ -17,14 +17,14 @@
 
 ## Review scope and evidence
 
-The successor corrects the prior gate conflict. P2 now requires an exact P1 candidate API/source head with pre-G0 SOURCE/API ACCEPT as an interface dependency, explicitly says that this is not an integration head, and creates its own pre-G0 worktree from the approved source base. The candidate is not merged, copied into the P2 worktree, or used as a branch base. P1/P2 integration is deferred until after G0 and the reviewed contract-anchor bridge, followed by validation and final review. The `tensor_3v3.py` bullet preserves P2 ownership of its integration changes after P1 is integrated; that shared-file work therefore remains post-G0. The earlier REVISE's P1 integration-before-authoring conflict is resolved.
+The corrected successor resolves the P1 integration-before-authoring contradiction. It requires a pre-G0 P1 candidate API/source head with SOURCE/API ACCEPT, uses that only as an interface reference, and branches P2 from the approved source base. It prohibits merging/copying that dependency into the pre-G0 worktree and defers integrating exact P1/P2 heads until after G0 and the reviewed contract-anchor bridge. P2 scope, the finite allowlist and ownership boundaries remain intact. The plan preserves both-WX9100/no-CPU evidence, seeded simulator/replay inspection, current dashboard/backend/frontend checks, and no campaign access.
 
-The amendment also pins the exact accepted overall plan `8efec...` and its file hash. P2's package scope and owner boundaries remain unchanged: environment/observation/perception, candidate, pose-graph and route paths; P1 retains score-event schema/semantics, P5 the shared trainer/counterfactual integration, P3/P4 the model files, and P6 supervisor/qualification. The finite allowlist, two-WX9100 identity and residency evidence, CPU/P600 fail-closed requirement, seeded simulator and replay inspections, and current dashboard/backend/frontend checks remain required future acceptance gates.
+### Finding: correct the overall-plan review status and pin
 
-G0 continues to block tests, builds, imports that execute project code, numerical/runtime/simulator work, GPU/device use, dashboard operation, calibration/evaluation, integration, merge and promotion until the user manually stops campaign PID `2750253` and both WX9100 leases are independently confirmed released. This review performed no operational validation and does not satisfy those gates.
+The P2 header pins the correct overall plan commit and file hash, but labels its G0/source-authoring amendment “pending fresh review.” The exact overall plan has already received Pass 1 ACCEPT at `b0b2962d299b1ecaab053b873ef2ae09e3c5f467` (record SHA-256 `54e68870...`). P2's source-only permission and post-G0 bridge/integration sequence rely on this overall gate. Replace the stale pending label with the ACCEPT disposition and pin the exact review record/hash above. Until corrected, the P2 plan's authority/status chain for pre-G0 source authoring is ambiguous.
 
-No blocking Pass 1 finding remains for this exact P2 amendment. It authorizes only the stated future source-authoring gates after this exact review and the other listed prerequisites; it does not establish API conformance or authorize runtime/integration work.
+This is a documentation pin correction only. No P2 source, test, device, runtime, simulator, dashboard or campaign action is authorized by this review.
 
 ## Review limits
 
-This ACCEPT applies only to the exact P2 plan commit, blob, and file hash above. No source, tests, runtime, GPU, simulator, dashboard, campaign, or training actions were performed.
+This review applies only to the exact P2 plan commit, blob, and file hash above. No source, tests, runtime, GPU, simulator, dashboard, campaign, or training actions were performed.
