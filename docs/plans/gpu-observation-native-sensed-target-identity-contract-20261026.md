@@ -10,10 +10,11 @@ dashboard work, checkpoint access, training/evaluation, or campaign change.
 `8edb9998d7e3e361e83938a345c65d4fef488e1d`.
 
 **Input reconciliation:** `docs/plans/gpu-five-track-ppo-plan-c-source-view-reconciliation-20261026.md`,
-artifact SHA-256 `ad3b9f69fb5ade7ebe0844be2a3b3105ffcebcd7f708969631efc9f8133e1924`.
+artifact SHA-256 `ad3b9f69fb5ade7ebe0844be2a3b3105ffcebcd7f708969631efc9f8133e1924`,
+as a proposed planning-only input pending Plan C/shared ABI owner approval.
 This proposal supplies only observation/native owner decisions left open by
-that amendment. It does not revise the shared ABI, Plan C K/K+1 owner contract,
-route contract, or PPO V3 schema.
+that proposed input. It does not revise the shared ABI, Plan C K/K+1 owner
+contract, route contract, or PPO V3 schema.
 
 **Related source/contract inputs:** current source cited below; PPO source
 inventory at `docs/plans/gpu-five-track-ppo-v3-schema-source-evidence-followup-20261026.md`
@@ -65,12 +66,20 @@ Plan C route amendment commit
    source row `8+i` (`meco_candidates.py:1291-1313,1418-1420`; reconciliation
    amendment §“Reconciled capacity and identity contract”).
 7. Route query ordinal, policy source row and compact model-view row are distinct
-   coordinates. The accepted reconciliation proposal maps ordinary-view local
+   coordinates. The proposed reconciliation input maps ordinary-view local
    slots to global policy rows; it explicitly keeps route query ordinals
-   separate, even where current ordinal and policy row numbers coincide. A
-   sensed-target row may participate in a policy route query, and an oracle
-   query may refer to a sensed target, but neither coordinate is the sensor
-   slot identity.
+   separate, even where current ordinal and policy row numbers coincide. This
+   input remains pending Plan C/shared ABI owner approval. A sensed-target row
+   may participate in a policy route query, and an oracle query may refer to a
+   sensed target, but neither coordinate is the sensor slot identity.
+8. A prior track can remain masked while its age exceeds the timeout, and the
+   association path can still match a detection to that masked-but-expired
+   track: old-track matching uses `track_mask` while free-slot availability
+   separately treats `track_age > timeout` as expired
+   (`_tensor_3v3_observation.py:40-50,68-80`). On acceptance, the update treats
+   such an age-expired match as having no valid prior for velocity estimation,
+   then refreshes the same slot (`:562-572`). The source does not define a
+   generation transition for this expired-but-matched case.
 
 ## Owner proposal (requires explicit adoption)
 
@@ -102,6 +111,9 @@ Plan C route amendment commit
 - Preserve a slot generation when a detection is accepted as matched to its
   current unexpired track. Increment it when a newly allocated detection
   occupies a previously free or expired slot, including reuse after timeout.
+  For a detection matched to a track whose age exceeds the timeout, generation
+  behavior is unresolved: the observation owner must decide whether this is
+  continuity or a new slot occupant before this proposal can be adopted.
   Increment the world reset generation on a reset and invalidate all target
   handles from that world. Do not reset a slot generation to zero on world
   reset; it remains monotonic for the lifetime of the environment instance.
@@ -171,8 +183,9 @@ Plan C route amendment commit
 1. **Observation owner:** approve per-observer `[N,6,E]` identity axes, the
    observation-sequence increment boundary, and the treatment of missed,
    merged and split anonymous detections. Decide whether the generation changes
-   exactly on every free/expired-slot allocation or whether the native
-   association layer has a more precise event boundary.
+   exactly on every free/expired-slot allocation, how to treat a detection
+   matched to a still-masked slot whose age exceeds timeout, or whether the
+   native association layer has a more precise event boundary.
 2. **Native simulator owner:** identify the authoritative device-side location
    that performs track allocation, generation increment and reset invalidation;
    establish atomic update ordering with track position/mask writes and specify
