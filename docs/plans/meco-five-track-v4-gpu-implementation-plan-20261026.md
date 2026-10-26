@@ -42,7 +42,12 @@ Do not stop, signal, reconfigure, evaluate through, restart, or otherwise touch
 that process, its dashboard, workers, checkpoints, output directory, GPU
 leases, or devices. Before the G0 execution gate is satisfied, only isolated,
 docs-authorized source and test-file authoring plus static source/diff review
-may proceed after the applicable package plan and prerequisites are accepted.
+may proceed in a fresh worktree branched from the already approved
+implementation source base `6ed961a09c08dfc1796d98ae3566bd3f0eaaaf22`, after
+the applicable package plan and prerequisites are accepted. The pinned
+reconciliation artifact and profile hashes may be cited, but pre-G0 source
+worktrees must not add, copy, or depend on the artifact being present in the
+source checkout.
 This does not authorize build or compile, test execution, numerical work,
 simulator, calibration, evaluation, dashboard operation, device or GPU use,
 training, checkpoint mutation, integration, merge, or promotion. None of those
@@ -133,11 +138,12 @@ Every code/schema package uses three distinct roles and exact-head artifacts:
 
 Worktree paths below are proposed unique locations under the repository's
 ZFS-backed `.worktrees/` parent. Branch names include the package ID and date.
-Create them after the applicable package plan and dependencies are accepted,
-in fresh ZFS-backed worktrees that do not use the live campaign checkout or
-output directory. G0 is required before any build, test execution, simulator,
-calibration, evaluation, dashboard, device/GPU use, integration, merge or
-promotion.
+Create source-only worktrees after the applicable package plan and
+dependencies are accepted, from the exact approved implementation source base
+or a pinned candidate source head. Do not use the live campaign checkout or
+output directory. G0 is required before the contract-anchor bridge is created
+or integrated and before any build, test execution, simulator, calibration,
+evaluation, dashboard, device/GPU use, integration, merge or promotion.
 
 | Package | Planner | Pass 2 worktree / branch | Pass 3 reviewer | Main owned scope |
 |---|---|---|---|---|
@@ -165,28 +171,32 @@ or active campaign files enter source commits.
 ### Gate G0 — runtime, device and integration release
 
 **Prerequisites:** independent Pass 1 ACCEPT of this exact plan; the user has
-manually stopped diagnostic campaign PID `2750253`; GPU leases have been
-independently released; and the user or repository maintainer has explicitly
-authorized the new implementation campaign. Keep these as recorded gate
-evidence, not assumptions.
+manually stopped diagnostic campaign PID `2750253`; both WX9100 leases have
+been independently released; and the user or repository maintainer has
+explicitly authorized runtime/device/integration work. Keep these as recorded
+gate evidence, not assumptions.
 
 The pinned reconciliation commit is on a history that diverges from the
-requested implementation base `6ed961a09c08dfc1796d98ae3566bd3f0eaaaf22`;
-its artifact is not present in that source checkout. After Pass 1 and before
-source/schema packages start, create a reviewed, docs-only contract-anchor
+approved implementation base `6ed961a09c08dfc1796d98ae3566bd3f0eaaaf22`;
+its artifact is not present in that source checkout. This does not block
+isolated pre-G0 source authoring against the approved base using the published
+artifact/profile hashes as contract references. After G0, before any
+validation or integration, create a reviewed, docs-only contract-anchor
 integration commit that adds the exact reconciliation artifact bytes at its
 pinned path. Verify the artifact SHA-256 remains
 `294a02012427c2ceeb638ea0cd337d1fa7908cf47fb9d0f07bef29ed6790510c`, the
 canonical profile hash is unchanged, and the implementation source tree is
 identical to base `6ed961a09c08dfc1796d98ae3566bd3f0eaaaf22`. Do not merge the
 reconciliation branch wholesale or import its unrelated source history. A
-distinct reviewer accepts this exact bridge head before it becomes the base
-for implementation worktrees.
+distinct reviewer accepts this exact bridge head before it becomes the
+integration and validation base. Pre-G0 source-only worktrees never depend on
+or modify this missing artifact.
 
 **Acceptance:** accepted plan commit/hash, campaign stop evidence from the
-authorized operator, separate lease-release evidence, named package
-owners/reviewers, reviewed contract-anchor bridge commit, and exact integration
-base. Until G0 is complete, isolated source/test authoring and static review
+authorized operator, independent release evidence for both WX9100 leases,
+named package owners/reviewers, and exact approved source base. The
+contract-anchor bridge is a separate post-G0 prerequisite for integration and
+runtime validation. Until G0 is complete, isolated source/test authoring and static review
 may proceed only under the accepted package plans and prerequisites. No build
 or compile, test execution, simulator/numerical work, device/GPU use,
 dashboard, calibration, evaluation, qualification, training, checkpoint
