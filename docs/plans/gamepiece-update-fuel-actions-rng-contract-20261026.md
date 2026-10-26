@@ -1,0 +1,77 @@
+# Pass 1 amendment: per-world device RNG for the FUEL pass gate
+
+**Status:** planning-only proposal. It authorizes this document only. Source changes require independent Pass 1 acceptance of this exact artifact, owner reconciliation below, and exact-head Pass 3 review of implementation.
+**Amends:** accepted gamepiece plan `docs/plans/gpu-simulator-gamepiece-physics-tranche-20261026.md`, commit `3d1f93f11936dcc79c70f5ae587508cfe8198257`, SHA-256 `df12eacc11fb1d1d2c91eea627c77becfe7221f954f1105f14d05b0a5ef2afaa`.
+**Normative command/transition contract:** accepted `docs/plans/gpu-shared-command-ppo-transition-abi-20261026.md`, commit `947fc80ebe046363b64583adcc4c17da186309b5`, SHA-256 `7650bbe8ec48dfa07557992f90b821d1dd125bc786f48e8698358ef5c27b308f`.
+**Plan C semantics:** K-view plan commit `8556c82b7715499b935bc25f067f2a5d0dfac75e`, SHA-256 `782279be4857e849f9f90d2f6e938b22b244d34b5567f562847e61b88ebf4fb9`; route-plan amendment commit `8567fd92d4dc9e214e8502f2249bb02203ac8c03`, SHA-256 `ac5847d65de2af5ccb17d6a1bc109dceefeab71c5d707253980570020c1e885a`.
+**Live campaign constraint:** the active r4 campaign, processes, assignments, checkpoints, artifacts, and both WX9100 leases remain untouched and uninterrupted. No code, tests, imports, simulator, device, dashboard, replay, or qualification operation is permitted until the user manually stops the campaign and both device leases are independently verified released.
+
+## Goal and source evidence
+
+Remove the `passed.any().item()` branch in `gamepiece_actions.update_fuel_actions` without changing physics or random-stream behavior based on a host predicate. The current approved source at the parent plan's base has the following pass path in `frc_defense/gamepiece_actions.py` (blob SHA-256 `7b71850adb6ed8a2b903d0f05598bb8d7156b3b564f5da324f067880641abda9`, around lines 293–323):
+
+- Empty pass mask: consume `torch.rand([N, NUM_ROBOTS])`, then `torch.randint([N, NUM_ROBOTS])`, and skip ferry calculations.
+- Nonempty pass mask: `ferry_respawn_targets` consumes those same two draws; if the fuel-physics branch is active, `shooter_respawn_cone` additionally consumes `torch.rand([N, NUM_ROBOTS])` for backer returns.
+- Score respawn later consumes its own `shooter_respawn_cone` draw with shape `[N,F]`.
+
+The ferry draws come from `fuel_physics_runtime.py` blob SHA-256 `2a7788d58fc6ee39c0032376c6dedcf6d73921d675cffe909ab254f0bd788ee0`; the shared environment uses one compatibility `torch.Generator`. Thus replacing the host gate with an unconditional call changes how many draws the shared stream consumes on empty-pass ticks, because the nonempty path includes the extra backer-cone draw. Retaining the host gate violates the GPU-only rule. Do not claim that unconditionalizing calls preserves v1 continuation or seeded fixture parity.
+
+The accepted parent plan already requires that no host predicate alter physics/RNG and that any changed RNG behavior receive an immutable version identity. This amendment makes the pass/ferry case concrete. It does not re-scope score, collision, or reset RNG sites beyond the shared helper changes explicitly listed below.
+
+## Proposed v2 RNG contract
+
+Use a stateless, per-world counter/key stream, `meco-gamepiece-philox-v2`, implemented by the indexed HIP extension. No `torch.Generator` call or CPU-derived random value is used by the v2 pass/ferry draw sites. Each random value is addressed directly; skipped or additional draw sites do not advance another world's stream or shift future values.
+
+### Immutable address and state layout
+
+The frozen algorithm is Philox4x32-10 with these inputs:
+
+1. **Root key inputs:** explicit unsigned 64-bit `rng_root_seed`, immutable `rng_segment_id`, and stable `world_uid` for each fixed environment slot. Derive each world key on the device with the named `meco_rng_key_v1` SplitMix64 derivation over `(root_seed, segment_id, world_uid, episode_generation)`. The key derivation ID, exact constants, word order, and overflow semantics are frozen in the implementation artifact and source hash. Dynamic keys are never read to host.
+2. **Counter address:** `(physics_tick_ordinal:u64, entity_slot:u32, draw_site:u32)`. `draw_site` is a closed versioned enum; this tranche assigns distinct IDs for `FERRY_ANGLE`, `FERRY_MIDFIELD_INDEX`, `FERRY_BACKER_SHOT_ANGLE`, and `SCORE_SHOT_ANGLE`. Each address yields one Philox block; float sites use a named output lane, and bounded-index rejection uses the remaining lanes. A future need for a fifth lane/block requires a versioned address-schema change, not implicit counter advancement.
+3. **Random conversion:** float32 uses the high 24 bits of a specified Philox word multiplied by `2^-24`, giving `[0,1)` identically on the supported HIP path. Bounded integer selection uses multiply-high with a fixed device-side rejection threshold and the remaining Philox words; if every lane rejects, set a device RNG failure bit and fail the transition closed before state mutation. No modulo-biased shortcut or host retry is allowed.
+4. **Per-world mutable cursor:** `episode_generation:u64[N]` and `physics_tick_ordinal:u64[N]` are device tensors. The tick advances once for each active environment's `update_fuel_actions` invocation, regardless of whether it passed a piece. Inactive worlds' tick and generation remain unchanged. Draw sites and entity slots are addressed independently; calling an extra site does not shift any other site.
+5. **Reset rules:** construction with a fixed seed starts every world at generation 0/tick 0. A full `reset(seed=s)` establishes root seed `s`, resets every world's generation and tick to zero, and starts a reproducible segment. A full `reset()` without a seed increments all world generations and zeroes ticks. `reset_done(mask)` increments only masked worlds' generations and zeroes only their ticks. `reset_done` must not reseed or advance unaffected worlds. Any implementation path that cannot provide this per-world reset identity fails closed in qualifying mode.
+6. **Fixed-shape call behavior:** compute ferry angle/index and backer shot-angle draws for the fixed `[N, NUM_ROBOTS]` layout on device on every relevant step. Compute score-angle draws at their existing fixed `[N,F]` layout under a distinct draw-site ID. Apply `passed`, `backer_pass`, `newly_scored`, and active-world masks only in device tensor writes. Do not use `.item()`, `.tolist()`, `.cpu()`, a Python tensor truth test, stream-capture-dependent predicate, host retry, or variable-length write to decide whether to produce a draw or mutate gameplay state.
+
+The random angle distributions, respawn candidate range, ferry geometry, HUB/backer rules, ownership, score/pass events, and active/inactive behavior remain unchanged. The generated sequence is intentionally versioned and is not asserted equal to the v1 `torch.Generator` stream. World-key separation means changing one world's pass pattern cannot shift another world's samples.
+
+## Legacy v1 and migration boundary
+
+- **v1 compatibility:** checkpoints and replays labeled with the existing compatibility `torch.Generator` RNG remain v1-only. Preserve the v1 code path only where the existing owner contract explicitly allows legacy nonqualifying execution. Do not label it GPU-only, v2, or qualification evidence.
+- **No silent RNG-state conversion:** a v1 generator byte state cannot be translated into v2 world keys/counters while claiming exact continuation. A v1 training checkpoint may be loaded as a v1 continuation only under its original source/runtime/protocol. It must be rejected before the first qualifying v2 simulation/update if it lacks v2 RNG provenance.
+- **Explicit v2 segment:** starting v2 requires an explicit immutable `rng_root_seed`, new `rng_segment_id`, `rng_protocol_id=meco-gamepiece-philox-v2`, algorithm/key-derivation source hashes, stable world-UID map, and reset state. Any model-weight warm start from a v1 campaign begins a new segment with fresh optimizer/rollout/environment state and records the old checkpoint only as unqualified ancestry. It does not convert prior training/evaluation results into v2 evidence.
+- **Checkpoint exactness:** a resumable v2 checkpoint binds the RNG protocol/algorithm IDs, root-seed and segment identity, world UID map, per-world episode generations and tick ordinals, and simulator state at the same boundary. Exact mid-episode resume requires the associated physical environment state too. If the existing supervisor checkpoint does not save that environment state, either add an episode-boundary checkpoint contract under the PPO/supervisor owner's accepted allowlist or fail closed on mid-episode v2 resume; never restore counters against a newly reset simulator and call it exact continuation.
+- **Evaluation/replay/qualification binding:** the accepted `FiveTrackPpoTransitionV3`/batch row records the RNG protocol identity and the exact per-world counter address/state before and after each transition, under its existing RNG/provenance fields. The evaluation manifest and qualification protocol bind the RNG protocol ID, algorithm/key-derivation source hashes, segment seed/ID, world map, source/runtime identity, and exact checkpoint hashes. V1 and v2 results cannot be paired, pooled, or used interchangeably for qualification. Changing algorithm/version invalidates downstream seeded replay, calibration, and qualification bindings; regenerate them from the new source and protocol.
+
+## Ownership and exact implementation allowlist
+
+The gamepiece-owned source scope for this amendment is exactly:
+
+- `frc_defense/gamepiece_rng.py` (new): frozen protocol identifiers, address construction and narrow HIP API wrapper; no CPU random-number generation or value-dependent control.
+- `frc_defense/gamepiece_actions.py`: remove the pass `.item()` gate; call named fixed-shape draws and mask all state writes.
+- `frc_defense/fuel_physics_runtime.py`: route ferry and shooter samples through explicit draw-site IDs; preserve shapes, units, geometry, and bounded-index semantics.
+- `frc_defense/tensor_3v3.py`, `frc_defense/tensor_sim.py`, `frc_defense/tensor_defense_reset.py`: initialize and reset per-world RNG identity/cursors with the exact rules above. These paths overlap other accepted owners; do not edit them until those owners approve the exact overlap.
+- `frc_defense/fuel_physics_hip.py`, `frc_defense/csrc/fuel_physics_hip.cpp`, `frc_defense/csrc/fuel_physics_hip_kernel.cu`: expose and execute the specified Philox/address mapping on the explicitly indexed HIP device. No CPU numerical fallback.
+
+Tests in this gamepiece-owned slice are exactly:
+
+- New `tests/test_gamepiece_counter_rng.py`: Philox known-answer vectors, fixed word/float conversion, bounded-index rejection/fail-closed case, deterministic repeat, address/site separation, and world-order/active-mask isolation.
+- New `tests/test_gamepiece_pass_rng_isolation.py`: empty, partial, all-pass, backer-return and mixed-world decisions; no host gate; same world's future address is independent of other worlds' pass masks; inactive world state/cursor unchanged; ferry and score draw sites do not collide.
+- New `tests/test_gamepiece_rng_reset_resume.py`: full reset with/without explicit seed, masked reset isolation, RNG-state tensor snapshot/restore primitives, and deterministic next draws after exact state restoration. This does not test or authorize the trainer checkpoint serializer.
+- Existing regression paths: `tests/test_fuel_physics_integration.py`, `tests/test_tensor_env_active_mask.py`, and `tests/test_tensor_3v3.py`.
+
+Checkpoint/transition/evaluation source ownership is not silently widened here. Before implementation, the PPO/supervisor owner must amend its exact plan to own and allowlist the checkpoint serializer/resumer, V3 row RNG fields, training source/protocol bindings, evaluation manifest and qualification protocol fields. Expected owner paths are `frc_defense/meco_ppo_batch.py`, `frc_defense/meco_track_training.py`, `frc_defense/meco_training_manifest.py`, and `frc_defense/meco_validation_campaign_runner.py`; expected focused tests are `tests/test_meco_five_track_ppo_device.py`, `tests/test_meco_ppo_record_v2.py` (including exact trainer checkpoint resume/rejection), `tests/test_meco_training_manifest.py`, and `tests/test_meco_validation_campaign_runner.py`. This amendment grants no source edit to those paths. If the owner plans do not explicitly accept them and their tests, stop before crossing that ownership boundary.
+
+## Required evidence after gates open
+
+1. Pass 1 review of this exact plan hash checks that no-host predicate removal, v1/v2 separation, address layout, per-world reset isolation, source/test allowlists, cross-owner requirements, and pending runtime gates are complete. Pass 3 independently reviews the exact implementation head and the integrated source head; a plan review is not an implementation pass.
+2. Do not create, run, import, or test this implementation while r4 training owns the GPUs. After the user manually stops r4, independently verify both WX9100 leases are released; do not use P600 or CPU fallback. Run focused tests only on their exact authorized hardware/runtime, and record device identity, source hash, protocol hash, commands, and results.
+3. Run seeded end-to-end simulator scenarios for empty pass, ordinary ferry pass, HUB/backer return, score+pass in one tick, and mixed active/inactive worlds. Repeat each from the same seed/segment and compare device-recorded action, respawn outcome, per-world RNG addresses, and replay bytes. Also perturb one world's pass pattern and verify another world's output at the same address is unchanged. Retain scenario IDs, seeds, source/checkpoint/protocol hashes, device, and replay IDs.
+4. Qualification must use a newly frozen protocol that includes `meco-gamepiece-philox-v2`; no old v1 calibration or r4 result can qualify the changed RNG. Complete required calibration/fairness review over fixed seed sets and confirm unchanged ferry-angle and midfield-target distributions, legal spawn bounds, and cross-world independence before evaluating policy outcomes.
+5. For replay review, follow project `AGENTS.md`: restart dashboard services from the exact reviewed checkout; verify service identity, backend health, endpoints, and frontend asset hashes; create a fresh replay after restart; inspect source/RNG provenance and changed behavior; mark old-source replays outdated. Report scenario, seed, replay ID, device, tests, dashboard currentness, and whether qualification protocol binding passed.
+
+The r4 campaign and all its checkpoints, outputs, and leases remain untouched until manual stop. This plan does not authorize training restart, qualification, promotion, or an uninterrupted campaign transition.
+
+## Stop conditions
+
+Stop if Philox/address math cannot run on the required HIP device; if a branch still reads a device predicate on host; if a world mask changes another world's key/counter/draws; if a v1 checkpoint is accepted into a v2 qualification run without an explicit new segment; if checkpoint resume cannot bind the simulator state to its counters; if the shared V3 row or evaluation manifest cannot carry the versioned identity; if source/test ownership overlaps remain unresolved; or if a changed RNG stream is presented as v1 seeded parity. Fall back only to the explicit legacy v1 nonqualifying path or reject the configuration before state mutation—never to CPU RNG or a host-controlled pass gate.
