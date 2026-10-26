@@ -7,6 +7,9 @@
 **Accepted reconciliation:** `03bd0a7a3ef4ea0d2506ec4f9b031745ba53ada9`  
 **Reconciliation file SHA-256:** `294a02012427c2ceeb638ea0cd337d1fa7908cf47fb9d0f07bef29ed6790510c`  
 **Reconciliation acceptance:** `5cb1a2d525168ff0443089cf329e66c6ecb917b8`  
+**Overall-plan P0a/P0b amendment:** commit `6325920252773cfa05d63167ba3c29a90debdb01`, file SHA-256 `9a12708980529cb03810ad40f43dbfe1e29461485a4f50fd1a7b06c7202dec5a`; Pass 1 ACCEPT record commit `be845d7fb2d2ece861dcd158ac8b8dd89e3dc59d`, file `docs/plans/reviews/meco-five-track-v4-gpu-phase0-amendment-6325920.md`, SHA-256 `5a6e94f978c8a7e18d9623897ceba6f32f5b5eadb0aba6605f21c9d1e941a886`
+**Scoped P0 package plan:** commit `13dbd7f8f953995850e811202f7e9c5264c49dca`, file `docs/plans/meco-v4-p0-phase0-scoped-package-plan-20261026.md`, SHA-256 `09ec722d64d01d99b60cc9ed52e47ce68790e548f66107cc1a19dd9a7a588adf`, Git blob `30df1bbed8657b08c1553db7487e59b8a1a0ad86`; Pass 1 ACCEPT record commit `037f0f9386cc0efadb1fb54efe5f38f097926d0e`, file `docs/plans/reviews/meco-v4-p0-phase0-scoped-package-plan-20261026.md`, SHA-256 `1ee70a6e9d24dc5201da5eec446820167cb8c4d4436fbbe013eb16de66b0280d`
+**Prior P1 Pass 1 review:** REVISE at commit `c92480036ffb41161a444184f0f488059d281452`, file `docs/plans/reviews/meco-five-track-v4-schema-score-artifact-implementation-plan-20261026.md`, SHA-256 `783d630fb33ccfb76cae17063797fb15c4cd80edb66c3220b6ac0354f32cabfc`; finding: final source-bound P0 was a prerequisite to P1.1’s required source discovery, creating circular sequencing.
 **Canonical reconciled profile hash:** `5ec637676c0acf02f9769b1629860122c6c5332914acdcfbb9c04adaafea70e3`  
 **V4 proposal commit / profile digest:** `6b4ce4a939a2cdea375bd4be6879f6f7bc73141b` / `0c5ba39c3a4fa7c9bdf168ccf7c1dc792f4d3e27bd6f532517a967fca4b025b6`
 
@@ -25,8 +28,13 @@ build, use devices, run a simulator, restart a dashboard, publish ABI bytes, or
 start training. It makes no claim that the base source conforms. A distinct
 implementer and independent reviewer must be assigned after Pass 1; they may
 not be the same person or agent. Each review must pin an exact pushed commit
-and file hash. Implementation remains gated on the external G0 release and
-the accepted P0 score-source/rules artifact described below.
+and file hash. This plan follows the accepted overall plan pinned above. The scoped P0
+package plan must receive Pass 1 ACCEPT before P0a work begins; this P1 plan
+and the overall plan must receive Pass 1 ACCEPT before P1 implementation.
+Source discovery, implementation, tests, and simulator regression evidence
+are gated on external G0 release and accepted P0a preregistration, not P0b.
+P0b follows the reviewed P1–P6 source freeze and gates fresh training and P6
+runtime qualification; it does not gate P1 source work or P1 validation.
 
 ## Contract pins
 
@@ -70,35 +78,63 @@ or otherwise touch an active campaign or its dashboard, workers, checkpoints,
 output paths, leases, or devices. Do not infer G0 from elapsed time or from
 absence of a process observed in this planning task.
 
-### P0: source/rules-bound score contract
+### P0a: approved preregistration before source work
 
-The P0 score-source/rules artifact is an upstream dependency and is not
-created, guessed, or approved by this plan. Before implementation, it must be
-immutable, source-bound, independently reviewed, and carry the required human
-decision/approval provenance. Its digest and exact URI/path must be pinned in
-the implementation ledger. It must define, at minimum:
+P0a is an upstream dependency for source discovery and implementation. This
+plan does not create or approve it. Before any source inspection or edit under
+the implementation plan, P0a must be immutable, independently reviewed, and
+carry the required human decision/approval provenance. Its digest and exact
+URI/path must be pinned in the implementation ledger. It freezes the
+source-independent decisions and methodology:
 
-- The exact current score-producing mutation and accepted event boundary for
-  the user-selected `simulated_match_score` estimand: accepted active-HUB FUEL
-  awards only, separate from official match points.
-- The meaning of one score event and `score_units`; any additional score event
-  types, sources, or units are prohibited unless the V4 contract is amended.
-- The physical identity domain: simulator `piece_slot` and its generation
-  lifecycle at scoring, respawn, reuse, full/partial reset, and environment
-  reconstruction. Observation-track handles are a different identity domain.
-- `tick` meaning, `match_elapsed_seconds` source, alliance/robot-slot mapping,
-  event order, episode sequence reset, reset-generation binding, and overflow
-  behavior. The `uint16` sequence bound must be proven from authoritative source
-  or a new profile decision; the cited later recorder limit is not silently
-  assumed to exist in this base checkout.
-- The simulator's authoritative producer and every metric/report consumer,
-  including where event-derived score is accumulated and where it is merely
-  presented. If the artifact disagrees with the accepted event codes or
-  capacity, stop and request reconciliation; do not change codes locally.
+- The accepted `simulated_match_score` definition and scoring-rule boundaries:
+  accepted active-HUB FUEL awards only, separate from official match points.
+- The preregistered meaning of one score event and `score_units`; any additional
+  event type or unit requires an amended V4 contract.
+- The exact scenario and seed partition bytes, calibration sample design,
+  calibration method, metrics, margins, and pass/fail predicates, fixed before
+  inspecting candidate outcomes. P0a records seed IDs/hashes but makes no
+  source or calibration-result claim.
+- The source/rules identity fields P0b must populate: exact source commit and
+  dirty-tree state, source-path/symbol map, source identity digest, P0a and
+  rules artifact hashes, simulator/config/runtime identity, and approval
+  provenance. P0a may declare required fields without guessing their values.
+- Identity-domain constraints: physical simulator piece slot/generation is
+  disjoint from observer-track handles. P0a does not guess how the base
+  allocates piece generations or handles reset/reuse.
 
-No Phase 0 artifact hash, human approval, score rule, or approved seed
-partition is currently supplied by this task. Until P0 is complete, later
-packages may be planned but may not start implementation or qualification.
+No accepted P0a artifact or frozen seed design was supplied by this task. P0a
+must be accepted before P1.1 starts. If P1.1 discovers that the registered
+estimand or event boundary cannot be traced to authoritative source, stop
+score-dependent implementation and return to the P0a owner for reviewed
+amendment; do not reinterpret the score after seeing outcomes.
+
+### P0b: final source-bound calibration after source freeze
+
+P0b is produced only after all P1–P6 source implementation and integration
+are complete, frozen, and independently reviewed, and final source/config/
+runtime identity is known. P1.1’s source map is a required input. P0b fills
+P0a’s source/rules identity fields, runs the preregistered calibration method
+on that frozen source, and emits the immutable Phase 0 artifact and target-
+scoped protocol with exact hashes and required human decision/approval
+provenance. Under the
+accepted overall plan, P6 owns the qualification schema, runner, and associated
+source/tests; P0b owns only the post-freeze calibration operation and generated
+immutable artifacts. P0b does not wait for P6 runtime qualification. P0b may
+not change P0a’s estimand, scenarios, seed partitions, calibration method,
+margins, or pass predicates after observing results. A result that misses a
+preregistered gate blocks
+fresh training or P6 runtime qualification; source/rules changes require a
+new source freeze and P0b artifact. Fresh training and P6 runtime qualification remain
+prohibited until P0b is accepted and bound to the exact implementation source.
+
+The `uint16` episode-sequence bound, event ordering, tick meaning,
+`match_elapsed_seconds`, alliance/robot-slot mapping, physical piece generation
+creation/increment/reset behavior, and authoritative producer/consumer map
+must be established from P1.1 source evidence and attached to P0b. The later
+owner response's recorder/module citation is not assumed to exist in this
+base. If the source map contradicts P0a or the accepted V4 registry/capacity,
+stop and request a P0a/V4 reconciliation before proceeding.
 
 ## Exact base inspection and source-discovery gate
 
@@ -124,12 +160,13 @@ producers or consumers. The accepted Gamepiece/score response cites a
 that path in the pinned base tree, and its cited source-site line numbers do
 not match the score-mutation lines in this base. Do not infer that the named
 module exists, create a replacement for it, or treat the response citation as
-evidence for this checkout. P1.1 must search the pinned tree, imports, package
-metadata, generated/native dependencies, and relevant history, and return an
-exact source map. If that does not locate the authoritative episode event
-source/consumer or resolve the cited source mismatch, stop for a P0/plan
-amendment before implementation. Do not expand the allowlist to an unreviewed
-path.
+evidence for this checkout. After accepted P0a, P1.1 must search the pinned
+tree, imports, package metadata, generated/native dependencies, and relevant
+history, and return an exact source map. That map feeds P0b's final
+source/rules artifact and must close before P0b is accepted. If it does not
+locate the authoritative episode event source/consumer or resolve the cited
+source mismatch, stop for a P0a/plan amendment before score-dependent
+implementation. Do not expand the allowlist to an unreviewed path.
 
 ## Finite package sequence
 
@@ -140,7 +177,9 @@ total stops the sequence pending reconciliation.
 
 ### P1.1 — Read-only source map and interface decision record
 
-**Dependency:** G0 and accepted P0 artifact. No source edits or runtime work.
+**Dependency:** G0 and accepted P0a preregistration. No source edits or
+runtime work. This read-only source map is required input to P0b; it is not
+gated on the final calibrated P0b artifact.
 
 Trace each producer, mutation, reset, and consumer from the base tree. Record
 the exact path/line, device/dtype/shape, source event, physical piece identity,
@@ -152,15 +191,19 @@ decisions from observed source behavior. If the chosen interpretation changes
 any field, type, identity domain, code, capacity, offset, or byte, stop for
 reconciliation.
 
-**Output:** an implementation-ledger entry containing the P0 artifact
+**Output:** an implementation-ledger entry containing the P0a
 identifier/hash, source map, V4 profile hash, exact current base, per-file
 owner, producer/consumer interface, and an explicit resolve/hold decision for
-each open item above. The source map is planning evidence, not a substitute for
-P0.
+each open item above. Deliver the source map and populated source/rules
+identity fields to the P0b owner. The map is an input to the final artifact,
+not itself calibration or P0b approval.
 
 ### P1.2 — V4 typed schema, encoding, digests, and strict reader
 
-**Dependencies:** accepted P1.1 decision record and immutable profile pins.
+**Dependencies:** accepted P0a preregistration, P1.1 decision record, and
+immutable profile pins. P0b is not a P1 implementation or test prerequisite;
+it follows the P1–P6 source freeze and gates fresh training and P6 runtime
+qualification.
 
 Implement the typed field declarations and exact row/batch layout, versioned
 96-byte header, checked offset arithmetic, little-endian field packing,
@@ -181,8 +224,11 @@ it may stage a file write but may not publish a partial bundle.
 
 ### P1.3 — Physical score identity and device-native event staging
 
-**Dependencies:** P1.1 source map, accepted P0 score/rules artifact, P1.2
-schema interfaces.
+**Dependencies:** accepted P0a preregistration, P1.1 source map, and P1.2
+schema interfaces. Do not implement a score-dependent change if observed
+source behavior conflicts with the preregistered rule; return to P0a/V4
+reconciliation first. The final P0b artifact is produced after the resulting
+source is frozen.
 
 At both actual score mutation sites, capture the physical selected
 `piece_slot`, its adopted `piece_generation`, alliance/robot, score time/tick,
@@ -214,8 +260,9 @@ piece identity from aggregate `fuel_scored_event` counters.
 
 Connect the event table to the reconciled transition-row assembly and to the
 source/rules-bound score consumer identified in P1.1. Prove that event count
-and event-derived `simulated_match_score` agree with the accepted P0 rule,
-while route/risk shaping and official-score representations remain separate.
+and event-derived `simulated_match_score` agree with the preregistered P0a
+rule, while route/risk shaping and official-score representations remain
+separate.
 Bind the profile, source, configuration, checkpoint, track, schema/envelope,
 protocol, and payload digest fields exactly as adopted. Use a versioned V4
 manifest/reader contract; the base's schema-version-1 checkpoint or any JSON
@@ -230,16 +277,18 @@ integration at its agreed boundary.
 
 ### P1.5 — Exact-head review, seeded simulator and dashboard evidence
 
-**Dependencies:** P1.1–P1.4 accepted; G0/P0 remain satisfied; current checkout
-integrated from the exact reviewed commits.
+**Dependencies:** P1.1–P1.4 accepted; G0 and accepted P0a remain satisfied;
+current checkout integrated from the exact reviewed commits. This is
+implementation regression evidence, not final P0b calibration or training/
+qualification.
 
 Run only the package-authorized schema/event tests and representative
-end-to-end simulator evaluations. Use the P0-frozen scenario/seed IDs; include
+end-to-end simulator evaluations. Use the P0a-frozen scenario/seed IDs; include
 score-producing scenarios exercising each supported score-capture branch
 without changing the event rule. Inspect the fresh simulator record/replay:
 valid events must tie to the physical piece incarnation and actual accepted
 score mutation, unused rows must remain zero, aggregate output must match the
-P0 estimand, and failure injection must leave no partial score/event/artifact
+P0a estimand, and failure injection must leave no partial score/event/artifact
 commit. Execute numerical simulation and event capture on each assigned WX9100
 under its recorded UUID/runtime. CPU is limited to process supervision,
 configuration, and opaque filesystem/network I/O; CPU simulation, score
@@ -276,7 +325,7 @@ campaign, checkpoint, or data path is authorized by this plan.
 
 `frc_defense/meco_simulated_score_ledger.py` is intentionally not on the
 allowlist: the path is not present in the pinned base checkout. P1.1 must
-establish whether an authoritative source is present elsewhere or whether P0
+establish whether an authoritative source is present elsewhere or whether P0a
 needs a separately approved source decision. If a discovered source requires
 editing an unlisted file, stop and obtain a Pass 1 plan amendment before
 touching it. No native HIP source is currently allowlisted; add one only by a
@@ -301,7 +350,8 @@ Pass 2 must add deterministic fixtures for:
    score mutation; deterministic source-site and slot ordering; no duplicate
    event for one mutation; piece slot/generation preservation before respawn;
    reset/sequence boundaries; invalid/stale physical identities; sequence and
-   capacity exhaustion. Any bound not proven by P0 remains a blocked fixture,
+   capacity exhaustion. Any bound not proven by P1.1 source evidence and
+   attached to P0b remains a blocked fixture,
    not a fabricated expected value.
 4. Fault injection before and during staging, before score-state commit, and
    before artifact rename/publication. Assert the specified no-op state for
@@ -313,8 +363,8 @@ Pass 2 must add deterministic fixtures for:
    fixtures. Any host reference encoder is test-only and may not enter the
    live producer, digest, reader, or decision path.
 
-**Pass 2 ACCEPT evidence must include:** exact P0 artifact URI/hash and approval
-provenance; exact source map; accepted P1.1 decision record; exact base and
+**Pass 2 ACCEPT evidence must include:** exact P0a preregistration URI/hash and
+approval provenance; exact source map; accepted P1.1 decision record; exact base and
 profile hashes; per-package pushed commits and file allowlist; all fixture
 results; GPU UUID/runtime evidence for both WX9100s; no-CPU transfer/sync trace
 for the event-to-artifact path; and exact artifact/manifest hashes. Pass 3 must
@@ -330,12 +380,30 @@ and endpoints were verified. If any required simulator or dashboard gate
 cannot run, mark validation incomplete; a unit/regression pass is not an
 end-to-end pass.
 
+### P0b closure after P1–P6 source freeze
+
+After all P1–P6 source implementation and integration are complete, frozen,
+and independently reviewed, the P0 owner/operator runs the P0a preregistered
+calibration against that frozen source and emits the final source/rules-bound
+P0b artifact. P1.1’s producer/consumer map and exact final source/config/runtime
+identity are required inputs, along with the preregistered scenario/seed and
+calibration outputs and required independent review and human approval
+provenance. P6 owns the qualification schema, runner, and
+source/tests used by later qualification; P0b does not own or edit those
+source files and does not depend on P6 runtime qualification. Pass criteria
+and seed partitions cannot be revised after seeing calibration results. A
+source change after P0b invalidates its source binding and blocks fresh
+training and P6 runtime qualification until the calibration artifact is
+renewed and accepted. P0b is not a prerequisite for P1 implementation, tests,
+or simulator/dashboard regression evidence.
+
 ## Risks and explicit open decisions
 
-- **P0 score/rules dependency:** No source/rules-bound Phase 0 artifact,
-  approval provenance, or frozen seeds were supplied. The score estimand,
-  source boundary, tick/episode sequence semantics, max sequence, and reset
-  behavior remain blocked on that artifact.
+- **P0 sequencing:** No accepted P0a preregistration was supplied. P1 source
+  discovery, implementation, and validation cannot start until P0a and G0 are
+  accepted. P1.1 feeds source identity to P0b. P0b closes after all P1–P6
+  sources are frozen/reviewed and gates fresh training and P6 runtime
+  qualification, not P1 source work or validation.
 - **Source mismatch:** The accepted owner response describes a named recorder
   module and line references that do not match the exact pinned base. P1.1
   must reconcile this against the real base tree and history before capture is
@@ -363,12 +431,17 @@ end-to-end pass.
 
 ## Completion and non-goals
 
-P1 is complete only when the exact reconciled profile is implemented for
-schema, score-event producer and consumer, and bundle/manifest; the P0 source
-contract is independently accepted and pinned; exact-byte, digest, failure,
-and source-identity fixtures pass; required seeded simulator records/replays
-show the changed scoring behavior; both assigned GPUs are verified; and the
-current dashboard backend/frontend pass the freshness and endpoint gate.
+P1 implementation and validation are complete when the exact reconciled
+profile is implemented for schema, score-event producer and consumer, and
+bundle/manifest; exact-byte, digest, failure, and source-identity fixtures
+pass; required seeded simulator records/replays show the changed scoring
+behavior; both assigned GPUs are verified; and the current dashboard
+backend/frontend pass freshness and endpoint checks. These P1 gates depend on
+accepted P0a and G0, not P0b. P1 completion supplies frozen source and the
+source map to P0b. Under the accepted overall plan, P0b closes after all P1–P6
+sources are frozen and reviewed, then gates fresh training and P6 runtime
+qualification. Neither training nor P6 runtime qualification is authorized by
+this P1 plan.
 The P1 package does not qualify A1/A2/A3/C1/C2, authorize continuous training,
 publish V4 as a repository-wide normative ABI, or replace subsequent PPO,
 curriculum, model, GPU-residency, and Stage 1 plans.
