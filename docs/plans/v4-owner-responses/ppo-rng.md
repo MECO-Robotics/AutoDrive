@@ -117,24 +117,40 @@ owner's authority.
 
 ### Philox streams, checkpoint continuation, and digest bytes
 
-Adopt proposal lines 122–134 and 287–296. The row-local interpretation is:
+Adopt proposal lines 122–134 and 287–296 and close the matrix's explicit
+stream key/counter/draw-schedule decision (matrix line 57). The row-local
+interpretation is:
 
 1. The action and permutation streams are independent Philox4x32-10 streams.
-   Their stream codes are distinct and covered by the source/profile identity.
-   `rng_protocol_code=2` continues to identify the separately specified
-   `meco-gamepiece-philox-v2` protocol; it is not the PPO stream algorithm
-   identifier. The action/permutation stream codes and draw-site registry are
-   included in the source digest as V4 requires.
+   Their numeric codes are from a `ppo_stream_code:uint16` registry, with
+   `0=INVALID`, `1=ACTION_CATEGORICAL`, and
+   `2=EPOCH_PERMUTATION`. Draw sites use the separate
+   `ppo_draw_site_code:uint16` registry, with `0=INVALID`,
+   `1=ACTION_CATEGORICAL_WORD`, and `2=PERMUTATION_FISHER_YATES_WORD`.
+   Registry codes are static source identity, not added row fields, so this
+   decision does not change V4's field table or byte layout. The numeric value
+   `2` in this stream namespace has no relationship to
+   `rng_protocol_code=2`, which continues to identify the separately specified
+   `meco-gamepiece-philox-v2` protocol. Gamepiece/physics draws use their own
+   protocol and registry namespace and never use these PPO codes.
 2. Derive each 64-bit key from SHA-256 over the exact V4 domain string
    `meco-ppo-v4-rng-v1`, root seed as uint64 little-endian, track code, and
    that stream's code; interpret the first eight digest bytes as a
    little-endian key. Each stream has its own 128-bit counter. Serialize each
    uint32 word little-endian in the canonical payload; counter advancement is
    the number of consumed 32-bit Philox words, including any rejected words.
-   Overflow fails closed and cannot wrap.
+   Overflow fails closed and cannot wrap. The registries have independent,
+   stable code spaces; zero is invalid, new values take the next unused
+   positive integer, assigned values are never reused, and a code's meaning is
+   immutable within `meco-ppo-v4-rng-v1`. Duplicate numeric assignments or
+   duplicate names in one registry invalidate the source identity. If the
+   derived 64-bit action and permutation keys collide for a run seed, fail
+   closed with RNG mismatch rather than aliasing streams.
 3. The action stream draws once for every valid stochastic policy decision
    with nonempty support, in rollout-row order, before execution outcomes are
-   known. Its categorical transform uses action support's canonical order and
+   known. Each word is tagged with draw site 1. Action draws occur in ascending
+   `rollout_slot`/`decision_ordinal` order. Its categorical transform uses
+   action support's canonical order and
    one uniform draw `u=(word+0.5)/2^32`, computed in float64. Convert finite
    float32 logits to float64, subtract the maximum, exponentiate, and normalize
    with a fixed ascending-index sum over legal support. Select the first legal
@@ -143,11 +159,19 @@ Adopt proposal lines 122–134 and 287–296. The row-local interpretation is:
    This transform, including the math mode, is versioned in the source digest.
    A failed/padded invalid decision consumes no action draw. The permutation
    stream uses descending Fisher–Yates over valid rollout rows in ascending
-   epoch order. For each `i` from `n-1` to `1`, draw uint32 words until
+   `epoch_id` order; within an epoch, rows are listed by ascending
+   `rollout_slot`. For each `i` from `n-1` to `1`, draw uint32 words tagged
+   with draw site 2 until
    `word < floor(2^32/(i+1))*(i+1)`, then set `j=word mod (i+1)` and swap
    positions `i,j`; all rejected words advance the counter. Critic-only
    execution-failure rows remain in the permutation because they have valid
-   transitions. Padded rows are excluded.
+   transitions. Padded rows are excluded. There are no other PPO draw sites in
+   V1; deterministic bootstrap/inference and model initialization do not
+   consume these streams. A changed draw site, code meaning, or invocation
+   order requires a new PPO RNG domain/version and source identity; checkpoints
+   with a different version reject resume. The distinct registries and their
+   exact code/name mappings are included in the source digest, as required by
+   V4 lines 125–134 and 287–296.
 4. The derived keys and counters are continuous for a run across episode and
    chunk resets; resets do not reseed either PPO stream. Fresh runs start both
    counters at zero. Checkpoints persist root seed, track/stream codes, exact
