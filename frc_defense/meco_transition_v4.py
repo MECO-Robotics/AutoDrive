@@ -1,8 +1,9 @@
-"""Static V4 transition and bundle schema declarations.
+"""V4 schema declarations and the standalone transition-row-block codec.
 
-This file is a schema registry, not a serializer or reader. Dynamic values,
-validation, digests, and opaque bundle bytes must be produced and checked on
-the assigned device. Host code may persist the resulting bytes unchanged.
+The codec covers only the fixed 32-row transition field block. It does not
+assemble or parse a complete bundle, inspect event semantics, or compute a
+digest. All tensor data transformations remain on the tensor's CUDA/HIP
+device; callers must keep the returned byte block device-resident.
 """
 
 ABI_NAME = "FiveTrackPpoTransitionV4"
@@ -220,3 +221,144 @@ TRANSITION_FIELD_GROUPS = (
     ("provenance_replay", 102, 110),
     ("macro_trace", 110, 120),
 )
+
+
+_TORCH_DTYPES = {
+    "bool": "bool",
+    "float32": "float32",
+    "float64": "float64",
+    "int8": "int8",
+    "int64": "int64",
+    "uint8": "uint8",
+    "uint16": "uint16",
+    "uint32": "uint32",
+    "uint64": "uint64",
+}
+
+_SCALAR_BYTES = {
+    "bool": 1,
+    "float32": 4,
+    "float64": 8,
+    "int8": 1,
+    "int64": 8,
+    "uint8": 1,
+    "uint16": 2,
+    "uint32": 4,
+    "uint64": 8,
+}
+
+
+def _expected_field_shape(shape):
+    return (ROLLOUT_ROWS, *shape)
+
+
+def _field_byte_count(scalar_type, shape):
+    count = 1
+    for axis in _expected_field_shape(shape):
+        count *= axis
+    return count * _SCALAR_BYTES[scalar_type]
+
+
+def _require_device_tensor(tensor, *, name):
+    import torch
+
+    if not isinstance(tensor, torch.Tensor):
+        raise TypeError(f"{name} must be a torch.Tensor")
+    if tensor.device.type != "cuda":
+        raise ValueError(f"{name} must already reside on a CUDA/HIP device")
+
+
+def pack_transition_rows_device(fields):
+    """Pack the 32 transition rows into one field-major uint8 device block.
+
+    `fields` is a sequence with one tensor for each entry in
+    `TRANSITION_FIELDS`, in declaration order. A sequence is required because
+    the accepted schema intentionally repeats names in different groups. Each
+    tensor shape is `(ROLLOUT_ROWS, *declared_shape)`. This operation preserves
+    each field's raw bool and IEEE-754 bit patterns; it does not validate V4
+    mask/finite-value semantics.
+    """
+    import sys
+    import torch
+
+    if sys.byteorder != "little":
+        raise RuntimeError("V4 transition rows require a little-endian host/device")
+    if len(fields) != len(TRANSITION_FIELDS):
+        raise ValueError(
+            f"expected {len(TRANSITION_FIELDS)} ordered field tensors; got {len(fields)}"
+        )
+
+    device = None
+    byte_columns = []
+    total_bytes = 0
+    for index, ((name, scalar_type, shape), tensor) in enumerate(
+            zip(TRANSITION_FIELDS, fields)):
+        _require_device_tensor(tensor, name=f"field[{index}] {name}")
+        if device is None:
+            device = tensor.device
+        elif tensor.device != device:
+            raise ValueError("all transition fields must reside on the same device")
+        expected_shape = _expected_field_shape(shape)
+        if tuple(tensor.shape) != expected_shape:
+            raise ValueError(
+                f"field[{index}] {name} shape must be {expected_shape}; "
+                f"got {tuple(tensor.shape)}"
+            )
+        expected_dtype = getattr(torch, _TORCH_DTYPES[scalar_type])
+        if tensor.dtype != expected_dtype:
+            raise ValueError(
+                f"field[{index}] {name} dtype must be {expected_dtype}; got {tensor.dtype}"
+            )
+
+        field_bytes = tensor.contiguous().view(torch.uint8).reshape(-1)
+        byte_columns.append(field_bytes)
+        total_bytes += _field_byte_count(scalar_type, shape)
+
+    if total_bytes != TRANSITION_ROWS_BYTES:
+        raise RuntimeError(
+            f"declared transition block is {total_bytes} bytes, "
+            f"expected {TRANSITION_ROWS_BYTES}"
+        )
+    packed = torch.cat(byte_columns, dim=0).contiguous()
+    if packed.dtype != torch.uint8 or packed.numel() != TRANSITION_ROWS_BYTES:
+        raise RuntimeError("packed transition block has an invalid device byte layout")
+    return packed
+
+
+def unpack_transition_rows_device(byte_block):
+    """Decode one exact transition-row block into an ordered tuple of tensors.
+
+    `byte_block` must be a one-dimensional uint8 tensor on the same CUDA/HIP
+    device that will consume the decoded fields. Each returned tensor matches
+    the corresponding entry in `TRANSITION_FIELDS`; duplicate schema names
+    remain distinct tuple positions. No header, identity prefix, event table,
+    payload digest, or host-side numeric conversion is involved.
+    """
+    import torch
+
+    _require_device_tensor(byte_block, name="byte_block")
+    if byte_block.dtype != torch.uint8:
+        raise ValueError("byte_block dtype must be torch.uint8")
+    if tuple(byte_block.shape) != (TRANSITION_ROWS_BYTES,):
+        raise ValueError(
+            f"byte_block shape must be ({TRANSITION_ROWS_BYTES},); "
+            f"got {tuple(byte_block.shape)}"
+        )
+
+    decoded = []
+    offset = 0
+    for index, (name, scalar_type, shape) in enumerate(TRANSITION_FIELDS):
+        byte_count = _field_byte_count(scalar_type, shape)
+        # Clone each packed column to device storage with offset zero before
+        # dtype reinterpretation; packed fields have no alignment padding.
+        field_bytes = byte_block.narrow(0, offset, byte_count).clone()
+        dtype = getattr(torch, _TORCH_DTYPES[scalar_type])
+        values = field_bytes.view(dtype).reshape(_expected_field_shape(shape))
+        decoded.append(values)
+        offset += byte_count
+
+    if offset != TRANSITION_ROWS_BYTES:
+        raise RuntimeError(
+            f"decoded {offset} transition bytes, expected {TRANSITION_ROWS_BYTES}"
+        )
+    return tuple(decoded)
