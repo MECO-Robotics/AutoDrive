@@ -166,63 +166,13 @@ class FuelPhysics:
         free = torch.as_tensor(free, device=self.device, dtype=torch.bool)
         if selected.shape != (self.n, self.p) or free.shape != selected.shape:
             raise ValueError("selected and free masks must have shape [world,piece]")
-        # Stream capture cannot record data-dependent compaction. Use the
-        # fixed-shape masked formulation only while capturing a simulator step.
-        if (self.device.type == "cuda" and
-                torch.cuda.is_current_stream_capturing()):
-            self._separate_spawned_dense(selected, free)
-            return
-        i, j = torch.triu_indices(self.p, self.p, offset=1, device=self.device)
-        pair_selected = selected[:, i] | selected[:, j]
-        valid = free[:, i] & free[:, j] & pair_selected
-        delta = self.pos[:, i, :2] - self.pos[:, j, :2]
-        distance = delta.norm(dim=-1)
-        contact = valid & (distance < 2*self.config.radius)
-        world, row = contact.nonzero(as_tuple=True)
-        if not world.numel():
-            return
-        a, b = i[row], j[row]
-        delta = delta[world, row]
-        distance = distance[world, row]
-        normal = delta / distance.clamp_min(1e-8)[:, None]
-        fallback = torch.zeros_like(normal); fallback[:, 0] = 1.
-        normal = torch.where((distance < 1e-8)[:, None], fallback, normal)
-        penetration = 2*self.config.radius-distance
-        # Apply only a small fraction of each overlap, then cap the combined
-        # displacement per ball. Dense contact counts cannot stack into a kick.
-        correction = (penetration*.10).clamp_max(.005)
-        displacement = correction[:, None]*normal
-        flat_delta = torch.zeros((self.n*self.p, 2), device=self.device,
-                                 dtype=self.pos.dtype)
-        flat_delta.index_add_(0, world*self.p+a, displacement)
-        flat_delta.index_add_(0, world*self.p+b, -displacement)
-        flat_delta = flat_delta.reshape(self.n, self.p, 2)
-        magnitude = flat_delta.norm(dim=-1, keepdim=True)
-        flat_delta *= (.015/magnitude.clamp_min(.015))
-        self.pos[..., :2].add_(flat_delta)
-        self.piece_pos.add_(flat_delta)
-        self._last_xy.copy_(self.piece_pos)
-        affected = flat_delta.norm(dim=-1) > 0
-        self.sleeping &= ~affected
-        self.sleep_clock.masked_fill_(affected, 0.)
-        # Ferry placement can start with a small geometric overlap. Treat
-        # that as a soft landing: absorb most of the carried ball's launch
-        # speed before the ordinary contact solver takes over.
-        spawned_world, spawned_piece = selected.nonzero(as_tuple=True)
-        touching = (free[spawned_world] &
-                    (torch.arange(self.p, device=self.device)[None] !=
-                     spawned_piece[:, None]) &
-                    ((self.pos[spawned_world, spawned_piece, None, :2] -
-                      self.pos[spawned_world, :, :2]).norm(dim=-1) <
-                     2*self.config.radius)).any(-1)
-        self.vel[spawned_world[touching], spawned_piece[touching], :2] *= .2
-        self.piece_vel[spawned_world[touching], spawned_piece[touching]] = \
-            self.vel[spawned_world[touching], spawned_piece[touching], :2]
-        self._last_vxy[spawned_world[touching], spawned_piece[touching]] = \
-            self.piece_vel[spawned_world[touching], spawned_piece[touching]]
+        # Keep spawn contact handling fixed-shape in eager execution as well
+        # as graph capture. Device-selected contacts must not determine a host
+        # branch or an intermediate tensor shape.
+        self._separate_spawned_fixed_shape(selected, free)
 
-    def _separate_spawned_dense(self, selected, free):
-        """Fixed-shape equivalent of ``separate_spawned`` for graph capture."""
+    def _separate_spawned_fixed_shape(self, selected, free):
+        """Separate spawned contacts without data-dependent tensor shapes."""
         i, j = torch.triu_indices(self.p, self.p, offset=1, device=self.device)
         pair_selected = selected[:, i] | selected[:, j]
         valid = free[:, i] & free[:, j] & pair_selected
