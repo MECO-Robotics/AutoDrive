@@ -39,6 +39,11 @@ def _zero_fields(device):
 def test_transition_row_block_field_major_axis_order_and_raw_round_trip():
     device = torch.device("cuda")
     fields = _zero_fields(device)
+    for index, tensor in enumerate(fields):
+        if tensor.dtype == torch.bool:
+            tensor.reshape(-1)[0] = True
+        else:
+            tensor.reshape(-1)[0] = index + 1
 
     fields[0] = torch.arange(ROLLOUT_ROWS, dtype=torch.int32, device=device).to(torch.uint16)
     fields[1] = torch.arange(ROLLOUT_ROWS, dtype=torch.uint8, device=device)
@@ -60,6 +65,12 @@ def test_transition_row_block_field_major_axis_order_and_raw_round_trip():
     assert packed.device == device
     assert packed.dtype == torch.uint8
     assert tuple(packed.shape) == (TRANSITION_ROWS_BYTES,)
+
+    expected_block = torch.cat([
+        tensor.contiguous().view(torch.uint8).reshape(-1)
+        for tensor in fields
+    ])
+    assert torch.equal(packed, expected_block)
 
     first_field_bytes = fields[0].contiguous().view(torch.uint8).reshape(-1)
     second_field_bytes = fields[1].contiguous().view(torch.uint8).reshape(-1)
