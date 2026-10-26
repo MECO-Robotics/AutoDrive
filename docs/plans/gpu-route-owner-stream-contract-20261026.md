@@ -3,7 +3,7 @@
 **Role:** Route-owner planning proposal; planning-only.
 **Status:** Proposed for Plan C, route, observation/native, PPO, and shared-ABI owner decisions. No source implementation or schema/layout approval is implied.
 **Planning base:** `origin/main` `e37b2f30b6bc51b74dd72bf039e94a174ec51bf2`.
-**Accepted Plan C/PPO capacity reconciliation:** artifact SHA-256 `ad3b9f69fb5ade7ebe0844be2a3b3105ffcebcd7f708969631efc9f8133e1924`.
+**Proposed Plan C/PPO capacity reconciliation input (planning-only):** artifact SHA-256 `ad3b9f69fb5ade7ebe0844be2a3b3105ffcebcd7f708969631efc9f8133e1924`.
 **Accepted route-plan authority:** `docs/plans/gpu-resident-route-decision-slice-20261025.md`, accepted amendment commit `8567fd92d4dc9e214e8502f2249bb02203ac8c03`, artifact SHA-256 `ac5847d65de2af5ccb17d6a1bc109dceefeab71c5d707253980570020c1e885a`.
 **Related accepted K/K+1 authority:** `gpu-plan-c-k-capped-model-view-contract-20261026-amendment.md`, accepted artifact SHA-256 `6d9c0e6320acd503c8595fa619e8beeba24af88f36e49337d7325331a899ff0b`.
 
@@ -13,7 +13,7 @@ Adopt a route-owner contract that keeps the accepted 64-query call bound, makes 
 
 ## Source-grounded extents and existing behavior
 
-The reconciliation amendment distinguishes:
+The proposed reconciliation input distinguishes:
 
 - `G_policy = 33 + E` source-global policy rows: 8 base, E sensed-target, 24 approach-offset, and one continuation row; source evidence bounds `E ≤ 600`, hence `G_policy ≤ 633`.
 - `Q_total = G_policy + 18(4 + E) = 105 + 19E` route queries: policy queries first, then 18 oracle variants for each of 4 base plus E sensed targets. At `E=600`, this is 11,505 queries.
@@ -84,7 +84,7 @@ Propose a device-side ordered streaming digest state with constant-size state be
 2. **Observation/native owner:** define stable target-slot identity and generation/reuse semantics, widths, invalid sentinel, and whether canonical target ordering uses slot order or another deterministic key. The current track-index sort is not enough to settle this.
 3. **PPO/shared ABI owners:** specify which oracle result fields must survive the chunk (summary-only, per-query scalar receipt, or full rows/path), the per-snapshot/device capacity and overflow behavior, policy route path retention, exact digest/receipt field layout, and selected-row-to-route-result binding in V3. Confirm `E≤600` is a frozen production profile or supply the actual configured bound.
 4. **Curriculum/evaluation owner:** define the intended recall/coverage metric, matching relation between selectable policy candidates and expanded oracle variants, and empty/invalid reference behavior. Otherwise keep the value as descriptive counts/cost summaries and do not claim recall.
-5. **Cross-owner Pass 1 reviewer:** recheck the exact planning base, accepted route and reconciliation artifacts, source citations and formulas; verify that the proposal does not weaken the <=64 route ABI or make oracle rows selectable. Implementation remains unauthorized until decisions, shared ABI changes, and exact-head approvals are complete.
+5. **Cross-owner Pass 1 reviewer:** recheck the exact planning base, accepted route artifact and proposed reconciliation input, source citations and formulas; verify that the proposal does not weaken the <=64 route ABI or make oracle rows selectable. Implementation remains unauthorized until decisions, shared ABI changes, and exact-head approvals are complete.
 
 These decisions cannot be inferred from existing `RouteQuery`'s candidate string, robot `world`/`slot`, the device track-index sort, current route-cost averages, or the 64-query call helper. In particular, the source does not settle target generations, oracle path retention, true recall semantics, fixed production E profile, or digest encoding.
 
