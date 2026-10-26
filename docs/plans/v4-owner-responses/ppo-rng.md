@@ -4,7 +4,7 @@
 **Delegated agent/task identity:** `/root/ppo_rng_owner`  
 **Response author:** delegated technical owner agent  
 **Response date:** 2026-10-26  
-**Disposition:** **PENDING**
+**Disposition:** **ADOPT** the exact pinned V4 proposal for the PPO/RNG owner row, with the row-local decisions below resolving its underspecified mechanics. These are delegated technical decisions, not human approval.
 
 ## Pinned artifacts
 
@@ -14,111 +14,195 @@
   `ee234b2c5162038e6fcfff6d9551d80f443f6d82`, SHA-256
   `9888eb2a8d5e63b04aa328dca222dd08520a709e2ee78684f9d2dc07aafede53`.
 
-## Evidence and decision
+## Source facts
 
-The V4 row inventory separates `row_valid`, `actor_valid`, and `critic_valid`
-and records terminal/truncation/bootstrap flags (proposal §“Exact dynamic row
-field inventory”, lines 147–160). Its lifecycle recommendation says padded
-rows have no GAE, replay, RNG, optimizer, or diagnostic effect; terminal and
-execution-failure rows do not bootstrap; truncation bootstraps only with a
-valid next observation (lines 281–286). The field inventory provides a useful
-starting point, but it does not completely define how actor/critic masks
-interact with a terminal or truncated transition, a missing next observation,
-or an invalid rollout slot. The status field also has no explicit row-level
-status code for each of those combinations.
+The trainer currently reduces environment end and timeout to one `done`
+(`frc_defense/meco_track_training.py:2698-2703`). `_gae` uses that same mask
+for the value delta and recurrent advantage (`2031-2040`), and the caller
+supplies a zero bootstrap when either condition ends the last row
+(`2749-2751`). Thus current training does not implement V4's distinct
+truncation bootstrap.
 
-Current training stores a single `done` value as `ended or timeout`
-(`frc_defense/meco_track_training.py:2698-2703`), and `_gae` uses that one mask
-for both value bootstrap and advantage recurrence
-(`frc_defense/meco_track_training.py:2031-2040`). The caller supplies zero
-bootstrap for either terminal or truncation (`frc_defense/meco_track_training.py:2749-2751`).
-Thus current behavior does not implement V4's proposed truncation bootstrap;
-the proposal needs an explicit transition and recurrence rule before its
-semantics can be adopted as a compatible successor contract.
+The PPO rollout stores categorical `action_index` and its sampled `logprob`
+(`frc_defense/meco_track_training.py:2691-2703`). Replay and PPO loss evaluate
+that same index against frozen/recomputed logits
+(`2104-2115,2128-2149,2187-2195`). The semantic high-level action is stored
+separately as `executed_high_level_action`; per-tick simulator outcomes are
+recorded in `executed_action_trace` (`1961-1969,1997-2000,2691-2703`). Execution
+failure excludes the row from actor loss but retains critic learning
+(`2156-2162,2173-2186`). Candidate sampling asserts finite legal support and
+returns the selected category's log probability from the same distribution
+(`frc_defense/meco_tracks.py:1681-1689`). The existing masked-sampling and
+replay tests encode matching action/log-probability and exact replay
+expectations (`tests/test_meco_tracks.py:275-290`,
+`tests/test_meco_c1_ppo_replay.py:41-50,54-89`). These citations describe
+source/test contracts; no tests were run for this response.
 
-The current PPO path records the sampled policy index and its old log
-probability, then replays the probability at that same `row["action"]`
-(`frc_defense/meco_track_training.py:2104-2115,2128-2149,2187-2195`). Separately,
-macro execution records the per-tick `env.last_actions` trace
-(`frc_defense/meco_track_training.py:1961-1969,1997-2000`) and the rollout
-stores `executed_high_level_action` beside the policy `action`
-(`frc_defense/meco_track_training.py:2691-2703`). This supports retaining
-selected and executed actions as separate facts. However, V4 does not specify
-the mapping when a macro has multiple executed actions, is remasked, preempted,
-or fails before a tick, nor how `command_valid`, actor validity, and old
-log-probability validity combine in those cases (proposal lines 147–160 and
-297–301). The actor-skipped execution-failure path is currently critic-only
-(`frc_defense/meco_track_training.py:2156-2162,2173-2186`); the V4 actor/critic
-mask truth table should explicitly preserve or intentionally revise that rule.
+Current action sampling and epoch permutations use implicit PyTorch RNG state
+(`frc_defense/meco_tracks.py:1681-1689`,
+`frc_defense/meco_track_training.py:2164-2167`). Training seeds Torch and
+Python globally (`2255-2260`), checkpoint schema v1 stores Torch CPU, Python,
+and optional device RNG state (`2815-2832`), and resume restores those states
+(`2322-2325,2354-2365`). These facts establish the legacy continuation
+mechanism, not V4 Philox behavior or bit-identical cross-version continuation.
 
-**Update atomicity decision:** for this owner row, I adopt the V4 failure
-semantics as a technical requirement: any listed validation, digest, capacity,
-or schema failure must leave the complete PPO decision/update as a no-op, with
-no partial policy/value parameters, optimizer moments or step counters, or RNG
-state/counters committed. If failure can occur after any of those states have
-advanced, the implementation must stage the state and commit it only after the
-whole update succeeds, or restore every affected state before reporting
-failure. V4 explicitly requires the complete decision/update to be a no-op on
-those failures (proposal lines 240–249), and says invalid padded rows have no
-optimizer-state/step or RNG effect (lines 281–283). Current `_ppo_update`
-performs `optimizer.step()` inside the per-row loop
-(`frc_defense/meco_track_training.py:2164-2200`); sampling/permutation consume
-the implicit Torch RNG (`frc_defense/meco_tracks.py:1681-1689`,
-`frc_defense/meco_track_training.py:2164-2167`). The present path therefore
-does not demonstrate rollback or transactional commit if a later row fails.
-The requirement is decided; the exact staged-state/rollback mechanism and
-failure boundary still need to be specified and reviewed in an implementation
-plan. This does not change the overall **PENDING** disposition.
+## Adopted row decisions
 
-V4 proposes Philox4x32-10, SHA-256 key derivation, 32-bit-word counter
-advancement, separate action/permutation streams, counter overflow failure,
-and checkpoint continuation (proposal lines 287–293; the matrix requests
-stream key/counter/draw schedule and checkpoint state at matrix line 57).
-Current action sampling calls `Categorical.sample()` without a dedicated
-generator (`frc_defense/meco_tracks.py:1681-1689`), and PPO shuffling calls
-`torch.randperm` without one (`frc_defense/meco_track_training.py:2164-2167`).
-Initialization seeds Torch and Python globally (`frc_defense/meco_track_training.py:2255-2260`);
-resume restores Torch CPU, Python, and device RNG state
-(`frc_defense/meco_track_training.py:2322-2325,2354-2365`), and checkpoint
-serialization writes these states (`frc_defense/meco_track_training.py:2815-2832`).
-The V4 proposal is a future replacement, not a description of this source.
+### Validity, bootstrap, and action linkage
 
-The proposal's row table records per-stream `key:uint32[2]`,
-`counter_before:uint32[4]`, and `counter_after:uint32[4]` for two streams
-(lines 157–159), while its bundle prefix stores a root seed, segment ID, world
-UID, and one `rng_protocol_code`; the prose derives each key from root seed,
-track code, and stream code (lines 122–134, 287–293). It does not say whether
-row keys repeat the bundle key or identify derived keys, how each row's
-counters relate to the batch stream, or how segment IDs advance and restore
-across chunk resets, episode resets, and resumed checkpoints. It also says
-`rng_protocol_code=2` binds `meco-gamepiece-philox-v2` for the bundle prefix
-(lines 125–134), without defining whether that code covers the distinct PPO
-action and permutation Philox protocol. These are contract ambiguities, not
-merely differences from current implementation.
+Adopt V4's distinct `row_valid`, `actor_valid`, and `critic_valid` masks and
+the lifecycle rule in proposal lines 281–286. For this row, the mask truth
+table is:
 
-V4 requires canonical field-order packed-byte SHA-256 digests and device-made
-digest bytes (proposal lines 294–296), but does not identify the exact digest
-domain and per-digest byte spans for the PPO row, action/log-probability pair,
-RNG state, and full batch. The generic envelope digest rules do not settle
-which dynamic PPO fields are covered by each `input_digest`,
-`transition_digest`, or `support_digest` column. Without those boundaries a
-producer and validator could both follow the text and compute different yet
-internally consistent digests.
+| Condition | `row_valid` | `actor_valid` | `critic_valid` | Bootstrap |
+|---|---:|---:|---:|---|
+| Padded/unused slot | 0 | 0 | 0 | none; no GAE, replay, RNG, optimizer, or diagnostics effect |
+| Valid transition with legal selected policy action and valid old log probability | 1 | 1 | 1 when observation/reward/value are valid | according to terminal/truncation below |
+| Valid transition with execution failure/remask/preemption/fallback | 1 | 0 | 1 when observation/reward/value are valid | none |
+| True terminal | 1 | as otherwise valid | as otherwise valid | none; terminal takes precedence if both terminal and truncated bits are set |
+| Truncation without true terminal | 1 | as otherwise valid | as otherwise valid | bootstrap only from a valid final next observation |
+| Nonterminal continuation | 1 | as otherwise valid | as otherwise valid | valid next value required at the rollout boundary |
+| Empty/invalid policy support or invalid required row data | fail the complete decision/update | 0 | 0 | none; no fallback action may be credited as a sampled action |
 
-I therefore leave this row **PENDING**. To resolve it, publish an immutable
-successor or addendum that pins: (1) a complete validity/status truth table and
-GAE equations for terminal, truncation, execution failure, and invalid/padded
-rows; (2) selected action, each executed tick action, and old-log-probability
-validity/linkage for remask, preemption, and zero-tick failure; (3) exact
-Philox stream key/counter ownership, draw schedule and word consumption,
-counter/segment advancement, reset behavior, and checkpoint resume state; (4)
-separate protocol codes or an explicit shared registry for gamepiece versus
-PPO RNG; and (5) canonical digest domains and byte spans for all PPO/RNG
-identity fields. The atomicity outcome above is fixed for this row, but the
-successor/addendum must specify the staged commit or complete rollback boundary
-for parameters, optimizer state, and RNG state/counters. Then reconcile the
-affected row and dependent artifact/profile sizes before adoption.
+`transition_finished` is true for terminal or truncated transitions. GAE may
+use the final observation value to compute the truncation row's delta, but
+must stop its cross-row recurrence at either terminal or truncation so the
+next episode cannot leak backward across a reset. Terminal wins if both flags
+are true. A failed execution has no bootstrap even when the simulator episode
+continues; its valid reward/value data may still train the critic only, as the
+current source does. Invalid or nonfinite observation, reward, or value makes
+the row invalid rather than being converted to zero.
 
-This response records only the delegated `ppo_rng_owner` technical decision.
-It is not human maintainer approval, cross-owner adoption, shared ABI
-publication, or implementation authorization.
+The sampled `policy_local_index`/`source_global_row` and its exact sampled old
+log probability remain paired. `action_id`/semantic selected command and the
+fixed per-tick `executed_action` trace are separate fields. Native remasking,
+fallback, preemption, target loss, or zero executed ticks never changes the
+sampled index or recomputes its old log probability. Such execution failure
+sets actor validity false; the critic may consume the transition if its
+observation, reward, and value are valid. This preserves the current actor
+skip/critic-only behavior while retaining an auditable sampled-versus-executed
+record. The map from each family-local index to the command identity remains
+owned by Plan A/Plan C and the shared-command producer; this response does not
+change their ordering or IDs.
+
+### Update atomicity and failures
+
+Adopt the V4 whole-decision/update no-op rule for every validation, digest,
+capacity, schema, replay, or RNG failure (proposal lines 240–249, 281–296).
+No failed attempt may commit partial model parameters, optimizer moments or
+step counters, or action/permutation RNG counters. The implementation must
+validate the entire fixed batch before mutation and stage the update, or retain
+enough state to restore all affected model, optimizer, and RNG state before
+reporting failure. The PPO transaction's commit boundary includes all epochs
+and rows of one update; a later-row failure cannot leave earlier-row Adam
+steps committed. For a full rollout/update transaction, snapshot both stream
+counters before the first decision in that batch and commit their new values
+with the optimizer/model update only after the complete batch succeeds. A
+failure after simulator execution stops the worker; the physical world is not
+claimed to roll back. Recovery resumes from the last committed checkpoint and
+reconstructs the environment from its frozen task seed instead of retrying the
+already executed transition. This adopts the required outcome, not a specific
+implementation.
+
+Current `_ppo_update` performs `optimizer.step()` in its row loop
+(`frc_defense/meco_track_training.py:2164-2200`) after replay validation
+(`2076-2150`); it does not establish rollback for a failure after an earlier
+step. V4's update transaction is therefore a future contract requirement, not
+a claim about current behavior. Simulator physics cannot generally be rolled
+back after a tick. Any simulator/native failure that must prevent a command or
+score-event mutation must be preflighted or staged by the command, observation,
+and gamepiece owners before mutation; PPO failure handling cannot retroactively
+undo the external world. This is a cross-row boundary, not an expansion of this
+owner's authority.
+
+### Philox streams, checkpoint continuation, and digest bytes
+
+Adopt proposal lines 122–134 and 287–296. The row-local interpretation is:
+
+1. The action and permutation streams are independent Philox4x32-10 streams.
+   Their stream codes are distinct and covered by the source/profile identity.
+   `rng_protocol_code=2` continues to identify the separately specified
+   `meco-gamepiece-philox-v2` protocol; it is not the PPO stream algorithm
+   identifier. The action/permutation stream codes and draw-site registry are
+   included in the source digest as V4 requires.
+2. Derive each 64-bit key from SHA-256 over the exact V4 domain string
+   `meco-ppo-v4-rng-v1`, root seed as uint64 little-endian, track code, and
+   that stream's code; interpret the first eight digest bytes as a
+   little-endian key. Each stream has its own 128-bit counter. Serialize each
+   uint32 word little-endian in the canonical payload; counter advancement is
+   the number of consumed 32-bit Philox words, including any rejected words.
+   Overflow fails closed and cannot wrap.
+3. The action stream draws once for every valid stochastic policy decision
+   with nonempty support, in rollout-row order, before execution outcomes are
+   known. Its categorical transform uses action support's canonical order and
+   one uniform draw `u=(word+0.5)/2^32`, computed in float64. Convert finite
+   float32 logits to float64, subtract the maximum, exponentiate, and normalize
+   with a fixed ascending-index sum over legal support. Select the first legal
+   category whose cumulative normalized probability is strictly greater than
+   `u`; the final legal category absorbs any cumulative rounding remainder.
+   This transform, including the math mode, is versioned in the source digest.
+   A failed/padded invalid decision consumes no action draw. The permutation
+   stream uses descending Fisher–Yates over valid rollout rows in ascending
+   epoch order. For each `i` from `n-1` to `1`, draw uint32 words until
+   `word < floor(2^32/(i+1))*(i+1)`, then set `j=word mod (i+1)` and swap
+   positions `i,j`; all rejected words advance the counter. Critic-only
+   execution-failure rows remain in the permutation because they have valid
+   transitions. Padded rows are excluded.
+4. The derived keys and counters are continuous for a run across episode and
+   chunk resets; resets do not reseed either PPO stream. Fresh runs start both
+   counters at zero. Checkpoints persist root seed, track/stream codes, exact
+   counters, protocol/source/profile identity, and optimizer/model state as
+   one continuation point. Resume restores counters before any stochastic PPO
+   draw and rejects absent, malformed, overflowed, or incompatible RNG state;
+   it never silently reseeds or falls back to CPU/PyTorch global RNG. A saved
+   state after a failed update is the pre-rollout transaction state, per
+   atomicity above. Bit-exact continuation is required only for the same pinned
+   source, profile, backend, device identity, and checkpoint state; a different
+   identity fails compatibility checks instead of claiming cross-device bit
+   identity.
+5. For `input_digest`, compute SHA-256 over ASCII tag
+   `MECO4V4/PPO_INPUT\0`, then exact canonical packed bytes for the profile,
+   source, config, and checkpoint digests; track code and code registry;
+   `row_valid`, `actor_valid`, `critic_valid`, `command_valid`, and reset mask;
+   observation and recurrent-before fields; and the applicable immutable
+   policy-support/candidate identity digest. `support_digest` remains over the
+   exact family-specific support/candidate content and ordering under the
+   Plan A/Plan C owner's adopted contract, and includes the V4 profile digest,
+   row masks, and applicable code registries. For `transition_digest`, compute
+   SHA-256 over ASCII tag `MECO4V4/PPO_TRANSITION\0`, then `input_digest`,
+   canonical row identity/generation and rollout/update/epoch/sample-order
+   fields; selected policy index and command identity; exact old
+   log-probability, entropy, reward, value, old-value, return, and advantage
+   bytes; terminal/truncation/bootstrap, actor/critic/command/transition
+   validity fields; fixed macro trace; recurrent-after state; and both
+   streams' keys and before/after counters. Integer and float fields use V4
+   little-endian encodings, bools are one byte 0/1, and array order is the
+   field-table order; no JSON or host re-encoding participates. Each of the
+   three row digests includes the profile digest, row masks, and applicable
+   code registries. Hashes are computed on device. The bundle payload digest
+   covers the exact full payload bytes. Host persistence copies opaque bytes
+   only.
+
+The current checkpoint's schema v1 Torch/Python RNG fields
+(`frc_defense/meco_track_training.py:2322-2365,2815-2832`) are not a compatible
+substitute for this V4 state. Artifact/manifest must bind the new RNG protocol
+and continuation fields to the checkpoint version; changing them invalidates
+resume compatibility. The exact row layout and canonical digest definitions
+must be reflected in the reconciled ABI's byte totals and the artifact owner
+must include the corresponding checkpoint/profile provenance. These are
+cross-row consequences of this adoption, not decisions for the artifact owner.
+
+## Scope and remaining dependencies
+
+This response adopts the exact V4 SHA for the PPO/RNG row, including the
+row-local semantics above. The current trainer does not yet implement these
+requirements; adoption is not implementation evidence. Plan A and Plan C
+owners retain their support ordering and source-row identity decisions; the
+environment/profile owner retains seed/profile identity; the artifact owner
+retains checkpoint schema/provenance and byte envelope; the observation/native
+owner retains command preflight and external-state mutation; gamepiece/score
+retains score-event staging; evaluation/curriculum retains the product
+estimand. Those dependencies do not qualify another row or imply any owner's
+consent. This response records only the delegated `ppo_rng_owner` technical
+decision and is not human maintainer approval, shared ABI publication,
+repository-governance approval, or implementation authorization.
