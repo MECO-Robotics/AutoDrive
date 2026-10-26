@@ -2,6 +2,8 @@
 
 The CPU heap is an offline/reference path. Live HIP support dispatch remains
 fail-closed until the WX9100 parity/profile gate is independently accepted.
+Route chunk coordinates are preparation-only; evaluation is deferred until the
+shared device-query batch API is available to Plan A.
 """
 from __future__ import annotations
 
@@ -69,23 +71,6 @@ class PlanARouteChunkMap:
             raise ValueError("Plan A route mappings must share one device")
 
 
-@dataclass(frozen=True)
-class PlanASupportRouteRows:
-    """Route tensors gathered from legal-node order into Plan A pair order."""
-
-    status_code: "torch.Tensor"
-    feasible: "torch.Tensor"
-    path_xy: "torch.Tensor"
-    path_length: "torch.Tensor"
-    distance_m: "torch.Tensor"
-    endpoint_error_m: "torch.Tensor"
-    weighted_cost_grid_edges: "torch.Tensor"
-    bump_cost_grid_edges: "torch.Tensor | None"
-    learned_cost_grid_edges: "torch.Tensor | None"
-    valid_mask: "torch.Tensor"
-    batch_valid: "torch.Tensor"
-
-
 def plan_a_root_binding(graph, pose, *, device) -> PlanARootBinding:
     """Select the nearest legal SE(2) root and connector entirely on-device.
 
@@ -120,7 +105,12 @@ def plan_a_root_binding(graph, pose, *, device) -> PlanARootBinding:
 
 def make_plan_a_route_chunk_map(route_row_count: int, support_to_route_row,
                                 *, device) -> PlanARouteChunkMap:
-    """Bind legal-node route rows to the shared deterministic 64-row map."""
+    """Prepare shared deterministic 64-row coordinates without evaluation.
+
+    The canonical device-query producer/consumer contract belongs to the shared
+    route API. Plan A must not build host query records or call its legacy host
+    evaluator; route evaluation is deferred until that API is approved.
+    """
     import torch
     from .experimental_route_evaluation import make_device_route_chunk_map
 
@@ -138,119 +128,6 @@ def make_plan_a_route_chunk_map(route_row_count: int, support_to_route_row,
     return PlanARouteChunkMap(route_row_count, mapping.spans,
         mapping.global_row, mapping.chunk_index, mapping.local_row,
         support_to_route_row, support_valid)
-
-
-def plan_a_route_batch_validity(batch, mapping: PlanARouteChunkMap, queries, *, device):
-    """Return a device scalar for full ordered route/chunk contract validity."""
-    import torch
-    from .experimental_route_evaluation import (DeviceRouteBatch,
-        validate_device_route_batch)
-
-    target = torch.device(device)
-    if not isinstance(batch, DeviceRouteBatch):
-        raise TypeError("Plan A route result must be a DeviceRouteBatch")
-    count = mapping.row_count
-    if (batch.device != target or len(batch.queries) != count or
-            mapping.global_row.device != target or
-            batch.queries != tuple(queries) or
-            batch.candidate_index.shape != (count,) or
-            batch.candidate_index.dtype != torch.long or
-            batch.status_code.shape != (count,) or
-            batch.feasible.shape != (count,) or batch.path_xy.ndim != 3 or
-            batch.path_xy.shape[0] != count or batch.path_xy.shape[2] != 2 or
-            batch.path_length.shape != (count,) or
-            batch.distance_m.shape != (count,) or
-            batch.endpoint_error_m.shape != (count,) or
-            batch.weighted_cost_grid_edges.shape != (count,)):
-        raise ValueError("Plan A route batch shape or device differs from its chunk map")
-    api_valid = validate_device_route_batch(batch, tuple(queries), device=target)
-    global_rows = torch.arange(count, device=target, dtype=torch.long)
-    # The shared chunk map uses one fixed maximum, including a short final
-    # span. Its device row coordinates must agree with those immutable spans.
-    from .experimental_route_evaluation import MAX_ROUTE_QUERY_BATCH
-    chunk_map_valid = ((mapping.global_row == global_rows).all() &
-        (mapping.chunk_index == torch.div(global_rows, MAX_ROUTE_QUERY_BATCH,
-                                          rounding_mode="floor")).all() &
-        (mapping.local_row == global_rows.remainder(MAX_ROUTE_QUERY_BATCH)).all())
-    order_valid = (batch.candidate_index == mapping.global_row).all()
-    support_map_valid = mapping.support_route_row_valid.all()
-    optional_costs_finite = torch.ones((), device=target, dtype=torch.bool)
-    for value in (batch.bump_cost_grid_edges, batch.learned_cost_grid_edges):
-        if value is not None:
-            if value.shape != (count,) or value.device != target:
-                raise ValueError("Plan A optional route-cost shape/device is malformed")
-            optional_costs_finite &= torch.isfinite(value).all()
-    return (api_valid & chunk_map_valid & order_valid & support_map_valid &
-            optional_costs_finite)
-
-
-def evaluate_plan_a_route_chunks(env, graph, queries, support_to_route_row, **kwargs):
-    """Run the shared bounded route evaluator and preserve Plan A row mapping.
-
-    Route evaluation, chunk ordering and concatenation stay owned by the shared
-    API. This wrapper only binds its global node rows to Plan A's canonical pair
-    rows and returns a device validity predicate for the complete batch. Route
-    goal order is taken directly from the legal graph's canonical node table.
-    """
-    from .experimental_route_evaluation import evaluate_device_route_chunks
-
-    items = tuple(queries)
-    graph.require_device(env.device)
-    mapping = make_plan_a_route_chunk_map(graph.node_capacity,
-        support_to_route_row, device=env.device)
-    if len(items) != mapping.row_count:
-        raise ValueError("Plan A route queries must cover canonical graph row order")
-    if not graph.xy.is_floating_point():
-        raise ValueError("Plan A route graph coordinates must be floating point")
-    batch = evaluate_device_route_chunks(env, items, graph.xy, **kwargs)
-    batch_valid = plan_a_route_batch_validity(batch, mapping, items,
-                                              device=env.device)
-    return batch, mapping, batch_valid
-
-
-def reassemble_plan_a_route_support(batch, mapping: PlanARouteChunkMap,
-                                    batch_valid) -> PlanASupportRouteRows:
-    """Gather node-level route rows into canonical node/behavior support order."""
-    import torch
-    from .experimental_route_evaluation import DeviceRouteBatch
-
-    if not isinstance(batch, DeviceRouteBatch):
-        raise TypeError("Plan A route result must be a DeviceRouteBatch")
-    device = batch.device
-    if (batch_valid.shape != () or batch_valid.dtype != torch.bool or
-            batch_valid.device != device or mapping.global_row.device != device or
-            mapping.chunk_index.device != device or mapping.local_row.device != device or
-            mapping.support_to_route_row.device != device or
-            mapping.support_route_row_valid.device != device or
-            batch.candidate_index.shape != (mapping.row_count,)):
-        raise ValueError("Plan A route assembly inputs do not share one device contract")
-    safe_rows = mapping.support_to_route_row.clamp(0, mapping.row_count - 1)
-    status = batch.status_code.index_select(0, safe_rows)
-    feasible = batch.feasible.index_select(0, safe_rows)
-    path_xy = batch.path_xy.index_select(0, safe_rows)
-    path_length = batch.path_length.index_select(0, safe_rows)
-    distance = batch.distance_m.index_select(0, safe_rows)
-    endpoint_error = batch.endpoint_error_m.index_select(0, safe_rows)
-    weighted_cost = batch.weighted_cost_grid_edges.index_select(0, safe_rows)
-    valid = mapping.support_route_row_valid & feasible & batch_valid
-    status = torch.where(batch_valid, status,
-        torch.full_like(status, DeviceRouteBatch.INVALID))
-    path_xy = torch.where(batch_valid, path_xy, torch.zeros_like(path_xy))
-    path_length = torch.where(batch_valid, path_length,
-                              torch.zeros_like(path_length))
-    infinity = torch.full_like(distance, torch.inf)
-    distance = torch.where(batch_valid, distance, infinity)
-    endpoint_error = torch.where(batch_valid, endpoint_error, infinity)
-    weighted_cost = torch.where(batch_valid, weighted_cost, infinity)
-    bump_cost = (None if batch.bump_cost_grid_edges is None else
-        torch.where(batch_valid,
-            batch.bump_cost_grid_edges.index_select(0, safe_rows), infinity))
-    learned_cost = (None if batch.learned_cost_grid_edges is None else
-        torch.where(batch_valid,
-            batch.learned_cost_grid_edges.index_select(0, safe_rows), infinity))
-    return PlanASupportRouteRows(status, feasible & batch_valid, path_xy,
-        path_length, distance, endpoint_error, weighted_cost, bump_cost,
-        learned_cost, valid, batch_valid)
 
 
 def _require_wx9100_device(device):

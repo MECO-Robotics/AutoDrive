@@ -267,6 +267,9 @@ def build_legal_pose_graph(env, *, slot: int = 3, resolution_m: float | None = N
         # Preserve the historical ordered directed-BFS partition exactly on
         # device. The fixed 64-wide coarse row is padding-inert for the graph
         # message block and avoids a D2H maximum-degree read.
+        from .meco_plan_a_shortest_path import PLAN_A_HIP_PARITY_PROFILE_GATE_PASSED
+        if not PLAN_A_HIP_PARITY_PROFILE_GATE_PASSED:
+            raise RuntimeError("Plan A HIP pose graph dispatch is disabled pending WX9100 parity and profiling")
         from .meco_plan_a_shortest_path_hip import extension
         region_tensor, coarse_edges, coarse_mask, region_status = \
             extension().pose_regions(edges.contiguous(), edge_mask.contiguous(),
