@@ -3,9 +3,9 @@
 **Date:** 2026-10-26
 **Status:** Corrected after Pass 1 REVISE (review record `0bf700af1`); pending fresh independent exact-head Pass 1 review
 **Planner identity:** `plan_a_owner` (planner only; not implementer, reviewer, or human approver)
-**Overall plan commit:** `6325920252773cfa05d63167ba3c29a90debdb01`
+**Overall plan commit:** `5b25eb1cfba7850a871b9024d834457d0fb755a4` (docs-only G0/source-authoring amendment; pending fresh independent review)
 **Overall plan file:** `docs/plans/meco-five-track-v4-gpu-implementation-plan-20261026.md`
-**Overall plan file SHA-256:** `9a12708980529cb03810ad40f43dbfe1e29461485a4f50fd1a7b06c7202dec5a`
+**Overall plan file SHA-256:** `f5d1751ae6ca02452f286d756116859f176558a5822711a48f2b1aa4d734b43a`
 **Implementation source base:** `6ed961a09c08dfc1796d98ae3566bd3f0eaaaf22`
 **Accepted reconciliation commit:** `03bd0a7a3ef4ea0d2506ec4f9b031745ba53ada9`
 **Reconciliation artifact SHA-256:** `294a02012427c2ceeb638ea0cd337d1fa7908cf47fb9d0f07bef29ed6790510c`
@@ -18,9 +18,9 @@
 
 Define bounded P0a documentation that proposes Phase 0 rules, protocol requirements, cases/seeds, and calibration method before source implementation, then P0b runtime calibration and generated immutable artifacts only after relevant P1–P6 source is frozen and reviewed. P0 provides inputs to the five-track MECO A1/A2/A3/C1/C2 implementation and subsequent Stage 1 qualification. P0 owns no source or tests; P6 owns qualification v5 schema/runner implementation and qualification tests.
 
-This document is a package plan, not a protocol decision approval, source change, test authorization, calibration/run instruction, training authorization, ABI adoption, or human approval. It does not satisfy G0. The active diagnostic campaign PID `2750253` and its dashboard, workers, checkpoints, outputs, devices and leases remain outside scope. Do not inspect, stop, signal, reconfigure, evaluate through, restart, or otherwise touch them. No CPU/GPU work or dashboard operation is authorized until the user manually stops that campaign and lease release is independently verified. Implementation remains withheld until G0 and independent acceptance of this package plan.
+This document is a package plan, not a protocol decision approval, source change, test authorization, calibration/run instruction, training authorization, ABI adoption, or human approval. It does not satisfy G0. The active diagnostic campaign PID `2750253` and its dashboard, workers, checkpoints, outputs, devices and leases remain outside scope. Do not inspect, stop, signal, reconfigure, evaluate through, restart, or otherwise touch them. P0a is documentation-only and may be authored/reviewed in an isolated ZFS worktree after this package plan receives Pass 1 ACCEPT and the required owner is assigned; it does not require G0. No build/compile, test execution, numerical work, simulator, calibration, evaluation, dashboard, device/GPU use, training, checkpoint mutation, integration, merge or promotion is allowed until the user manually stops the campaign and both WX9100 leases are independently verified released. P0b remains withheld until G0, source freeze, and independent review.
 
-The overall plan's sequencing governs: P0a Pass 2 produces a documentation-only candidate; authorized human decisions are resolved before P0a Pass 3 ACCEPT; then P1–P6 source may begin. P6 owns qualification v5 schema/runner/source and related tests. P0b depends on P1–P6 source freeze and review, including P6 source; P6 runtime qualification depends on P0b ACCEPT. P0b never waits for P6 runtime qualification results. This removes the P0/P6 cycle.
+The amended overall plan's sequencing governs. P0a Pass 2 produces a documentation-only candidate; authorized human decisions are resolved before P0a Pass 3 ACCEPT. P1–P6 may then begin only the source/test-file authoring allowed by their accepted package plans and prerequisites in isolated ZFS worktrees. Before G0 they may not build, compile, run tests, execute numerical work, use devices, integrate, merge or promote; dependent packages may not integrate/use candidate APIs until post-G0 validation and final ACCEPT. P6 owns qualification v5 schema/runner/source and related tests. P0b depends on P1–P6 source freeze and review, including P6 source; P6 runtime qualification depends on P0b ACCEPT. P0b never waits for P6 runtime qualification results. This removes the P0/P6 cycle.
 
 ## Evidence inspected and limits
 
@@ -41,17 +41,20 @@ These citations describe observed source only. They do not prove GPU residency, 
 ## Package split and dependency graph
 
 ```text
-G0 (plan acceptance + manual campaign stop + independently verified lease release
-    + explicit maintainer authorization + reviewed contract-anchor bridge)
+Package-plan acceptance + assigned owner/reviewer
   └── P0a preregistration (rules, schema, cases/seeds, statistical method)
-       └── P1–P6 source packages and integration (all exact-head reviewed)
-            └── P0b calibration + immutable Phase 0 artifact + final v5 protocol
-                 └── fresh source-bound checkpoints and P6 runtime Stage 1
+       └── required human decisions + P0a exact-head ACCEPT
+            └── P1–P6 isolated source/test authoring; static candidate API review
+                 └── G0 (manual campaign stop + both leases independently released
+                      + authorization + reviewed contract-anchor bridge)
+                      └── builds/tests/runtime validation + final ACCEPT + integration
+                           └── source freeze/review + P0b calibration/artifacts
+                                └── fresh checkpoints and P6 runtime Stage 1
 ```
 
 ### P0a: propose preregistration before source work
 
-P0a Pass 2 creates a documentation-only candidate preregistration. It proposes the decisions needed by source implementers but cannot decide required product/rules questions on behalf of the authorized human maintainer:
+After this package plan's independent Pass 1 ACCEPT, P0a Pass 2 creates a documentation-only candidate preregistration in an isolated ZFS worktree. It needs no G0 because it performs no source edit, build, test, numerical work or runtime operation. It proposes the decisions needed by source implementers but cannot decide required product/rules questions on behalf of the authorized human maintainer:
 
 1. **Outcome/rules:** `simulated_match_score` means accepted active-HUB FUEL awards, with eligibility and acceptance rules traced to the simulator's authoritative producer. Explicitly distinguish curriculum/task reward, throughput, score differential and official match points.
 2. **Protocol v5 schema:** target ID, transitive prerequisite list, case identity (category/layout/opponent family/start/sensor profile as applicable), seed partition, metric IDs and definitions, run/source/profile/device identities, uncertainty and margin fields, promotion predicates, required artifacts, approval provenance, integrity/hash rules, fail-closed cases and versioning policy.
@@ -59,7 +62,7 @@ P0a Pass 2 creates a documentation-only candidate preregistration. It proposes t
 4. **Calibration method:** preregister D0 controls, repetitions, minimum sample policy, uncertainty calculation, useful-gain and safety noninferiority margin methods, missing-data/empty-case behavior, and the decision process. P0a locks the method and evidence floor, but not numeric margins unsupported by data. Numeric margins are computed in P0b from the preregistered evidence, never selected after candidate results.
 5. **Identity boundary:** specify proposed canonical source/config/rules/profile/device identities, artifact/protocol serialization and hash boundary, immutable output naming, approval-record fields and stale-input failure rules. Hashes do not substitute for authorized human decisions.
 
-Before P0a Pass 3, the authorized maintainer resolves all required score/rules, finite held-out set, protocol-scenario mapping, case/seed and statistical-method decisions against the candidate. Pass 3 then reviews the exact candidate plus the recorded decisions. P0a ACCEPT enables P1–P6 source implementation, with P6 owning qualification code. P0a produces no source, tests, calibration result, final Phase 0 artifact, protocol instance, training run or qualification result.
+Before P0a Pass 3, the authorized maintainer resolves all required score/rules, finite held-out set, protocol-scenario mapping, case/seed and statistical-method decisions against the candidate. Pass 3 then reviews the exact candidate plus the recorded decisions. P0a ACCEPT enables only the source/test-file authoring stage for P1–P6, subject to each package's accepted plan and exact prerequisites. G0 remains mandatory before builds, test execution, simulator or other numerical work, device use, dashboard operation, calibration, evaluation, integration, merge or promotion. P6 owns qualification code. P0a produces no source, tests, calibration result, final Phase 0 artifact, protocol instance, training run or qualification result.
 
 ### P0b: calibrate after all relevant source is reviewed
 
@@ -75,7 +78,7 @@ Any relevant source/rules/case change after P0b invalidates its source binding. 
 
 ## Finite future P0 Pass 2 outputs and boundaries
 
-Pass 2 for P0a starts after this package plan receives independent Pass 1 ACCEPT, G0 is evidenced, and distinct P0a implementer/reviewer identities are assigned. P0a Pass 2 output is exactly one documentation-only candidate file: `docs/plans/v4-phase0-preregistration-candidate-20261026.md`, created in a fresh ZFS-backed worktree based on the accepted planning head. Do not add source or test files. Required authorized-human decisions are resolved and recorded against this candidate before its exact-head Pass 3 review; no implementation work unlocks until that review accepts the candidate and decisions.
+Pass 2 for P0a starts after this package plan receives independent Pass 1 ACCEPT and distinct P0a author/reviewer identities are assigned; G0 is not a prerequisite. P0a Pass 2 output is exactly one documentation-only candidate file: `docs/plans/v4-phase0-preregistration-candidate-20261026.md`, created in a fresh ZFS-backed worktree based on the accepted planning head. Do not add source or test files. Required authorized-human decisions are resolved and recorded against this candidate before its exact-head Pass 3 review; P1–P6 source-only authoring unlocks after that ACCEPT and each package's own plan/prerequisites, while all execution and integration remain G0-gated.
 
 P0b is a separate, later operational action. It may begin only after reviewed P1–P6 source freeze and renewed G0 device/lease readiness. Its only outputs are generated calibration records and these immutable artifacts outside Git:
 
@@ -120,7 +123,7 @@ No tests, simulation, calibration, dashboard operation, or device use has been r
 - **Protocol compatibility:** scheduler currently imports qualification APIs. P6's package plan must preserve or explicitly migrate this interface; P0 cannot edit scheduler or qualification source.
 - **Device fallback:** current qualification CLI requires an explicit indexed GPU but does not bind both WX9100 devices or prove the full algorithmic path is GPU-resident; older protocol versions are not v5 qualification. Device identity loss or unsupported numeric work is a gate failure.
 - **Approval provenance:** agent-generated manifests and hashes are not human approval/signatures. Required decisions must be recorded by the authorized maintainer.
-- **Live campaign/G0:** this planning work does not satisfy manual stop or lease release. No Pass 2 implementation or calibration can begin while those gates are open.
+- **Live campaign/G0:** this planning work does not satisfy manual stop or lease release. P0a document authoring may proceed after plan acceptance, but P0b calibration and all build/test/runtime/device/dashboard/integration/merge/promotion actions remain blocked until G0 is evidenced.
 
 ## Three-pass roles and disposition
 
