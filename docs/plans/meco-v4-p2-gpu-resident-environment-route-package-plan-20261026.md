@@ -1,10 +1,10 @@
 # P2 GPU-resident environment, observation, candidate and route package plan
 
 **Date:** 2026-10-26  
-**Status:** Amendment candidate; original P2 plan received Pass 1 ACCEPT; this G0/source-authoring amendment requires fresh independent exact-head review
+**Status:** Original P2 plan received Pass 1 ACCEPT; the G0/source-authoring amendment at `09cf081a4b47b66a9b3fcecf3c3748eda5722465` received REVISE (review commit `da3154744`, stale overall-plan status pin). Corrected successor and fresh exact-head Pass 1 review are pending.
 **Planner:** `plan_a_owner` (planner only; not implementer or reviewer)  
 **Implementation source base:** `6ed961a09c08dfc1796d98ae3566bd3f0eaaaf22`  
-**Overall plan:** original accepted commit `6325920252773cfa05d63167ba3c29a90debdb01`; G0/source-authoring amendment `8efec9378d1912f0839d7c6cd8e88467fceb1d5a` (pending fresh review)
+**Overall plan:** accepted G0/source-authoring amendment commit `8efec9378d1912f0839d7c6cd8e88467fceb1d5a`, file SHA-256 `57f20a1bcfe6f229429d402140de93a0ee1780372e21a9ac3344f81c72faca90`; exact Pass 1 ACCEPT record commit `b0b2962d299b1ecaab053b873ef2ae09e3c5f467`, record SHA-256 `54e68870b3b95fd91b92d3f934e44d5ec9bb63e1fb6d03f67e6d95f10d3abb4a`
 **Original overall-plan file SHA-256:** `9a12708980529cb03810ad40f43dbfe1e29461485a4f50fd1a7b06c7202dec5a`
 **Amended overall-plan file SHA-256:** `57f20a1bcfe6f229429d402140de93a0ee1780372e21a9ac3344f81c72faca90`
 **Accepted P0 package plan:** `13dbd7f8f953995850e811202f7e9c5264c49dca`  
