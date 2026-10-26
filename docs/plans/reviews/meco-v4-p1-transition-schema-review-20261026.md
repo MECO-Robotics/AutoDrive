@@ -15,7 +15,7 @@ The candidate's profile identifiers and capacity constants match the reconciled 
 The candidate is confined to the single allowlisted path `frc_defense/meco_transition_v4.py`; it declares metadata only and contains no serializer, reader, dynamic validation, digest computation, or other host numeric work. The ABI registry's fixed field names nevertheless diverge from the accepted declaration:
 
 - The accepted macro-trace field is `fallback:bool[12]`; the candidate names it `macro_fallback`.
-- The accepted route-sink group uses `query_kind`, `policy_source_row`, `oracle_identity_code`, `target_handle`, `goal_xy`, `query_active`, `status_code`, `feasible`, `path_xy`, `path_length`, `distance_m`, `endpoint_error_m`, `weighted_cost_grid_edges`, `bump_cost_grid_edges`, `learned_cost_grid_edges`, `candidate_index`, and `path_point_mask`. The candidate renames these with `route_` prefixes.
+- The accepted route-sink field `route_variant` matches exactly. The accepted route-sink group otherwise uses `query_kind`, `policy_source_row`, `oracle_identity_code`, `target_handle`, `goal_xy`, `query_active`, `status_code`, `feasible`, `path_xy`, `path_length`, `distance_m`, `endpoint_error_m`, `weighted_cost_grid_edges`, `bump_cost_grid_edges`, `learned_cost_grid_edges`, `candidate_index`, and `path_point_mask`. The candidate renames these with `route_` prefixes.
 
 The accepted P1 plan pins field names along with types, widths, order, capacities, and registries. No ABI amendment authorizes these name changes. Restore the accepted names in the schema declaration, or obtain and review an ABI reconciliation amendment before changing them.
 
