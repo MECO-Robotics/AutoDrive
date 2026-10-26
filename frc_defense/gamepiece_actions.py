@@ -465,33 +465,30 @@ def update_fuel_actions(self, active, score_intent):
     if hasattr(self, "_meco_piece_generation"):
         self._meco_piece_generation.add_(newly_scored.long())
     _invalidate_perceived_contact_tracks(self, active)
-    if (self.fuel_physics is not None and not capturing and
-            not bool(newly_scored.any().item())):
-        # shooter_respawn_cone draws exactly one [world,piece] tensor before
-        # doing geometry. Consume it to preserve all subsequent seeded draws.
-        torch.rand((self.n,self.fuel_count),device=self.device,
-                   generator=self.generator)
+    # shooter_respawn_cone draws exactly one [world,piece] tensor before
+    # doing geometry. Run the same fixed-shape path for an empty score mask:
+    # it consumes the compatibility draw and all resulting state writes stay
+    # masked by newly_scored.
+    team=original_piece_team
+    origins=self.hub_centers[team]
+    spawn_origins,launch_targets=shooter_respawn_cone(self,origins)
+    if self.fuel_physics is None:
+        torch.where(newly_scored[...,None],spawn_origins,
+                    self.piece_pos,out=self.piece_pos)
+        velocity=(launch_targets-origins)*.1
+        torch.where(newly_scored[...,None],velocity,self.piece_vel,
+                    out=self.piece_vel)
     else:
-        team=original_piece_team
-        origins=self.hub_centers[team]
-        spawn_origins,launch_targets=shooter_respawn_cone(self,origins)
-        if self.fuel_physics is None:
-            torch.where(newly_scored[...,None],spawn_origins,
-                        self.piece_pos,out=self.piece_pos)
-            velocity=(launch_targets-origins)*.1
-            torch.where(newly_scored[...,None],velocity,self.piece_vel,
-                        out=self.piece_vel)
-        else:
-            launch_fuel(self,newly_scored,launch_targets,
-                        origins=origins,height=1.83,flight_time=1.,
-                        horizontal_velocity_scale=.15,
-                        spawn_positions=spawn_origins)
-        torch.where(newly_scored,torch.full_like(self.piece_owner,-1),
-                    self.piece_owner,out=self.piece_owner)
-        torch.where(newly_scored,torch.zeros_like(self.piece_zone),
-                    self.piece_zone,out=self.piece_zone)
-        torch.where(newly_scored[...,None],self._midfield_respawn_cells,
-                    self._pickup_possible_cells,out=self._pickup_possible_cells)
+        launch_fuel(self,newly_scored,launch_targets,
+                    origins=origins,height=1.83,flight_time=1.,
+                    horizontal_velocity_scale=.15,
+                    spawn_positions=spawn_origins)
+    torch.where(newly_scored,torch.full_like(self.piece_owner,-1),
+                self.piece_owner,out=self.piece_owner)
+    torch.where(newly_scored,torch.zeros_like(self.piece_zone),
+                self.piece_zone,out=self.piece_zone)
+    torch.where(newly_scored[...,None],self._midfield_respawn_cells,
+                self._pickup_possible_cells,out=self._pickup_possible_cells)
     self.fuel_acquisition_count += self.fuel_acquired_event*active[:,None]
     return (self.fuel_acquired_event,self.fuel_scored_event,
             self.fuel_denied_event)
