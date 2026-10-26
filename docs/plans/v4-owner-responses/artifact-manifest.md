@@ -8,6 +8,10 @@
 - **Owner matrix:** commit `ee234b2c5162038e6fcfff6d9551d80f443f6d82`, SHA-256 `9888eb2a8d5e63b04aa328dca222dd08520a709e2ee78684f9d2dc07aafede53`
 - **Disposition:** **PENDING**
 
+This closure response is scoped under the pending-owner-closure plan at commit
+`4bef4525acf8022f3b38edaafe0793d13ef7a0a2`, SHA-256
+`b0a72285269189f383d25e3463a258fa97a692bdee7674792e213eb0ec8657b7`.
+
 ## Scope and evidence
 
 This response covers only the V4 envelope, payload-size arithmetic, byte
@@ -64,54 +68,120 @@ These reproduce the proposal’s arithmetic (V4 lines 226–237). The largest
 payload is 314,469,051 bytes, well within the uint64 `payload_bytes` field.
 The event count and this maximum are conditional on the proposed fixed
 `R=32,S=6,T=12` profile and score-event bound (V4 lines 176–194); they are not
-general limits for other profiles.
+general limits for other profiles. The proposal says the producer reserves
+the full fixed capacity (lines 240–249), but does not explicitly say whether
+every payload serializes all 2,304 event slots or whether it may serialize a
+shorter event table. `valid` is present per event and no separate event count
+or offset field is listed. The exact `payload_bytes` value therefore still
+depends on the serialized-count rule. The Gamepiece/score owner adopted the
+59-byte record and 2,304-event batch capacity (response commit
+`3738ad58fc883c5853b32c508e89ac657864bca4`, SHA-256
+`f57476d13d6038e9e0109fedc557c617ead25a99e4db49512b135a532c1e13af`,
+lines 16–20), but that response does not expressly settle whether every slot
+is serialized or how a compact count would be framed.
 
-## Concrete proposal rules and unresolved decision points
+## Concrete proposal rules, source contracts, and closure gates
 
-The proposal says the payload length is exact for the profile and row count,
-the header carries `row_count=32`, and the payload cannot exceed the calculated
-maximum (V4 header table, lines 101–112). It recommends reserving full
-capacity before mutation and making the complete decision/update a no-op on
-overflow, malformed data, unsupported codes, nonfinite valid values, or
-digest mismatch, with no truncation or host repair (V4 lines 239–252). It
-requires readers to reject unknown versions before parsing and prohibits
-converting or reinterpreting V3 bytes (V4 “Authority and decision status,”
-lines 33–48). A host may persist/copy the opaque bytes unchanged but may not
-decode, hash, compare, select, aggregate, or gate on dynamic payload bytes
-(V4 canonical encoding, lines 97–121). These are suitable fail-closed and
-opaque-persistence recommendations for this owner row.
+The proposal defines a 96-byte little-endian header, fixed magic and versions,
+`header_bytes=96`, `row_count=32`, zero-valued reserved fields, and the packed
+fixed-width encoding above (V4 lines 95–120). It requires a profile mismatch
+to reject the bundle before action/optimizer mutation (lines 135–138), and
+specifies typed failure with no partial decision/update, truncation, or host
+repair for capacity, malformed data, unsupported codes, nonfinite valid
+values, and digest errors (lines 240–249). It also says readers reject
+unknown versions before parsing and never convert/reinterpret V3 bytes (V4
+lines 33–48). These rules establish useful version, byte-order, no-alignment,
+opaque-copy, and fail-closed requirements.
 
-I cannot adopt the exact V4 artifact yet because two digest preimages needed
-for reproducible artifact validation are not fully specified:
+The current repository has related but distinct contracts. The campaign
+manifest canonicalizes JSON as sorted compact UTF-8 with NaN disallowed and
+hashes those bytes (`frc_defense/meco_training_manifest.py:44-50`). It binds
+Git/source identity and protocol IDs/hashes, and rejects unsupported schemas
+or stale source/protocol bindings (`frc_defense/meco_training_manifest.py:85-88,764-815`).
+The current training checkpoint is a `schema_version: 1` Torch payload that
+contains config, qualification and evaluation protocol IDs/hashes, source
+identity, run ID, model/value/optimizer state, and Torch/Python/device RNG
+state, and is written through a temporary file then renamed
+(`frc_defense/meco_track_training.py:197-206,2815-2832`). These are evidence
+for existing metadata and atomic-write behavior, not a V4 envelope, digest
+definition, or profile/checkpoint compatibility contract.
 
-1. `profile_digest` is SHA-256 “of the exact profile/field-layout
-   declaration,” but V4 does not define the canonical bytes for that
-   declaration: its serialization, domain/version prefix, or precise included
-   fields and registries. The digest therefore cannot yet be independently
-   reproduced from the proposed declaration (V4 header table, line 110).
-2. `payload_digest` is described as SHA-256 of “the exact payload bytes,”
-   while the later digest rule says canonical packed bytes with the header’s
-   `profile_digest`, row masks, and code registries included (V4 lines
-   111 and 294–297). The artifact does not resolve whether the digest input is
-   exactly the payload byte interval or a domain-separated preimage that also
-   includes header/profile/registry bytes, nor does it define the byte order
-   and framing for any such additional inputs. Both interpretations are
-   plausible and produce different digests.
+On this follow-up, I expanded the prior PENDING reasons into the following
+explicit gates. I cannot adopt exact V4 until the responsible owners decide
+them in a versioned, immutable contract:
 
-To resolve this row, specify immutable, exact digest preimages (including
-domain separation, byte framing/order, and whether the profile digest and
-code registries are inside or outside the payload interval). Keep the
-disposition **PENDING** until those definitions are versioned and the payload
-and envelope sizes are checked against the resulting exact field contract.
-No replacement artifact is proposed in this response.
+1. **Digest preimages and framing.** `profile_digest` is SHA-256 “of the exact
+   profile/field-layout declaration,” but V4 does not define the declaration's
+   canonical byte serialization, domain/version prefix, or exact included
+   fields/registries (V4 line 110). `source_digest`, `config_digest`, and
+   `checkpoint_digest` are typed as 32-byte values but their preimages and
+   linkage to source identity, the profile-bound config, and exact checkpoint
+   bytes are not defined (V4 lines 122–138). The campaign manifest's JSON hash
+   rule cannot be silently reused for these binary ABI hashes.
+2. **Payload digest boundary.** `payload_digest` is SHA-256 of “the exact
+   payload bytes,” but the later rule requires canonical packed bytes with the
+   header `profile_digest`, row masks, and code registries included (V4 lines
+   111 and 294–297). It does not say whether the digest preimage is exactly
+   the payload interval or a domain-separated sequence containing header or
+   registry bytes, nor specify framing/order for additional inputs. These
+   alternatives yield different digest values.
+   This is also an open dependency in the PPO/RNG response, which remains
+   PENDING and says the per-digest domains/spans for `input_digest`,
+   `transition_digest`, `support_digest`, RNG state, and the full batch are
+   unspecified (response commit
+   `4254f45eca5f2e938000b6e0dda4348ad4ea9337`, SHA-256
+   `3f1a05cf9bc4434f413d13d666aa899ad52c4922e46f0390604c87098fa04c10`,
+   lines 99–106). The envelope digest rule must be compatible with, and must
+   not silently redefine, those row-level digest contracts.
+3. **Fixed event-table representation.** The score owner adopted the typed
+   event fields and maximum capacity, but the envelope needs an exact decision
+   whether every batch serializes 2,304 fixed slots (including invalid slots)
+   or includes a count/compact tail. The former gives the computed fixed
+   314,469,051-byte payload; the latter needs explicit framing and a revised
+   exact length rule. This choice changes `payload_bytes`, the payload digest
+   span, and therefore the bundle identity. It depends on Gamepiece/score.
+4. **Checkpoint and downstream compatibility binding.** V4 carries source,
+   config, checkpoint, and profile digests, but does not specify that the
+   checkpoint/sidecar manifest must itself bind the exact V4 profile digest,
+   envelope/schema versions, track, protocol identity, and the same source and
+   config digest values; nor does it define consumer behavior for a stale or
+   missing binding. Current checkpoints and campaign manifests have metadata
+   and source/protocol checks, but are separate formats as cited above. The
+   exact join keys, bytes to hash, and reject-before-state-mutation rule must
+   be specified for producer, checkpoint writer/loader, and downstream
+   readers. Evaluation/curriculum owns qualification protocol meaning;
+   this row only requires the artifact binding and must not decide that row's
+   semantics.
+5. **Strict envelope length and malformed-header handling.** The proposal
+   supplies header length, payload length, reserved values, magic, row count,
+   version rejection, and “no trailing bytes,” but does not give one
+   unambiguous reader acceptance predicate for physical buffer length versus
+   `header_bytes + payload_bytes`, exact expected payload length (including
+   event slots), a wrong `header_bytes`, nonzero reserved bytes, or digest
+   verification order. The manifest reader's fail-closed checks show a
+   repository precedent for rejecting unsupported schemas and digest/source
+   mismatch (`frc_defense/meco_training_manifest.py:764-806`), but do not
+   define these binary-envelope cases.
+
+Required closure decision: publish exact digest preimages and envelope reader
+acceptance/rejection predicate; bind the same immutable source/config/profile,
+checkpoint, track, schema, and protocol identities across the checkpoint
+manifest and consumers; and freeze whether the event table is always full
+capacity. Recompute/confirm sizes and digest spans after those cross-row
+decisions. Until then the disposition remains **PENDING**. No replacement
+artifact is proposed in this response.
 
 ## Limits of this decision
 
 This is only the delegated Artifact/manifest technical decision. It does not
 decide another owner row, establish cross-owner adoption, define a published
-ABI, or authorize implementation. It does not claim current source code
-produces this envelope or that the proposed device-side SHA-256 and failure
-handling have been implemented or runtime-verified.
+ABI, or authorize implementation. Its pending gates depend on Gamepiece/score
+for fixed event-table serialization, PPO/RNG for digest coverage and checkpoint
+RNG state, Environment/profile for exact profile identity, and
+Evaluation/curriculum for protocol identity and qualification-artifact
+semantics. It does not claim current source code produces this envelope or
+that the proposed device-side SHA-256 and failure handling have been
+implemented or runtime-verified.
 
 This response records only the assigned role’s technical decision. It does
 not claim human maintainer approval, cross-owner adoption, ABI publication, or
