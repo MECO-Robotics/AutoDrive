@@ -1124,10 +1124,13 @@ class C2MapCrossAttentionGRU(nn.Module):
                 or candidate_mask.dtype != torch.bool
                 or candidate_mask.device != candidate_features.device):
             raise ValueError("C2 candidate mask must be bool [B,C] on the candidate device")
-        # Preserve the original all-query context. Support masks gate action
-        # selection; using them to reweight this pooled state changes C2's
-        # recurrent context whenever any candidate is infeasible.
-        candidate_context = queried.mean(1)
+        # The device candidate path keeps fixed host metadata order, including
+        # rows beyond the configured policy K. Pool only the explicitly
+        # declared model-input prefix (plus continuation); route feasibility
+        # remains a separate action-selection mask.
+        context_weight = candidate_mask.to(queried.dtype).unsqueeze(-1)
+        candidate_context = ((queried * context_weight).sum(1) /
+            context_weight.sum(1).clamp_min(1.))
         state = self.context(global_state + candidate_context, hidden)
         fused = torch.cat((queried, state[:, None].expand(-1, queried.shape[1], -1), candidate), -1)
         scored = F.silu(_fixed_order_candidate_linear(fused, self.scorer[0]))
@@ -1347,6 +1350,18 @@ def score_candidates(track: str, model: nn.Module, *, raster: torch.Tensor,
                 valid_candidates.dtype != torch.bool or
                 valid_candidates.device != raster.device):
             raise ValueError("device candidate validity mask violates decision contract")
+        model_input_mask = candidate_batch.model_input_mask
+        if (model_input_mask.shape != (1, len(table.candidate_ids)) or
+                model_input_mask.dtype != torch.bool or
+                model_input_mask.device != raster.device):
+            raise ValueError("device model-input mask violates candidate policy-prefix contract")
+        # Fixed host metadata order includes sensor and approach-offset rows
+        # outside the configured K prefix. Zero their tensors before either
+        # local or broker inference; model_input_mask keeps them out of C2's
+        # pooled recurrent context while route feasibility remains separate.
+        candidate = candidate.masked_fill(~model_input_mask[..., None], 0.)
+    if candidate_batch is None:
+        model_input_mask = valid_candidates
     if isinstance(model, ProductionMecoAdapter) and hidden is None:
         hidden = raster.new_zeros((raster.shape[0], HIDDEN))
     inputs = {"raster": raster, "globals_": globals_, "candidate_features": candidate,
@@ -1394,7 +1409,7 @@ def score_candidates(track: str, model: nn.Module, *, raster: torch.Tensor,
                               if name in inputs}
             broker_inputs = dict(ordered_inputs)
             if track in ("C1", "C2") and candidate_batch is not None:
-                broker_inputs["__candidate_valid_mask"] = valid_candidates
+                broker_inputs["__candidate_valid_mask"] = model_input_mask
             broker_handle = model.submit_inference(inference_request, broker_inputs)
 
         # Compute the complete deterministic decision while accelerator
@@ -1479,7 +1494,7 @@ def score_candidates(track: str, model: nn.Module, *, raster: torch.Tensor,
         output = response.outputs
     else:
         if track == "C2" and candidate_batch is not None:
-            output = model(**inputs, candidate_mask=valid_candidates)
+            output = model(**inputs, candidate_mask=model_input_mask)
         else:
             output = model(**inputs)
     if track in ("C1", "C2"):

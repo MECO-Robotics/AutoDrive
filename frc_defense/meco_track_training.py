@@ -1814,21 +1814,28 @@ def _prepare_decision(track, model, env, graph, episode_id, hidden,
         decision["logits"] = _apply_candidate_hysteresis(
             decision["logits"], candidate_set.table, candidate_batch=device_batch)
         path_cost = None
-    action, logprob, entropy = sample_candidate_action(decision["logits"],
+    selection_order = (candidate_set.device_batch.selection_rank.argsort(
+        stable=True) if candidate_set.device_batch is not None else None)
+    sampling_logits = (decision["logits"].index_select(-1, selection_order)
+        if selection_order is not None else decision["logits"])
+    action_order_index, logprob, entropy = sample_candidate_action(sampling_logits,
         deterministic=(True if decision.get("inference_status") ==
                        "deterministic_fallback" else deterministic))
+    action = (selection_order.index_select(0, action_order_index.reshape(-1)).reshape(
+        action_order_index.shape) if selection_order is not None else action_order_index)
     selected_action_payload = (None if candidate_set.device_batch is None else
         candidate_set.device_batch.gather_action_payload(action))
-    candidate_set = materialize_device_candidate_evidence(candidate_set)
+    device_evidence_pending = candidate_set.device_batch is not None
     value = (_value(value_head, globals_, decision["hidden"])
              if value_head is not None else None)
     return {"snapshot": candidate_set.observation, "candidate_set": candidate_set,
             "hidden_before": hidden_before,
             "tracking_available": tracking_available,
             "tracking_reset": tracking_reset,
-            "candidate_digest": candidate_digest(candidate_set.table),
-            "candidate_replay_digest": _candidate_replay_digest(
-                candidate_set.table, route_cost, risk_cost),
+            "candidate_digest": (None if device_evidence_pending else
+                                 candidate_digest(candidate_set.table)),
+            "candidate_replay_digest": (None if device_evidence_pending else
+                _candidate_replay_digest(candidate_set.table, route_cost, risk_cost)),
             "raster": raster, "globals": globals_, "graph": graph_data,
             "decision": decision, "action": action, "logprob": logprob,
             "entropy": entropy, "hidden_next": decision["hidden"],
@@ -2604,6 +2611,15 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                         prepared.get("planner_traversal_cost")),
                     planner_traversal_cost_scale=prepared.get(
                         "planner_traversal_cost_scale", 1.))
+                if candidate is not None and candidate.device_batch is not None:
+                    # Route/candidate evidence and its hashes are report data.
+                    # Materialize them only after the selected action has been
+                    # handed to and executed by the simulator.
+                    candidate = materialize_device_candidate_evidence(candidate)
+                    prepared["candidate_set"] = candidate
+                    prepared["candidate_digest"] = candidate_digest(candidate.table)
+                    prepared["candidate_replay_digest"] = _candidate_replay_digest(
+                        candidate.table, prepared["route_cost"], prepared["risk_cost"])
                 update_heartbeat()
                 remasked = any(item != action for item in executed_trace)
                 sampled_fallback = bool(prepared.get("fallback_used", False))
@@ -2920,7 +2936,8 @@ def _require_device_candidate_batch(candidate_set, env, policy):
         raise RuntimeError(f"{policy} requires a device-resident candidate batch")
     expected = torch.device(env.device)
     tensors = (batch.candidate_index, batch.action_index,
-        batch.target_track_index, batch.target_xy, batch.goal_xy,
+        batch.selection_rank, batch.model_input_mask, batch.target_track_index,
+        batch.target_xy, batch.goal_xy,
         batch.goal_heading, batch.raw_features, batch.missing_mask,
         batch.valid_mask, batch.eta_s, batch.route_cost_points,
         batch.risk_cost_points, batch.fallback_index)
@@ -4153,11 +4170,16 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                     "D1" if use_d1_fallback else policy)
                                 if logits.device != torch.device(env.device):
                                     raise RuntimeError("D1/D2 selector logits left the assigned GPU")
-                                choice_tensor = logits.argmax(-1)
+                                priority_order = candidate_set.device_batch.selection_rank.argsort(
+                                    stable=True)
+                                priority_logits = logits.index_select(-1, priority_order)
+                                priority_choice = priority_logits.argmax(-1)
+                                choice_tensor = priority_order.index_select(
+                                    0, priority_choice.reshape(-1)).reshape(
+                                        priority_choice.shape)
                                 device_dispatch_payload = candidate_set.device_batch.gather_action_payload(
                                     choice_tensor).detach().to(device="cpu").reshape(-1).tolist()
                                 choice = int(device_dispatch_payload[0])
-                                candidate_set = materialize_device_candidate_evidence(candidate_set)
                                 last_candidate_recall = candidate_set.candidate_recall
                                 _timing_sync(env)
                                 decision_latency = (time.perf_counter() - fallback_started) * 1000.
@@ -4250,8 +4272,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                     (device_dispatch_payload[3], device_dispatch_payload[4]))
                                 goal_xy = (device_dispatch_payload[5], device_dispatch_payload[6])
                                 goal_heading = device_dispatch_payload[7]
-                                selected_goal_node = candidate_set.route_records[choice].get(
-                                    "legal_node_index")
+                                selected_goal_node = None
                             else:
                                 action = candidate_set.action_indices[choice]
                                 cols = {name: i for i, name in enumerate(candidate_set.table.feature_names)}
@@ -4316,6 +4337,32 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                         [round(float(v), 6) for v in goal_xy],
                                         separators=(",", ":")) if goal_xy is not None else None)),
                                 safety_counts=(post_fault_safety if use_d1_fallback else None))
+                            if (candidate_set is not None and
+                                    candidate_set.device_batch is not None):
+                                candidate_set = materialize_device_candidate_evidence(
+                                    candidate_set)
+                                last_candidate_recall = candidate_set.candidate_recall
+                                if device_dispatch_payload is not None:
+                                    selected_goal_node = candidate_set.route_records[
+                                        choice].get("legal_node_index")
+                                    route_provenance = (None if prepared is None else
+                                        prepared.get("inference_provenance") or
+                                        prepared.get("decision", {}).get(
+                                            "inference_provenance"))
+                                    routes_seen.append({
+                                        **candidate_set.route_records[choice],
+                                        "selected": True,
+                                        "action_source": action_source,
+                                        "inference_provenance": route_provenance})
+                                if prepared is not None and prepared.get(
+                                        "candidate_set") is not None and prepared[
+                                        "candidate_set"].device_batch is not None:
+                                    prepared["candidate_set"] = candidate_set
+                                    prepared["candidate_digest"] = candidate_digest(
+                                        candidate_set.table)
+                                    prepared["candidate_replay_digest"] = (
+                                        _candidate_replay_digest(candidate_set.table,
+                                            prepared["route_cost"], prepared["risk_cost"]))
                             if policy in ("A1", "A2", "A3", "A1_P0", "A2_P0", "A3_P0"):
                                 planner = env.planner
                                 path_batch = planner.last_path.reshape(
