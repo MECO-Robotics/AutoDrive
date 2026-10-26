@@ -28,10 +28,10 @@ approval or implementation authorization.
 
 The following response heads and blob hashes were independently checked from
 their pushed origin branches for this plan. The Pass 3 verdict and reviewer
-identity are recorded in the orchestration thread; there is no separate
-persisted review-summary file or review artifact hash. These are scoped
-technical response reviews only. The next tranche must persist its own
-independent exact-head review evidence before reconciliation proceeds.
+identity are recorded in the orchestration thread. There are no persisted
+review-record files or review artifact hashes yet. The next tranche must
+persist one reviewer-authored record for every row below, including the three
+rows whose owner disposition is already ADOPT, before reconciliation proceeds.
 
 | Role | Response path | Pushed response commit | Response SHA-256 | Exact-head Pass 3 record | Current disposition |
 |---|---|---|---|---|---|
@@ -48,7 +48,8 @@ independent exact-head review evidence before reconciliation proceeds.
 The three ADOPT dispositions are limited to their respective rows. Six rows
 remain PENDING despite their response documents passing editorial/contract
 review. A review ACCEPT does not convert a PENDING owner disposition into
-adoption.
+adoption. The thread-recorded reviews do not satisfy the persisted-record gate
+below, and this plan does not claim that any review record already exists.
 
 ## Pass 2: close six pending rows
 
@@ -92,13 +93,32 @@ affected; do not silently carry forward V4 decisions.
 
 ### Per-response review gate
 
-For every final Pass 2 response, a different agent than its author must review
-the exact pushed commit and response blob hash. Persist a concise review record
-that includes reviewer identity, reviewed commit and file SHA-256, verdict,
-scope, evidence checked, and whether the response disposition is supported.
-An ACCEPT may validate a PENDING response while leaving its owner row PENDING.
-REVISE requires a corrected head and a new independent review. No row advances
-on an unreviewed or superseded head.
+The only permitted review-record paths are these nine exact files:
+
+| Row | Sole review-record path |
+|---|---|
+| Environment/profile | `docs/plans/v4-owner-responses/reviews/environment-profile.md` |
+| Plan A | `docs/plans/v4-owner-responses/reviews/plan-a.md` |
+| Plan C | `docs/plans/v4-owner-responses/reviews/plan-c.md` |
+| Route | `docs/plans/v4-owner-responses/reviews/route.md` |
+| Observation/native | `docs/plans/v4-owner-responses/reviews/observation-native.md` |
+| PPO/RNG | `docs/plans/v4-owner-responses/reviews/ppo-rng.md` |
+| Gamepiece/score | `docs/plans/v4-owner-responses/reviews/gamepiece-score.md` |
+| Artifact/manifest | `docs/plans/v4-owner-responses/reviews/artifact-manifest.md` |
+| Evaluation/curriculum | `docs/plans/v4-owner-responses/reviews/evaluation-curriculum.md` |
+
+Each record must be authored by an agent distinct from that response's author
+and must review the exact response commit and blob SHA-256 pinned in the table
+above. This applies to all nine current heads, including environment/profile,
+Plan A, and gamepiece/score, which already have reviewed ADOPT dispositions.
+Each record must give reviewer identity, exact response commit and blob SHA,
+verdict, review scope, evidence checked, and whether the owner disposition is
+supported. A thread-recorded verdict is useful provenance but is not the
+persisted review record required for closure. An ACCEPT may validate a PENDING
+response while leaving its owner row PENDING. REVISE requires a corrected
+response head and a new record at that row's same review path, superseding the
+older record; review paths cannot be duplicated or expanded. No row advances
+on an unreviewed or superseded response head.
 
 ## Shared reconciliation and payload gate
 
@@ -110,8 +130,9 @@ at:
 `docs/plans/gpu-shared-command-ppo-transition-abi-v4-owner-reconciliation-20261026.md`
 
 The reconciliation must list all nine exact response commits and response
-hashes, each disposition and persisted Pass 3 record, all replacement artifact
-hashes, and a field-by-field compatibility table. It must distinguish adopted
+hashes, each disposition, all nine persisted Pass 3 review-record paths and
+their exact blob SHA-256 values, all replacement artifact hashes, and a
+field-by-field compatibility table. It must distinguish adopted
 values from explicit unresolved/product decision gates. A shared ABI/profile
 cannot be published as adopted while any required field or owner row remains
 PENDING or mutually incompatible. No human approval is implied; any required
@@ -166,6 +187,8 @@ five-track Stage 1 completion condition.
 The sole file allowlist for this planning candidate is this document. Its
 review checks factual pins, scoped Pass 2 paths, replacement/re-decision logic,
 payload/reconciliation gates, no-human-approval language, and the explicit
-source/runtime/training boundary. Pass 1 ACCEPT authorizes only the six
-documentation response paths and required response review records described
-above; all other work remains out of scope.
+source/runtime/training boundary. Pass 1 ACCEPT authorizes documentation-only
+work on exactly the six response paths in the Pass 2 table and exactly the nine
+review-record paths listed above. The six response paths and nine review
+paths are separate allowlists; a response author may not write its review
+record. No other file or action is authorized by this plan.
