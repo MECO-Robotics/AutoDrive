@@ -278,15 +278,11 @@ def launch_fuel(env, selected, destinations, *, origins=None, height=.35,
     position and retain the reduced horizontal velocity. Launch settings are
     illustrative.
     """
-    # Scoring and ferrying call this every tick, although selected is usually
-    # empty. The separation routine synchronizes to compact contacts, so skip
-    # launch work up front when there is no respawn. During graph capture keep
-    # the tensor path fixed and let replay apply the live mask.
-    if (not (env.device.type == "cuda" and
-             torch.cuda.is_current_stream_capturing()) and
-            not bool(torch.as_tensor(selected, device=env.device,
-                                     dtype=torch.bool).any().item())):
-        return
+    # Scoring and ferrying call this every tick, even when no piece is
+    # selected. Keep that case on the same fixed-shape masked path as a live
+    # launch so a device predicate never controls host execution or tensor
+    # shape. The launch path performs no random draws, so removing the skip
+    # preserves the caller's RNG order and draw count.
     physics = bind_fuel_state(env)
     start = env.piece_pos if origins is None else origins
     target = destinations.expand_as(env.piece_pos)
