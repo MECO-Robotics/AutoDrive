@@ -122,12 +122,23 @@ on an unreviewed or superseded response head.
 
 ## Shared reconciliation and payload gate
 
-After all nine current owner rows have final independently reviewed
-dispositions against compatible immutable inputs—and after every replacement
-impact has been re-decided—create a separate versioned reconciliation artifact
-at:
+The reconciliation artifact and its review record are conditionally authorized
+only after all nine current owner rows have final independently reviewed,
+compatible dispositions, every replacement impact has been re-decided, and no
+required row or field remains PENDING. If any required row or field remains
+PENDING, neither artifact below may be written under this plan; resolve the
+pending decision through a separately reviewed scope/decision before seeking
+authorization to reconcile.
+
+When, and only when, those gates are satisfied, create the separate versioned
+reconciliation artifact at this exact path:
 
 `docs/plans/gpu-shared-command-ppo-transition-abi-v4-owner-reconciliation-20261026.md`
+
+Its sole persisted independent exact-head Pass 3 review record must be written
+at this exact path:
+
+`docs/plans/v4-owner-responses/reviews/owner-reconciliation.md`
 
 The reconciliation must list all nine exact response commits and response
 hashes, each disposition, all nine persisted Pass 3 review-record paths and
@@ -149,15 +160,16 @@ Pin the resulting reconciliation artifact SHA-256 and final profile/ABI hash;
 the two hashes must identify unambiguous immutable bytes. Any subsequent field
 change requires a new reconciliation version and a full recomputation.
 
-An independent Pass 1 plan review authorizes the reconciliation artifact to be
-prepared. After it is prepared, a distinct independent exact-head Pass 3
-reviewer must verify owner/replacement coverage, compatibility, decision-gate
-closure, byte derivation, immutable hash binding, and absence of unsupported
-human-approval or implementation claims. Persist that review. Any revision
-changes the candidate head and requires review of the new exact head. The
-owner-adoption matrix may be updated only in a separately scoped, reviewed
-documentation tranche that records the reconciled evidence; no matrix mutation
-is authorized here.
+After the conditionally authorized reconciliation artifact is prepared, a
+distinct independent exact-head Pass 3 reviewer must verify
+owner/replacement coverage, compatibility, closure of every required decision
+gate, byte derivation, immutable hash binding, and absence of unsupported
+human-approval or implementation claims. Persist that review at the exact
+review-record path above, pinning the reconciliation commit and blob
+SHA-256. Any revision changes the candidate head and requires a new review at
+that same path for the new exact head. The owner-adoption matrix may be updated
+only in a separately scoped, reviewed documentation tranche that records the
+reconciled evidence; no matrix mutation is authorized here.
 
 ## Explicit boundary and next implementation gates
 
@@ -188,7 +200,17 @@ The sole file allowlist for this planning candidate is this document. Its
 review checks factual pins, scoped Pass 2 paths, replacement/re-decision logic,
 payload/reconciliation gates, no-human-approval language, and the explicit
 source/runtime/training boundary. Pass 1 ACCEPT authorizes documentation-only
-work on exactly the six response paths in the Pass 2 table and exactly the nine
-review-record paths listed above. The six response paths and nine review
-paths are separate allowlists; a response author may not write its review
-record. No other file or action is authorized by this plan.
+work on exactly these paths: the six response paths in the Pass 2 table; the
+nine response-review paths listed above; and, conditionally, the reconciliation
+artifact `docs/plans/gpu-shared-command-ppo-transition-abi-v4-owner-reconciliation-20261026.md`
+plus its review record
+`docs/plans/v4-owner-responses/reviews/owner-reconciliation.md`. The latter
+two paths are authorized only after all nine current rows have final reviewed
+compatible dispositions, replacement impacts are re-decided, and no required
+row or field remains PENDING. If any remains PENDING, neither conditional path
+may be written and a new scope/decision is required. The six response paths,
+nine response-review paths, and two conditional reconciliation paths are
+separate allowlists; response authors may not write review records. No other
+file or action is authorized by this plan. This plan does not authorize source,
+schema, test, compilation, runtime/device, simulator/dashboard, checkpoint,
+campaign, training, evaluation, or qualification work.
