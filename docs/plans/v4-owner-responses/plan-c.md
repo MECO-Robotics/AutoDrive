@@ -15,15 +15,13 @@ Date: 2026-10-26
   `ee234b2c5162038e6fcfff6d9551d80f443f6d82`, SHA-256
   `9888eb2a8d5e63b04aa328dca222dd08520a709e2ee78684f9d2dc07aafede53`.
 
-## Disposition: PENDING
+## Disposition: ADOPT
 
 I adopt the V4 Plan C profile choice `K=16` and define the Plan C source-row,
-descriptor-code, candidate-mask, rank, and identity mappings below. The only
-remaining Plan C adoption gate is the cross-owner route-sink join: Route has
-not yet adopted the mapping from each full source-global row to its route sink
-row, target handle, and inactive-row representation. The source-local mapping
-is explicit here; V4 adoption remains pending until Route accepts the shared
-join and sentinel contract.
+descriptor-code, candidate-mask, rank, and identity mappings below, together
+with the Route owner's accepted full-sink join and sentinel contract. This
+adopts the exact pinned V4 proposal for the delegated Plan C row; it does not
+claim implementation or global ABI publication.
 
 ## Evidence and scoped findings
 
@@ -135,31 +133,35 @@ join and sentinel contract.
    Plan C owner's adopted contract, including profile digest, row masks, and
    code registries (response commit `602565ef99986996d2c12d06024833247dc3d395`,
    SHA-256 `219f3466741c17d9e49a4d402f0b3f8ae6f016f0738a068034a8ad312f610d75`).
-   Observation/native defines anonymous target handles with generation-safe
-   observer-slot identity but remains PENDING on environment-instance issuance
-   and macro trace production (response commit
-   `af0f8b4ca4759441030f2625aa23ce555a06bbac`, SHA-256
-   `ceb78d960ce29313dda5d3fe3f8e2f6a60258dfaeaf2ca96275e50698431b24a`).
-   Route remains PENDING because its response still lacks an adopted exact join
-   among full route-sink row, Plan C source-global row, ordinary/continuation
-   maps, target handle, and selected command (route response commit
-   `e44d5d2c815ee176d95cb87cb3a9ea0635c76dd9`, SHA-256
-   `e3d3102faf8476d00516e1facafdb8850e9d50a9e98dd6bd2199005bff478995`).
+   Observation/native ADOPTs V4 and defines the anonymous generation-safe
+   target-handle and snapshot lifecycle used by this mapping (response commit
+   `fa21a91d81b11008014925e8c62ed4c42f4c58e8`, file SHA-256
+   `b43f1a57da8548088f439e65475c6d4963206638`). Route's accepted addendum
+   closes the Plan C-specific join: route response commit
+   `96a75df0221a8c76e8b9c5fe564bb8d336c98c80`, file SHA-256
+   `29ce9a21719e2cb65dbe513565b9012c51b9c7d8e00b65a57a46a98172aaf113`,
+   independently reviewed ACCEPT in review-record commit
+   `7ea6d8225d3d12acf72be6bc13f1b1b1c052ad4d`, review-file SHA-256
+   `0e223122f0322b07da0e011227be70ce7bb7f068caa39913ebf98113708b64a1`.
+   The addendum binds policy sink row `q` to source-global row `r=q`, carries
+   the same row in `policy_source_row` and `route_ref`, maps continuation to
+   row 536, preserves full target handles, and specifies inactive/oracle
+   sentinels. Its ACCEPT validates that exact Route response; the Route owner
+   retains its own PENDING disposition for independent profile-generalization,
+   learned-cost provenance, and canonical payload questions, which are outside
+   this Plan C row.
 
-## Exact remaining cross-row gate
+## Disposition basis and scope limits
 
-Route owner must adopt the Plan C mapping `route_ref = source_global_row` for
-policy rows 0-536, with the V4 route sink's `policy_source_row` carrying that
-same source-global row. It must bind each policy query's `target_handle` and
-snapshot to the descriptor/target table for that source row, preserve the
-continuation at row 536, and specify inactive/oracle-row sentinels without
-reusing Plan C source identities. Until that route join and sentinel contract
-is accepted, Plan C's source-local mapping is defined but cross-row identity
-is not closed. Any change to row ordering, handle reference, or code allocation
-requires Route and PPO/RNG to update their mappings and support-digest registry;
-Artifact/manifest must then bind the resulting source/profile identity and
-payload length. No product choice or source evidence remains unresolved within
-this Plan C row.
+The route/source join and observation target-handle dependency that previously
+held this row pending are now pinned above. This Plan C adoption remains scoped
+to the exact V4 artifact and the `E=504`, `K=16`, `G_C=537` profile. It does not
+resolve Route's remaining owner-row questions about generalized profiles,
+learned-cost provenance, or serialized payload bytes, nor Artifact/manifest's
+separately owned digest framing and checkpoint binding. Any change to row
+ordering, handle reference, or code allocation requires the affected owners to
+revise their mappings and support-digest registry and receive fresh review.
+These external limits do not leave an unresolved Plan C source-row decision.
 
 ## Scope and authority
 
