@@ -8,7 +8,7 @@
 **Overall-plan G0/source-authoring amendment:** 8efec9378d1912f0839d7c6cd8e88467fceb1d5a; file SHA-256 57f20a1bcfe6f229429d402140de93a0ee1780372e21a9ac3344f81c72faca90; pending fresh independent review
 **Accepted P0 package plan:** 13dbd7f8f953995850e811202f7e9c5264c49dca; file SHA-256 09ec722d64d01d99b60cc9ed52e47ce68790e548f66107cc1a19dd9a7a588adf  
 **Accepted P1 package plan:** 53686a254318484f9c6bc3496ecc1c461572c53a; file SHA-256 21c07b2c08d37e48ed5d0dac1f149e4a45eb89d59360f466b587f534cf81e076; exact Pass 1 ACCEPT record 854d5286947074ed33f7ac059d67f2f9ccbf9257  
-**P0 package plan gate amendment:** `3185de5d9108717ff6eb5eb998ecfb41ad356057`, pending fresh review; P0a human decisions and candidate ACCEPT remain source-only prerequisites.
+**P0 package plan gate amendment:** `c4f136b267f8e41e0baec53394f28fac28f16eb5`, pending fresh review; P0a human decisions and candidate ACCEPT remain source-only prerequisites.
 **P2 package plan gate amendment:** `1f918a9e0f99ec49a0baf4c3ce69649c4f095a2a`, pending fresh review; API head remains pending.
 **P3 package plan:** original ACCEPT at `8b641ccc56b7c73a880a095b3c6940cb03b617f3`; gate amendment pending fresh review; implementation/API head remains pending.
 **P3 gate amendment:** `bbeb3ce3bedf4827e8b4f0d337705e1cdb9765ec`, file SHA-256 `d3849f802087b9702e98b93aafc24a379710bfb4a22b750d9b7eedf08a72b50f`; pending fresh independent review.
