@@ -1,0 +1,40 @@
+# MECO V4 P1.1 score-event source map
+
+**Status:** P1.1 static source map; **producer implementation STOPPED** pending the source semantics below. This is not runtime or scoring validation.
+**Reviewed source base:** `6ed961a09c08dfc1796d98ae3566bd3f0eaaaf22`.
+**Accepted P1 package plan:** `40d151dec437fe405bd84d2918b2b86ae6f4a129`, file SHA-256 `1cfe7ccd56a4355501a7e46a3d3e3cd9bf0ae1c443bb0da571c27e05f6043300`; exact Pass 1 ACCEPT record `2810a315970c56b0161bbfbae025a7a0301ece8e`, record SHA-256 `dedcca460b1cfc7d89c2f13ccd383783f674a5085f99052c4e30caf21f4ba339`.
+**Approved protocol decision:** P0a candidate `56183cefd2402342ce28f836155164fc850ebc60`, with maintainer decision record `7007607010636fe7451ad1b59eb1a900e0a4d7b1` and exact-head Pass 3 ACCEPT record `d5dab585ef1147f0d9997ece80db6e9a7ba95979`. The approved estimand is whole-alliance accepted active-HUB FUEL awards by unique event ID, with red/blue totals; it is a limited simulated proxy, not official match points and not a per-robot causal estimate.
+
+## Source identity and path
+
+All source observations below are from the reviewed base above. SHA-256 values identify the exact inspected file bytes. No project code was imported or executed.
+
+| Role | Source and observed behavior | SHA-256 |
+|---|---|---|
+| Vectorized scoring producer | `frc_defense/gamepiece_actions.py`, `update_fuel_actions` (source lines 329–380): derives held/eligible pieces, selects the first eligible physical slot per robot into `chosen`, counts accepted selections, updates `fuel_scored_event` and alliance `fuel_score_count`, then updates automatic score and score interval state. | `74c47eb546565f46712bd5328c50c71b07275b897cb1ef3fc9216b67d4ad260c` |
+| Per-robot scoring producer | Same function (lines 382–422): the fallback loop applies the corresponding checks per controlled robot, selects a physical slot, updates event/counter state and sets `newly_scored`. | same |
+| Physical mutation | Same function (lines 425–453): after score bookkeeping, scored pieces are sent through respawn/launch logic; `piece_owner` is cleared to `-1`, zone is reset, and the possible-cell index is updated. The accepted source row is the selected `chosen`/`newly_scored` physical piece, not a score-intent pulse or cumulative counter. | same |
+| Dispatch and clock order | `frc_defense/_tensor_3v3_gamepieces.py`: `_update_fuel` dispatches to `update_fuel_actions`; `_update_match` advances active worlds' `match_elapsed` by `dt` (lines 133–135). `frc_defense/tensor_3v3.py::step` advances physics, increments `steps`, calls `_update_match`, then `_update_fuel` (lines 1340–1342). | `480042250dcf281142929c62abf8bac60c007c498fb6105d517c55d7f645746a`; `tensor_3v3.py`: `e4925bfc100a487fbf734d0620cd7ab3b66ffc4e9027edb1cde78cbaca2f982e` |
+| State and reset | `frc_defense/tensor_3v3.py` allocates aggregate score and event tensors plus physical piece arrays (lines 305–322, 382); full reset clears score/event state and reinitializes fuel (434–481); `reset_done(mask)` clears selected worlds' score/event state and reinitializes their fuel (494–546). No physical piece-generation tensor or episode-event-sequence tensor is present at this base. | same |
+| Step outputs and reward | `tensor_3v3.py` computes its shared zero-sum reward from per-robot `fuel_scored_event` (1392–1395) and exposes `fuel_scored_event`, aggregate `team_score` (`fuel_score_count`) and `match_elapsed` in optional `info` (1401–1408). These are aggregate outputs; they do not provide unique event IDs. | same |
+| Metric consumer | `frc_defense/meco_metric_ledger.py` maps `fuel_scored` to `fuel_scored_event` (lines 102–114), accumulating focal-robot event quantities. It is not an accepted-event ID ledger or whole-alliance score source. | `aa2a440c056a8a54978196aa4d0c6bf809ff807d78ae0d618a33ba8b26e3fb49` |
+| Evaluation/report consumer | `frc_defense/tensor_training_evaluation.py` accumulates `fuel_scored_event` and emits `total_simulated_score` by summing those aggregates (lines 260–269, 478–489). Replay frames also serialize aggregate score state. This does not establish unique accepted-event IDs or independently reconstruct the P0a estimand. | `72036f22011a03fdbcd5ac8f235608ee3a37716b18b8c449f1b289c2b0500483` |
+| P5 trainer boundary | `frc_defense/meco_track_training.py` consumes current action/event observations in rollout paths; the accepted overall plan assigns this shared trainer, PPO, reward/return collection and checkpoint handoff to P5. P1 must publish a typed API by reference and must not edit this file. | `da3cb88c320aa8a2945b6ad0c9d9b4dbd34ef843778eaabde8b0f3660a99b07b` |
+| P0a ledger module | `frc_defense/meco_simulated_score_ledger.py` is absent from this pinned base. Its presence on a later checkout is not source authority for this worktree and must not be copied here without an approved base/plan change. | absent |
+
+## Source facts versus unresolved contract
+
+The accepted ABI fixes the V4 row field names, types, byte widths/order, capacity and registered codes. At this base, the following required event semantics are not source-defined. This P1.1 map therefore **does not authorize P1.3 producer or consumer edits**:
+
+1. **Physical incarnation:** slots are reused after score/respawn, but there is no `piece_generation` state or initialization/increment/reset/exhaustion lifecycle. Do not assume generation zero or invent an increment rule.
+2. **Event sequence:** no episode-local `episode_event_sequence:uint16` exists. The source selects at most one piece per robot in two branches, but does not define a common deterministic serialization order or sequence allocation/reset rule. Do not choose one by branch, robot loop, or tensor layout.
+3. **Tick and elapsed-time sample:** `steps` and `match_elapsed` advance before `_update_fuel`; the ABI does not specify zero/one-based `tick` or exactly which `match_elapsed` sample belongs to the event. Line order alone does not settle the intended contract.
+4. **Canonical ledger consumer:** the P0a-defined whole-alliance event-ID aggregation module is absent at the approved implementation base. Existing reward, curriculum metric, metric ledger and evaluation aggregates are not substitutes.
+
+The source map confirms the score-producing mutation sites and their current consumers, but cannot safely resolve these four items using only the pinned source and accepted contracts. P1.1 is therefore **complete as an evidence map and blocked as semantic closure**. Stop before event-producing code. The smallest next action is a separately reviewed gamepiece/score-owner addendum defining physical generation lifecycle and event sequence/reset/tick conventions, with a reviewed base/module decision for the missing ledger consumer. Any required ABI field meaning/width/code change returns to ABI reconciliation and requires a new P0a decision and profile hash.
+
+P1.2 may implement only the fixed-byte schema/API specified by the accepted P1 plan; it must not make unresolved event semantics normative. P1.3 and P1.4 remain blocked until the source-map questions close under reviewed authority. P5 remains sole owner of trainer integration.
+
+## Validation boundary
+
+This artifact is static source inspection only. No tests, imports, builds, score calculations, simulator evaluation, replay, dashboard operation, calibration, GPU/device use, training, integration or campaign/lease operation was performed. The active campaign and both device leases were not inspected or touched. Runtime scoring and replay correctness remain unvalidated.
