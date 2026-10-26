@@ -7,17 +7,18 @@
 
 void plan_a_dijkstra_launch(const int64_t*, const double*, const double*,
     const bool*, double*, double*, int64_t*, double*, int64_t*, int64_t,
-    int64_t, int64_t, int64_t, double, double, double*, int64_t*, int64_t*,
-    hipStream_t);
+    int64_t, int64_t, int64_t, const int64_t*, const double*, const double*,
+    double*, int64_t*, int64_t*, hipStream_t);
 void plan_a_dijkstra_graph_launch(const double*, const double*, const int64_t*,
     const bool*, double*, double*, int64_t*, double*, int64_t*, int64_t,
-    int64_t, int64_t, int64_t, double, double, double*, int64_t*, int64_t*,
-    hipStream_t);
+    int64_t, int64_t, int64_t, const int64_t*, const double*, const double*,
+    double*, int64_t*, int64_t*, hipStream_t);
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
-           torch::Tensor> dijkstra(torch::Tensor edge_dst,
+           torch::Tensor, torch::Tensor> dijkstra(torch::Tensor edge_dst,
     torch::Tensor edge_cost, torch::Tensor edge_length, torch::Tensor edge_allowed,
-    int64_t root, double root_start_cost, double root_connector_m) {
+    torch::Tensor root_index, torch::Tensor root_start_cost,
+    torch::Tensor root_connector_m) {
   TORCH_CHECK(edge_dst.is_cuda() && edge_dst.scalar_type() == at::kLong &&
       edge_dst.dim() == 2 && edge_dst.is_contiguous(),
       "edge_dst must be contiguous HIP int64 [N,S]");
@@ -30,14 +31,24 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
   TORCH_CHECK(edge_allowed.is_cuda() && edge_allowed.scalar_type() == at::kBool &&
       edge_allowed.sizes() == edge_dst.sizes() && edge_allowed.is_contiguous() &&
       edge_allowed.device() == edge_dst.device(), "edge_allowed must be HIP bool [N,S]");
+  TORCH_CHECK(root_index.is_cuda() && root_index.scalar_type() == at::kLong &&
+      root_index.dim() == 0 && root_index.is_contiguous() &&
+      root_index.device() == edge_dst.device(),
+      "root_index must be same-device HIP int64 scalar");
+  TORCH_CHECK(root_start_cost.is_cuda() &&
+      root_start_cost.scalar_type() == at::kDouble &&
+      root_start_cost.dim() == 0 && root_start_cost.is_contiguous() &&
+      root_start_cost.device() == edge_dst.device(),
+      "root_start_cost must be same-device HIP float64 scalar");
+  TORCH_CHECK(root_connector_m.is_cuda() &&
+      root_connector_m.scalar_type() == at::kDouble &&
+      root_connector_m.dim() == 0 && root_connector_m.is_contiguous() &&
+      root_connector_m.device() == edge_dst.device(),
+      "root_connector_m must be same-device HIP float64 scalar");
   const auto n = edge_dst.size(0), slots = edge_dst.size(1);
-  TORCH_CHECK(n > 0 && slots > 0 && root >= 0 && root < n,
-      "invalid graph shape or root");
+  TORCH_CHECK(n > 0 && slots > 0, "invalid graph shape");
   TORCH_CHECK(n <= (std::numeric_limits<int64_t>::max() - 1) / slots,
       "graph edge count overflows the HIP heap capacity");
-  TORCH_CHECK(std::isfinite(root_start_cost) && std::isfinite(root_connector_m) &&
-      root_start_cost >= 0. && root_connector_m >= 0.,
-      "root costs must be finite and nonnegative");
   c10::cuda::CUDAGuard guard(edge_dst.device());
   auto options = edge_cost.options();
   auto route = torch::full({n}, INFINITY, options);
@@ -53,22 +64,20 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
       edge_length.data_ptr<double>(), edge_allowed.data_ptr<bool>(),
       route.data_ptr<double>(), physical.data_ptr<double>(), parent.data_ptr<int64_t>(),
       parent_length.data_ptr<double>(), traversal.data_ptr<int64_t>(), n, slots,
-      heap_capacity, root, root_start_cost, root_connector_m,
+      heap_capacity, root_index.data_ptr<int64_t>(),
+      root_start_cost.data_ptr<double>(), root_connector_m.data_ptr<double>(),
       heap_distance.data_ptr<double>(), heap_node.data_ptr<int64_t>(),
       status.data_ptr<int64_t>(),
       c10::cuda::getCurrentCUDAStream(edge_dst.get_device()));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
-  const auto device_status = status.item<int64_t>();
-  TORCH_CHECK(device_status == 0,
-      device_status == 1 ? "invalid active edge in Plan A HIP graph" :
-      "Plan A HIP heap capacity exceeded");
-  return {route, physical, parent, parent_length, traversal};
+  return {route, physical, parent, parent_length, traversal, status};
 }
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
-           torch::Tensor> dijkstra_graph(torch::Tensor xy,
+           torch::Tensor, torch::Tensor> dijkstra_graph(torch::Tensor xy,
     torch::Tensor heading, torch::Tensor edge_dst, torch::Tensor edge_allowed,
-    int64_t root, double root_start_cost, double root_connector_m) {
+    torch::Tensor root_index, torch::Tensor root_start_cost,
+    torch::Tensor root_connector_m) {
   TORCH_CHECK(xy.is_cuda() && xy.dim() == 2 && xy.size(1) == 2 &&
       (xy.scalar_type() == at::kFloat || xy.scalar_type() == at::kDouble),
       "xy must be HIP float32/float64 [N,2]");
@@ -83,14 +92,24 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
   TORCH_CHECK(edge_allowed.is_cuda() && edge_allowed.scalar_type() == at::kBool &&
       edge_allowed.sizes() == edge_dst.sizes() && edge_allowed.is_contiguous() &&
       edge_allowed.device() == xy.device(), "edge_allowed must be HIP bool [N,S]");
+  TORCH_CHECK(root_index.is_cuda() && root_index.scalar_type() == at::kLong &&
+      root_index.dim() == 0 && root_index.is_contiguous() &&
+      root_index.device() == xy.device(),
+      "root_index must be same-device HIP int64 scalar");
+  TORCH_CHECK(root_start_cost.is_cuda() &&
+      root_start_cost.scalar_type() == at::kDouble &&
+      root_start_cost.dim() == 0 && root_start_cost.is_contiguous() &&
+      root_start_cost.device() == xy.device(),
+      "root_start_cost must be same-device HIP float64 scalar");
+  TORCH_CHECK(root_connector_m.is_cuda() &&
+      root_connector_m.scalar_type() == at::kDouble &&
+      root_connector_m.dim() == 0 && root_connector_m.is_contiguous() &&
+      root_connector_m.device() == xy.device(),
+      "root_connector_m must be same-device HIP float64 scalar");
   const auto n = edge_dst.size(0), slots = edge_dst.size(1);
-  TORCH_CHECK(n > 0 && slots > 0 && root >= 0 && root < n,
-      "invalid graph shape or root");
+  TORCH_CHECK(n > 0 && slots > 0, "invalid graph shape");
   TORCH_CHECK(n <= (std::numeric_limits<int64_t>::max() - 1) / slots,
       "graph edge count overflows the HIP heap capacity");
-  TORCH_CHECK(std::isfinite(root_start_cost) && std::isfinite(root_connector_m) &&
-      root_start_cost >= 0. && root_connector_m >= 0.,
-      "root costs must be finite and nonnegative");
   c10::cuda::CUDAGuard guard(xy.device());
   // Conversion stays on the selected device. The kernel promotes each stored
   // coordinate to double before applying the Python math geometry contract.
@@ -110,15 +129,12 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
       edge_dst.data_ptr<int64_t>(), edge_allowed.data_ptr<bool>(),
       route.data_ptr<double>(), physical.data_ptr<double>(), parent.data_ptr<int64_t>(),
       parent_length.data_ptr<double>(), traversal.data_ptr<int64_t>(), n, slots,
-      heap_capacity, root, root_start_cost, root_connector_m,
+      heap_capacity, root_index.data_ptr<int64_t>(),
+      root_start_cost.data_ptr<double>(), root_connector_m.data_ptr<double>(),
       heap_distance.data_ptr<double>(), heap_node.data_ptr<int64_t>(),
       status.data_ptr<int64_t>(), c10::cuda::getCurrentCUDAStream(xy.get_device()));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
-  const auto device_status = status.item<int64_t>();
-  TORCH_CHECK(device_status == 0,
-      device_status == 1 ? "invalid active edge in Plan A HIP graph" :
-      "Plan A HIP heap capacity exceeded");
-  return {route, physical, parent, parent_length, traversal};
+  return {route, physical, parent, parent_length, traversal, status};
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {

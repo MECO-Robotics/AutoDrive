@@ -145,11 +145,6 @@ def plan_a_dijkstra_hip(edge_dst, edge_costs, edge_lengths, edge_allowed, *, roo
     if not PLAN_A_HIP_PARITY_PROFILE_GATE_PASSED:
         raise RuntimeError("Plan A HIP dispatch is disabled pending WX9100 parity and profiling")
     selected = _require_wx9100_device(edge_costs.device)
-    if (type(root) is not int or type(root_start_cost) not in (int, float) or
-            type(root_connector_m) not in (int, float) or
-            not math.isfinite(float(root_start_cost)) or float(root_start_cost) < 0 or
-            not math.isfinite(float(root_connector_m)) or float(root_connector_m) < 0):
-        raise ValueError("HIP heap root and connector costs must be finite and nonnegative")
 
     from .meco_plan_a_shortest_path_hip import extension
 
@@ -163,12 +158,20 @@ def plan_a_dijkstra_hip(edge_dst, edge_costs, edge_lengths, edge_allowed, *, roo
             edge_allowed.shape == edge_costs.shape and edge_allowed.dtype == torch.bool and
             edge_costs.device == edge_lengths.device == edge_allowed.device == edge_dst.device == selected and
             edge_dst.dtype == torch.int64 and edge_dst.shape == edge_costs.shape and
-            edge_dst.is_cuda):
+            edge_dst.is_cuda and
+            torch.is_tensor(root) and root.ndim == 0 and root.dtype == torch.int64 and
+            root.is_cuda and root.device == selected and root.is_contiguous() and
+            torch.is_tensor(root_start_cost) and root_start_cost.ndim == 0 and
+            root_start_cost.dtype == torch.float64 and root_start_cost.is_cuda and
+            root_start_cost.device == selected and root_start_cost.is_contiguous() and
+            torch.is_tensor(root_connector_m) and root_connector_m.ndim == 0 and
+            root_connector_m.dtype == torch.float64 and root_connector_m.is_cuda and
+            root_connector_m.device == selected and root_connector_m.is_contiguous()):
         raise ValueError("HIP heap requires same-device float64 costs/lengths and bool mask")
-    route, physical, parent, parent_length, _settled = extension().dijkstra(
+    route, physical, parent, parent_length, _settled, status = extension().dijkstra(
         edge_dst.contiguous(), edge_costs.contiguous(), edge_lengths.contiguous(),
-        edge_allowed.contiguous(), int(root), float(root_start_cost),
-        float(root_connector_m))
+        edge_allowed.contiguous(), root.contiguous(), root_start_cost.contiguous(),
+        root_connector_m.contiguous())
     reachable = torch.isfinite(route)
     reachable_nodes = torch.arange(route.numel(), device=route.device,
                                    dtype=torch.long)[reachable]
@@ -177,7 +180,7 @@ def plan_a_dijkstra_hip(edge_dst, edge_costs, edge_lengths, edge_allowed, *, roo
     order = reachable_nodes[torch.argsort(route[reachable], stable=True)]
     return {"route_cost": route, "physical_distance": physical,
         "parent_ids": parent, "parent_edge_m": parent_length,
-        "traversal_order": order}
+        "traversal_order": order, "status": status}
 
 
 def plan_a_dijkstra_hip_for_graph(graph, *, device, root, root_start_cost,
@@ -207,20 +210,23 @@ def plan_a_dijkstra_hip_for_graph(graph, *, device, root, root_start_cost,
             edge_dst.dtype != torch.int64 or edge_allowed.dtype != torch.bool or
             xy.dtype not in (torch.float32, torch.float64) or
             heading.dtype not in (torch.float32, torch.float64) or
-            type(root) is not int or not 0 <= root < n or
-            type(root_start_cost) not in (int, float) or
-            type(root_connector_m) not in (int, float) or
-            not math.isfinite(float(root_start_cost)) or float(root_start_cost) < 0 or
-            not math.isfinite(float(root_connector_m)) or float(root_connector_m) < 0):
+            not torch.is_tensor(root) or root.device != selected or
+            root.ndim != 0 or root.dtype != torch.int64 or not root.is_contiguous() or
+            not torch.is_tensor(root_start_cost) or root_start_cost.device != selected or
+            root_start_cost.ndim != 0 or root_start_cost.dtype != torch.float64 or
+            not root_start_cost.is_contiguous() or
+            not torch.is_tensor(root_connector_m) or root_connector_m.device != selected or
+            root_connector_m.ndim != 0 or root_connector_m.dtype != torch.float64 or
+            not root_connector_m.is_contiguous()):
         raise ValueError("HIP graph route requires valid same-device graph tensors and root costs")
     from .meco_plan_a_shortest_path_hip import extension
-    route, physical, parent, parent_length, settled = extension().dijkstra_graph(
+    route, physical, parent, parent_length, settled, status = extension().dijkstra_graph(
         xy.contiguous(), heading.contiguous(), edge_dst.contiguous(),
-        edge_allowed.contiguous(), root, float(root_start_cost),
-        float(root_connector_m))
+        edge_allowed.contiguous(), root.contiguous(), root_start_cost.contiguous(),
+        root_connector_m.contiguous())
     # The device heap settles nodes by (distance, node_id); remove only the
     # unreachable -1 tail without materializing any route data on the host.
     order = settled[settled >= 0]
     return {"route_cost": route, "physical_distance": physical,
         "parent_ids": parent, "parent_edge_m": parent_length,
-        "traversal_order": order}
+        "traversal_order": order, "status": status}

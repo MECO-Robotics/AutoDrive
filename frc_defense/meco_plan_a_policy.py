@@ -132,17 +132,29 @@ def build_plan_a_support(env, graph, observation, snapshot_id: str, *,
     angle = torch.atan2(torch.sin(graph.heading - pose[2]),
                         torch.cos(graph.heading - pose[2])).abs()
     start_cost = (graph.xy - pose[:2]).norm(dim=-1) + angle * .25
-    root = int(start_cost.argmin().item())
-    root_connector_m = float((pose[:2] - graph.xy[root]).norm())
     if require_hip_shortest_path:
         # This mode is used by the Plan A P-route collector. It must not copy
         # graph edges to Python or fall back to the CPU reference when the
-        # exact-heap HIP parity/profile gate is closed.
+        # exact-heap HIP parity/profile gate is closed. Keep root and connector
+        # values as same-device scalars all the way into the native ABI.
+        root = start_cost.argmin().to(dtype=torch.int64)
+        root_row = root.reshape(1)
+        root_start_cost = start_cost.index_select(0, root_row)[0].to(torch.float64)
+        root_xy = graph.xy.index_select(0, root_row)[0]
+        root_connector_m = (pose[:2] - root_xy).norm().to(torch.float64)
         from .meco_plan_a_shortest_path import plan_a_dijkstra_hip_for_graph
-        paths = plan_a_dijkstra_hip_for_graph(graph, device=device, root=root,
-            root_start_cost=float(start_cost[root]),
-            root_connector_m=root_connector_m)
+        plan_a_dijkstra_hip_for_graph(graph, device=device, root=root,
+            root_start_cost=root_start_cost, root_connector_m=root_connector_m)
+        # Status is device-resident, but the current source boundary does not
+        # yet bind it into the common command/transition. Keep this prototype
+        # non-dispatchable until that owner integration exists.
+        raise RuntimeError(
+            "Plan A tensor-root source requires device status binding before support dispatch")
     else:
+        # The CPU reference remains an offline semantic oracle. It is not used
+        # as a fallback from the gated HIP path above.
+        root = int(start_cost.argmin().item())
+        root_connector_m = float((pose[:2] - graph.xy[root]).norm())
         from .meco_plan_a_shortest_path import (cached_plan_a_edge_weights,
             plan_a_dijkstra_cpu)
         edge_dst, edge_costs, edge_translations, edge_allowed = \

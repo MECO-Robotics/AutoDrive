@@ -49,9 +49,11 @@ __global__ void plan_a_dijkstra_kernel(const int64_t* edge_dst,
     const double* edge_cost, const double* edge_length, const bool* edge_allowed,
     double* route, double* physical, int64_t* parent, double* parent_length,
     int64_t* traversal, int64_t n, int64_t slots, int64_t heap_capacity,
-    int64_t root, double root_start_cost, double root_connector_m,
+    const int64_t* root_index, const double* root_start_cost,
+    const double* root_connector_m,
     double* heap_distance, int64_t* heap_node, int64_t* status) {
   if (blockIdx.x != 0 || threadIdx.x != 0) return;
+  *status = 0;
   for (int64_t node = 0; node < n; ++node) {
     route[node] = INFINITY;
     physical[node] = INFINITY;
@@ -59,11 +61,23 @@ __global__ void plan_a_dijkstra_kernel(const int64_t* edge_dst,
     parent_length[node] = 0.0;
     traversal[node] = -1;
   }
-  route[root] = root_start_cost;
-  physical[root] = root_connector_m;
+  const int64_t root = *root_index;
+  const double start_cost = *root_start_cost;
+  const double connector_m = *root_connector_m;
+  if (root < 0 || root >= n) {
+    *status = 3;
+    return;
+  }
+  if (!isfinite(start_cost) || start_cost < 0.0 ||
+      !isfinite(connector_m) || connector_m < 0.0) {
+    *status = 4;
+    return;
+  }
+  route[root] = start_cost;
+  physical[root] = connector_m;
   int64_t heap_size = 0;
   int64_t settled_count = 0;
-  heap_push(heap_distance, heap_node, &heap_size, root_start_cost, root);
+  heap_push(heap_distance, heap_node, &heap_size, start_cost, root);
   while (heap_size > 0) {
     double distance;
     int64_t src;
@@ -109,9 +123,11 @@ __global__ void plan_a_dijkstra_graph_kernel(const double* xy,
     const double* heading, const int64_t* edge_dst, const bool* edge_allowed,
     double* route, double* physical, int64_t* parent, double* parent_length,
     int64_t* traversal, int64_t n, int64_t slots, int64_t heap_capacity,
-    int64_t root, double root_start_cost, double root_connector_m,
+    const int64_t* root_index, const double* root_start_cost,
+    const double* root_connector_m,
     double* heap_distance, int64_t* heap_node, int64_t* status) {
   if (blockIdx.x != 0 || threadIdx.x != 0) return;
+  *status = 0;
   for (int64_t node = 0; node < n; ++node) {
     route[node] = INFINITY;
     physical[node] = INFINITY;
@@ -119,11 +135,23 @@ __global__ void plan_a_dijkstra_graph_kernel(const double* xy,
     parent_length[node] = 0.0;
     traversal[node] = -1;
   }
-  route[root] = root_start_cost;
-  physical[root] = root_connector_m;
+  const int64_t root = *root_index;
+  const double start_cost = *root_start_cost;
+  const double connector_m = *root_connector_m;
+  if (root < 0 || root >= n) {
+    *status = 3;
+    return;
+  }
+  if (!isfinite(start_cost) || start_cost < 0.0 ||
+      !isfinite(connector_m) || connector_m < 0.0) {
+    *status = 4;
+    return;
+  }
+  route[root] = start_cost;
+  physical[root] = connector_m;
   int64_t heap_size = 0;
   int64_t settled_count = 0;
-  heap_push(heap_distance, heap_node, &heap_size, root_start_cost, root);
+  heap_push(heap_distance, heap_node, &heap_size, start_cost, root);
   while (heap_size > 0) {
     double distance;
     int64_t src;
@@ -182,24 +210,26 @@ void plan_a_dijkstra_launch(const int64_t* edge_dst, const double* edge_cost,
     const double* edge_length, const bool* edge_allowed, double* route,
     double* physical, int64_t* parent, double* parent_length,
     int64_t* traversal, int64_t n, int64_t slots, int64_t heap_capacity,
-    int64_t root, double root_start_cost, double root_connector_m,
+    const int64_t* root_index, const double* root_start_cost,
+    const double* root_connector_m,
     double* heap_distance, int64_t* heap_node, int64_t* status,
     hipStream_t stream) {
   hipLaunchKernelGGL(plan_a_dijkstra_kernel, dim3(1), dim3(1), 0, stream,
       edge_dst, edge_cost, edge_length, edge_allowed, route, physical, parent,
-      parent_length, traversal, n, slots, heap_capacity, root, root_start_cost,
-      root_connector_m, heap_distance, heap_node, status);
+      parent_length, traversal, n, slots, heap_capacity, root_index,
+      root_start_cost, root_connector_m, heap_distance, heap_node, status);
 }
 
 void plan_a_dijkstra_graph_launch(const double* xy, const double* heading,
     const int64_t* edge_dst, const bool* edge_allowed, double* route,
     double* physical, int64_t* parent, double* parent_length,
     int64_t* traversal, int64_t n, int64_t slots, int64_t heap_capacity,
-    int64_t root, double root_start_cost, double root_connector_m,
+    const int64_t* root_index, const double* root_start_cost,
+    const double* root_connector_m,
     double* heap_distance, int64_t* heap_node, int64_t* status,
     hipStream_t stream) {
   hipLaunchKernelGGL(plan_a_dijkstra_graph_kernel, dim3(1), dim3(1), 0, stream,
       xy, heading, edge_dst, edge_allowed, route, physical, parent,
-      parent_length, traversal, n, slots, heap_capacity, root, root_start_cost,
-      root_connector_m, heap_distance, heap_node, status);
+      parent_length, traversal, n, slots, heap_capacity, root_index,
+      root_start_cost, root_connector_m, heap_distance, heap_node, status);
 }
