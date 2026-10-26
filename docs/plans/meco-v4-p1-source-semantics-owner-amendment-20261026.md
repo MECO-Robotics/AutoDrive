@@ -41,7 +41,7 @@ Accepted Gamepiece/score response `3738ad58fc883c5853b32c508e89ac657864bca4`, fi
 
 **Already fixed:** sequence resets only under a new `episode_generation`, per the accepted owner response above.
 
-**Adopted order:** assign sequences only to accepted mutations, sorted within each episode by `(rollout_row_index, tick, robot_slot, piece_slot, source_site_code)`. Events from one physics update share `tick`, then use robot slot, piece slot, and source-site order. This avoids dependence on reduction order, Python loop order, or GPU scheduling. Sequence starts at zero for a new episode generation.
+**Adopted order:** assign sequences only to accepted mutations, sorted chronologically within each episode by `(tick, rollout_row_index, robot_slot, piece_slot, source_site_code)`. The episode sequence counter persists across batch boundaries; batch-local rollout-row indices never restart the episode sequence. Events from one physics update share `tick`, then use rollout row, robot slot, piece slot, and source-site order. This avoids dependence on reduction order, Python loop order, or GPU scheduling. Sequence starts at zero for a new episode generation and resets only at that boundary.
 
 **Adopted limit:** preserve the source-backed 32,768-event-per-episode limit: sequence values 0–32,767; no wrap or truncation. If the next accepted event exceeds it, use the fail-closed staged score/event/respawn fault behavior above. This episode limit is separate from the fixed 2,304-row batch table (`32 × 6 × 12`). Any change to field width or batch capacity requires ABI reconciliation.
 
