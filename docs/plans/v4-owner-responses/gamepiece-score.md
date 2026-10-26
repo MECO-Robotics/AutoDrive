@@ -39,13 +39,36 @@ mutation (`frc_defense/gamepiece_actions.py:439-477`). With six robot slots,
 the source-supported maximum is therefore six score events per physics tick.
 For a 12-tick macro this is at most `S×T = 6×12 = 72` events per transition;
 for 32 rows the batch maximum is `R×S×T = 32×6×12 = 2,304` events. Shortened
-macros and inactive robots only lower that bound. The source site registry has
-exactly the two current literals at lines 429 and 476; they map to V4 codes 1
-and 2 respectively. The current semantic is one event per accepted FUEL score
-mutation, with one score unit per event, as declared by
-`frc_defense/meco_simulated_score_ledger.py:24-30`.
+macros and inactive robots only lower that bound. The current semantic is one
+event per accepted FUEL score mutation, with one score unit per event, as
+declared by `frc_defense/meco_simulated_score_ledger.py:24-30`. The adopted
+event code registry is `event_type=1` for `fuel_score_awarded`; the source-site
+codes are `1=gamepiece_actions.update_fuel_actions.vectorized_score_mutation`
+(`frc_defense/gamepiece_actions.py:429`) and
+`2=gamepiece_actions.update_fuel_actions.robot_loop_score_mutation`
+(`frc_defense/gamepiece_actions.py:476`).
 
-The proposed fixed event row is 59 packed bytes. The total event table is
+The adopted V4 event record is a packed, ordered 59-byte row with no implicit
+padding:
+
+| Order | Field | Type | Bytes |
+|---:|---|---|---:|
+| 1 | `valid` | `bool` | 1 |
+| 2 | `rollout_row_index` | `uint8` | 1 |
+| 3 | `episode_event_sequence` | `uint16` | 2 |
+| 4 | `tick` | `int64` | 8 |
+| 5 | `match_elapsed_seconds` | `float64` | 8 |
+| 6 | `world_slot` | `int64` | 8 |
+| 7 | `alliance` | `uint8` | 1 |
+| 8 | `robot_slot` | `int64` | 8 |
+| 9 | `piece_slot` | `int64` | 8 |
+| 10 | `piece_generation` | `int64` | 8 |
+| 11 | `event_type` | `uint16` | 2 |
+| 12 | `score_units` | `uint16` | 2 |
+| 13 | `source_site_code` | `uint16` | 2 |
+|  | **Total** |  | **59** |
+
+The total event table is
 `2,304×59 = 135,936` bytes. Row index binds an event to one of the batch's 32
 transitions; that transition's episode generation disambiguates rows when a
 batch spans an episode reset. Event sequence is episode-local. The existing
