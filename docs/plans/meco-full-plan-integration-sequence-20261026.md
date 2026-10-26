@@ -109,6 +109,68 @@ partial acceptance does not authorize a later or broader tree.
 
 This inventory distinguishes accepted plan text from implementation state. In particular, Plan A `15f7c5b` is partial static preparation only, while its status-integrated completion was rejected; the accepted action/macro plan has no code head. Its source-derived route-matrix amendment `fb89926` passed Pass 1 and Pass 3 as planning-only; it leaves route-required action classes, accepted per-class codes, `route_override` applicability, Plan A route-row binding, no-route encoding, and native failure status unresolved. ABI route-status amendment `6d46846` passed Pass 1 and Pass 3 as a planning amendment; defense-consumer amendment `d4b3053` passed Pass 1 and Pass 3 as planning-only. Their integration remains blocked on matching owner decisions and pins. The amendments leave HIP status granularity and V3 fields unresolved; they confer no implementation authorization. PPO V3 shell/row work remains blocked. The unbound diagnostic evaluation is not a Stage 1 pass. No training qualification, device/runtime execution, seeded simulator validation, dashboard restart/currentness check, or replay generation is authorized by these planning statuses; those gates remain deferred until the user manually stops training and both WX9100 leases are independently verified released, followed by the applicable exact-head reviews and approved test/evaluation protocol.
 
+### PPO V3 contract/profile proposal review status (2026-10-26)
+
+The following two proposals have independent exact-head Pass 1 **ACCEPT** review
+and are pushed to their named `origin/codex/...` branches. Their review status
+adds planning input only; neither is an owner adoption, a revision of the
+immutable shared ABI, or authorization for schema/source implementation,
+tests, compilation, runtime, device, simulator, dashboard, checkpoint,
+campaign, training, or evaluation work. Both pin source base
+`e37b2f30b6bc51b74dd72bf039e94a174ec51bf2` (tree
+`8edb9998d7e3e361e83938a345c65d4fef488e1d`):
+
+| Planning artifact | Exact accepted/pushed head and artifact SHA-256 | Current effect |
+|---|---|---|
+| Unified cross-owner contract decision amendment, `docs/plans/gpu-five-track-ppo-v3-unified-contract-decision-amendment-20261026.md` | Commit `5bc5a67886c7cebaf21454b5618b9649c21bff76`; SHA-256 `6c875e448ac0a88f71f497881fdc1b3a10f197ac909b5176c4c6a896734cec30`; branch `origin/codex/ppo-v3-unified-contract-amendment-20261026` | Reconciles source findings and accepted proposals into one recommended contract. Full per-policy/oracle route and path retention is preserved as a recommendation; the current immutable ABI remains unchanged. The proposal explicitly requires owner adoption and a new immutable ABI/profile revision before a schema-only declaration can be planned. |
+| ThreeVsThree profile freeze proposal, `docs/plans/gpu-five-track-ppo-v3-profile-freeze-proposal-20261026.md` | Commit `fd027f91ae45ca86606a17cd54b47e7e58a12a07`; SHA-256 `8bf27df729c62a49a605bc6789de9b12529da4c00c69a8ce84549b208353a998`; branch `origin/codex/ppo-v3-profile-freeze-proposal-20261026` | Proposes profile `meco-ppo-v3-3v3-f504-n1-s6-r32-t12-v1` (`N=1`, `S=6`, `R=32`, `T=12`, `E=504`, `K=16`) and source-derived shape recommendations. It remains a proposal and does not freeze production configuration. |
+
+The exact remaining gates before even a declarative `meco_ppo_batch.py`
+schema may be separately planned are:
+
+1. Environment, PPO and evaluation owners adopt the ThreeVsThree `E=504`
+   profile and its field/raster/grid derivations, or provide a replacement
+   profile ID and values.
+2. Plan A/PPO/ABI owners accept fixed graph/support shapes, static versus
+   per-row graph capture, and the memory implications (default source geometry
+   is 12,096 nodes and 96,768 support rows).
+3. Plan C/PPO owners accept `K=16`, raw feature ordering and widths `20/40`,
+   ordinary-only context pooling, the continuation map, and 537-row source-axis
+   binding.
+4. Route/PPO/ABI/evaluation owners accept 9,681 route rows per transition,
+   full oracle path retention, 152 chunks of at most 64 rows, and the 172.5 MiB
+   rollout path-storage floor.
+5. Observation/native owners accept target-handle and observation-snapshot
+   layouts, generation allocation/reset points, stale-snapshot behavior, and
+   generation-exhaustion/no-wrap failure.
+6. PPO, simulator, action/macro and route owners adopt the V3 status registry,
+   atomic no-op behavior, actor/critic eligibility, terminal/truncation and
+   bootstrap semantics.
+7. Gamepiece/score/PPO owners define the event code registry and a
+   source-backed fixed batch capacity; the existing 32,768 score-ledger limit
+   bounds only its episode recorder.
+8. PPO/RNG/ABI owners adopt RNG streams, algorithm and draw schedule, digest
+   coverage/encoding, device production and checkpoint representation.
+9. Artifact/PPO owners accept the envelope header and calculate the exact
+   maximum payload bytes from the final field table; no byte-tensor capacity
+   is authorized before this calculation.
+10. Each affected owner records accept/reject-with-replacement/not-applicable
+    against exact source evidence; the shared-ABI owner publishes one
+    immutable ABI revision and profile hash; every owner plan pins those exact
+    hashes and passes cross-owner Pass 1 review.
+
+The only product choices identified by the unified amendment are whether
+`fuel_count=504` is the intended initial production profile, exact candidate
+equivalence/denominator/empty-reference semantics if a recall metric is
+required, and reward/terminal estimand only if it differs from the curriculum.
+The remaining field widths, sentinels, capacities, RNG/digest encoding and
+envelope details are engineering/owner decisions; the proposals' recommended
+values do not become normative by review acceptance. After the gates above,
+the existing schema-only preparation plan still needs its own applicable
+exact-head review; PPO producer, compute, validation, checkpoint/RNG writer,
+and runtime remain separately scoped and reviewed work. No owner adoption,
+implementation, or Stage 1 evidence is claimed here.
+
 ### Refreshed dependency order and campaign boundary
 
 1. Keep the active two-WX9100 campaign and its live checkout, supervisor,
