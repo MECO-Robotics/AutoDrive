@@ -51,6 +51,25 @@ log-probability validity combine in those cases (proposal lines 147–160 and
 (`frc_defense/meco_track_training.py:2156-2162,2173-2186`); the V4 actor/critic
 mask truth table should explicitly preserve or intentionally revise that rule.
 
+**Update atomicity decision:** for this owner row, I adopt the V4 failure
+semantics as a technical requirement: any listed validation, digest, capacity,
+or schema failure must leave the complete PPO decision/update as a no-op, with
+no partial policy/value parameters, optimizer moments or step counters, or RNG
+state/counters committed. If failure can occur after any of those states have
+advanced, the implementation must stage the state and commit it only after the
+whole update succeeds, or restore every affected state before reporting
+failure. V4 explicitly requires the complete decision/update to be a no-op on
+those failures (proposal lines 240–249), and says invalid padded rows have no
+optimizer-state/step or RNG effect (lines 281–283). Current `_ppo_update`
+performs `optimizer.step()` inside the per-row loop
+(`frc_defense/meco_track_training.py:2164-2200`); sampling/permutation consume
+the implicit Torch RNG (`frc_defense/meco_tracks.py:1681-1689`,
+`frc_defense/meco_track_training.py:2164-2167`). The present path therefore
+does not demonstrate rollback or transactional commit if a later row fails.
+The requirement is decided; the exact staged-state/rollback mechanism and
+failure boundary still need to be specified and reviewed in an implementation
+plan. This does not change the overall **PENDING** disposition.
+
 V4 proposes Philox4x32-10, SHA-256 key derivation, 32-bit-word counter
 advancement, separate action/permutation streams, counter overflow failure,
 and checkpoint continuation (proposal lines 287–293; the matrix requests
@@ -95,8 +114,10 @@ Philox stream key/counter ownership, draw schedule and word consumption,
 counter/segment advancement, reset behavior, and checkpoint resume state; (4)
 separate protocol codes or an explicit shared registry for gamepiece versus
 PPO RNG; and (5) canonical digest domains and byte spans for all PPO/RNG
-identity fields. Then reconcile the affected row and dependent artifact/profile
-sizes before adoption.
+identity fields. The atomicity outcome above is fixed for this row, but the
+successor/addendum must specify the staged commit or complete rollback boundary
+for parameters, optimizer state, and RNG state/counters. Then reconcile the
+affected row and dependent artifact/profile sizes before adoption.
 
 This response records only the delegated `ppo_rng_owner` technical decision.
 It is not human maintainer approval, cross-owner adoption, shared ABI
