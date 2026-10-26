@@ -4,9 +4,9 @@
 **Status:** Amendment candidate; original P2 plan received Pass 1 ACCEPT; this G0/source-authoring amendment requires fresh independent exact-head review
 **Planner:** `plan_a_owner` (planner only; not implementer or reviewer)  
 **Implementation source base:** `6ed961a09c08dfc1796d98ae3566bd3f0eaaaf22`  
-**Overall plan:** original accepted commit `6325920252773cfa05d63167ba3c29a90debdb01`; G0/source-authoring amendment candidate `5b25eb1cfba7850a871b9024d834457d0fb755a4` (pending fresh review)
+**Overall plan:** original accepted commit `6325920252773cfa05d63167ba3c29a90debdb01`; G0/source-authoring amendment `8efec9378d1912f0839d7c6cd8e88467fceb1d5a` (pending fresh review)
 **Original overall-plan file SHA-256:** `9a12708980529cb03810ad40f43dbfe1e29461485a4f50fd1a7b06c7202dec5a`
-**Amended overall-plan file SHA-256:** `f5d1751ae6ca02452f286d756116859f176558a5822711a48f2b1aa4d734b43a`
+**Amended overall-plan file SHA-256:** `57f20a1bcfe6f229429d402140de93a0ee1780372e21a9ac3344f81c72faca90`
 **Accepted P0 package plan:** `13dbd7f8f953995850e811202f7e9c5264c49dca`  
 **P0-plan file SHA-256:** `09ec722d64d01d99b60cc9ed52e47ce68790e548f66107cc1a19dd9a7a588adf`  
 **Reconciliation commit:** `03bd0a7a3ef4ea0d2506ec4f9b031745ba53ada9`  
