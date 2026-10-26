@@ -1,9 +1,9 @@
 # P0 Phase 0 preregistration and finalization package plan
 
 **Date:** 2026-10-26
-**Status:** Original package plan ACCEPT at `13dbd7f8f953995850e811202f7e9c5264c49dca`; this G0/source-authoring amendment is pending fresh independent exact-head Pass 1 review
+**Status:** Original package plan ACCEPT at `13dbd7f8f953995850e811202f7e9c5264c49dca`; the G0/source-authoring amendment at `c4f136b267f8e41e0baec53394f28fac28f16eb5` received REVISE (review commit `da3154744`, stale overall-plan status pin). Corrected successor and fresh exact-head Pass 1 review are pending.
 **Planner identity:** `plan_a_owner` (planner only; not implementer, reviewer, or human approver)
-**Overall plan commit:** `8efec9378d1912f0839d7c6cd8e88467fceb1d5a` (docs-only G0/source-authoring amendment; pending fresh independent review)
+**Accepted overall plan:** commit `8efec9378d1912f0839d7c6cd8e88467fceb1d5a`, file SHA-256 `57f20a1bcfe6f229429d402140de93a0ee1780372e21a9ac3344f81c72faca90`; exact Pass 1 ACCEPT record commit `b0b2962d299b1ecaab053b873ef2ae09e3c5f467`, record SHA-256 `54e68870b3b95fd91b92d3f934e44d5ec9bb63e1fb6d03f67e6d95f10d3abb4a`
 **Overall plan file:** `docs/plans/meco-five-track-v4-gpu-implementation-plan-20261026.md`
 **Overall plan file SHA-256:** `57f20a1bcfe6f229429d402140de93a0ee1780372e21a9ac3344f81c72faca90`
 **Implementation source base:** `6ed961a09c08dfc1796d98ae3566bd3f0eaaaf22`
