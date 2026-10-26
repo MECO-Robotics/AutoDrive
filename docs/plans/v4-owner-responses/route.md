@@ -30,8 +30,9 @@ These findings settle route geometry as snapshot-specific XY in meters, route co
 ## Pass 2 closure addendum: route/source joins and sentinels
 
 This addendum resolves the Route-owner mapping left open above against the
-Plan C owner response at commit `0d8be1b66` (the exact pushed head must be
-re-pinned by its independent reviewer). It is an owner-level contract for the
+accepted Plan C owner response at commit
+`1af5d55dea0eb7f3a2f2938cd71423841bfa86b1`, SHA-256
+`8ac11dfbe85aa0c03d834c0530eee2f313f06d6fdc97ef479bff9b923cefdc50`. It is an owner-level contract for the
 pinned `meco-ppo-v3-3v3-f504-n1-s6-r32-t12-v1` profile, not a source/runtime
 change.
 
