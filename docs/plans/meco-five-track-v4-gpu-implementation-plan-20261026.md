@@ -129,14 +129,14 @@ is open. Do not reuse the live campaign checkout or its output directory.
 
 | Package | Planner | Pass 2 worktree / branch | Pass 3 reviewer | Main owned scope |
 |---|---|---|---|---|
-| P0a — Phase 0 preregistration | phase0 planner | `.worktrees/autodrive-v4-p0-phase0` / `codex/v4-p0-phase0-YYYYMMDD` | independent protocol reviewer | score/rules estimand, v5 schema, cases/seeds and calibration/margin method; no final calibration artifact |
-| P0b — Phase 0 final calibration | phase0 planner | same P0 worktree after reviewed source freeze, or a fresh exact-base worktree | independent protocol reviewer | final calibration, immutable source-bound Phase 0 artifact and v5 protocol after P1–P6 source is frozen |
+| P0a — Phase 0 preregistration | phase0 planner | `.worktrees/autodrive-v4-p0-phase0` / `codex/v4-p0-phase0-YYYYMMDD` | independent protocol reviewer | documentation-only candidate score/rules, v5 requirements, cases/seeds and calibration/margin method; human decisions precede P0a Pass 3 ACCEPT |
+| P0b — Phase 0 final calibration | phase0 planner/operator | fresh exact-base worktree after reviewed source freeze | independent protocol reviewer | post-P1–P6 runtime calibration and generated immutable Phase 0 artifact/protocol only; no qualification source edits |
 | P1 — V4 schema, score events and envelope | ABI/artifact planner | `.worktrees/autodrive-v4-p1-schema` / `codex/v4-p1-schema-YYYYMMDD` | independent schema reviewer | schema and serialization modules, canonical score event producer/consumer paths after discovery, artifact/manifest code and schema fixtures |
 | P2 — GPU-resident environment/observation/route core | device-runtime planner | `.worktrees/autodrive-v4-p2-device-core` / `codex/v4-p2-device-core-YYYYMMDD` | independent residency reviewer | environment observation, target handles, candidate generation, route/search kernels and their dedicated modules |
 | P3 — Plan A A1/A2/A3 | Plan A planner | `.worktrees/autodrive-v4-p3-plan-a` / `codex/v4-p3-plan-a-YYYYMMDD` | independent Plan A reviewer | Plan A support, model adapter and A1/A2/A3-specific kernels/fixtures |
 | P4 — Plan C C1/C2 | Plan C planner | `.worktrees/autodrive-v4-p4-plan-c` / `codex/v4-p4-plan-c-YYYYMMDD` | independent Plan C reviewer | candidate feature/model paths and C1/C2-specific kernels/fixtures |
 | P5 — PPO, RNG, end causes and atomic checkpoints | PPO planner | `.worktrees/autodrive-v4-p5-ppo` / `codex/v4-p5-ppo-YYYYMMDD` | independent PPO/RNG reviewer | sole owner of shared `frc_defense/meco_track_training.py` edits, PPO buffer/update, Philox implementation and update/checkpoint tests |
-| P6 — Five-track supervisor and qualification reports | qualification planner | `.worktrees/autodrive-v4-p6-qualification` / `codex/v4-p6-qualification-YYYYMMDD` | independent qualification reviewer | five-lane scheduling, immutable evaluation, promotion and report/dashboard data paths |
+| P6 — Five-track supervisor and qualification reports | qualification planner | `.worktrees/autodrive-v4-p6-qualification` / `codex/v4-p6-qualification-YYYYMMDD` | independent qualification reviewer | v5 schema/runner, five-lane scheduling, immutable evaluation, promotion and report/dashboard data paths; owns `meco_qualification.py` and its qualification tests |
 
 Planner and reviewer identities are assignment gates, not pre-filled consent.
 No package starts without named distinct agents, a Pass 1 accepted package
@@ -215,15 +215,16 @@ the final Phase 0 artifact or protocol.
    evidence, margins and approval record. P0b must fail closed if any bound
    input changes.
 
-**P0a acceptance:** independent Pass 3 review accepts the exact preregistration
-head; all required human decisions are recorded by the authorized maintainer;
-the protocol/schema, cases/seeds, estimand and calibration/margin procedure
-are sufficiently fixed that P1–P6 can implement against them. No calibration
-results, final Phase 0 artifact, protocol instance, training, or qualification
-are produced in P0a. P1–P6 source packages may start only after P0a ACCEPT and
-the G0 release/authorization gate.
+**P0a delivery and acceptance:** Pass 2 produces a documentation-only
+candidate preregistration containing the proposed schema requirements,
+estimand/rules, cases/seeds and statistical method. The authorized maintainer
+resolves all required product/rules decisions against that candidate before
+Pass 3 review. Pass 3 ACCEPT applies only to the exact candidate plus recorded
+decisions; it unlocks P1–P6 source work once G0 is also satisfied. P0a has no
+source or test allowlist and produces no calibration results, final Phase 0
+artifact, protocol instance, training or qualification result.
 
-### P0b — final calibration and immutable Phase 0 artifact after source freeze
+### P0b — runtime calibration and generated artifacts after source freeze
 
 **Dependencies:** accepted P0a; P1–P6 source implementation and integration
 are complete, frozen and independently reviewed, including all scoring,
@@ -242,7 +243,7 @@ depend on accepted P0b. This sequencing prevents a P0↔P6 cycle.
    raw records and independently recompute the prescribed uncertainty and
    margins. Existing qualification code's v2 protocol and CPU default are not
    acceptable as the v5 implementation.
-3. Emit the immutable Phase 0 artifact containing exact source/rules/profile/
+3. Emit (without source edits) the immutable Phase 0 artifact containing exact source/rules/profile/
    device identity, score estimand/rules, cases and split seed bytes/hashes,
    calibration records, uncertainty, margins and explicit approval
    provenance. Emit the final target-scoped v5 protocol bound to that artifact,
@@ -257,7 +258,7 @@ depend on accepted P0b. This sequencing prevents a P0↔P6 cycle.
    Stage 1 qualification may begin only after P0b is accepted and fresh
    source-bound checkpoints are available.
 
-**P0b acceptance:** independent exact-head review accepts the artifact and
+**P0b acceptance:** independent exact-head review accepts the generated artifact and
 protocol; calibration recomputes from retained records under P0a's method;
 the final hashes bind the frozen P1–P6 integration source and reconciled
 profile; seed partitions are disjoint; margins and all required human
@@ -438,7 +439,10 @@ result and end-cause record. No tests alone can close the behavior gate.
 
 ### P6 — five-lane training/evaluation, Stage 1 and dashboard evidence
 
-**Source implementation dependencies:** accepted P0a and P1–P5. P6 source
+**Source implementation dependencies:** accepted P0a and P1–P5. P6 owns the
+qualification v5 schema, runner and source implementation (including
+`frc_defense/meco_qualification.py` and its qualification tests) after P0a.
+P6 source
 must be frozen and reviewed before P0b final calibration. **Runtime
 qualification dependencies:** accepted P0b, P1–P6 integrated and reviewed,
 fresh five-track checkpoints, frozen protocol v5, dual-device readiness and a
