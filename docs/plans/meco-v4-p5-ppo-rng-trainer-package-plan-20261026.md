@@ -11,7 +11,7 @@
 **P0 package plan gate amendment:** `c4f136b267f8e41e0baec53394f28fac28f16eb5`, pending fresh review; P0a human decisions and candidate ACCEPT remain source-only prerequisites.
 **P2 package plan gate amendment:** `1f918a9e0f99ec49a0baf4c3ce69649c4f095a2a`, pending fresh review; API head remains pending.
 **P3 package plan:** original ACCEPT at `8b641ccc56b7c73a880a095b3c6940cb03b617f3`; gate amendment pending fresh review; implementation/API head remains pending.
-**P3 gate amendment:** `bbeb3ce3bedf4827e8b4f0d337705e1cdb9765ec`, file SHA-256 `d3849f802087b9702e98b93aafc24a379710bfb4a22b750d9b7eedf08a72b50f`; pending fresh independent review.
+**P3 gate amendment:** `c2094a60484efa58e7e4b0a626398dcae71e665b`, file SHA-256 `3748f5ae60aabb20b5b62bc3fe37a5efd71dfc69d87ff4079f47a277d34cf611`; pending fresh independent review.
 **P4 package plan/API:** in progress; no accepted plan or implementation/API head is pinned.
 This dependency-status update supersedes the prior candidate's P2/P3 pending-review statements; it does not change P5 scope or unblock implementation.
 **Accepted reconciliation:** 03bd0a7a3ef4ea0d2506ec4f9b031745ba53ada9; artifact SHA-256 294a02012427c2ceeb638ea0cd337d1fa7908cf47fb9d0f07bef29ed6790510c  
