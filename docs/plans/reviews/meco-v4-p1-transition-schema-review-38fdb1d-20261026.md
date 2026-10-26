@@ -1,7 +1,7 @@
 # Independent pre-G0 SOURCE/API review: P1 transition schema declarations
 
 - **Verdict:** SOURCE/API ACCEPT
-- **Reviewed commit:** `38fdb1d04`
+- **Reviewed commit:** `38fdb1d0423f0e723c4e1fb533e36eb7b88c4715`
 - **Reviewed path:** `frc_defense/meco_transition_v4.py`
 - **File SHA-256:** `689b84acfd2d327c9ca4c26b081cf997acf511a0f14ed6f605a6caa91562f52f`
 - **Accepted V4 proposal:** `6b4ce4a939a2cdea375bd4be6879f6f7bc73141`, digest `0c5ba39c3a4fa7c9bdf168ccf7c1dc792f4d3e27bd6f532517a967fca4b025b6`
