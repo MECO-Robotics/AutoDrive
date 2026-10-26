@@ -68,7 +68,105 @@ checkpoint.” Qualification, architecture wins, promotion, and whole-compute
 GPU-only claims require their own evidence and must not be inferred from Stage
 1 completion.
 
-## Current pinned candidate inventory
+## Pass 1 sequence refresh (2026-10-26)
+
+This amendment supersedes the candidate state and dependency ordering in the
+snapshot inventory and numbered integration order below wherever they conflict
+with the exact heads and states in this section. The older rows remain historical
+context; they are not authorization to merge, execute, or treat a former
+candidate as current. It was prepared from planning base
+`5afe639760a3e5ebef4ee392901dca55aa5e15c8`; the superseded document at that
+base had SHA-256
+`d7b7bd92041f9d9c09155ced6f8b6852a8584a0c413a4a1dd0aa7f35340a4ae0`.
+Record the amended document's resulting SHA-256 in the exact-head review result;
+the document cannot contain its own final content hash without a self-reference.
+
+Every listed commit was confirmed in the local object database and its full ID
+was checked. Plan artifact hashes below were computed from the artifact bytes
+at the pinned commit. An accepted plan is planning authority only: it does not
+mean its source exists, is complete, is eligible for integration, or is safe to
+run. Any implementation integration requires a fresh independent Pass 3 on the
+exact candidate head against the then-current base and approved plan. A prior
+partial acceptance does not authorize a later or broader tree.
+
+| Workstream | Current Pass 1 authority (full commit; artifact SHA-256) | Current source candidate | Scope and state |
+|---|---|---|---|
+| Shared command/transition ABI | `947fc80ebe046363b64583adcc4c17da186309b5`; `docs/plans/gpu-shared-command-ppo-transition-abi-20261026.md`; `7650bbe8ec48dfa07557992f90b821d1dd125bc786f48e8698358ef5c27b308f` | Contract/spec only | Accepted contract authority for masks, routes, target identity, and transition data. Not an implementation or runtime approval. |
+| Plan A device decision/support | `9227d66b75cb98b5b0ce329a6e625263b812e0c1`; `docs/plans/gpu-resident-plan-a-decision-slice-20261025.md`; `b7a718cde176d8b5b0ce329a6e625263b812e0c1` | `419631bc6ed05184a8056393eaf29d03c209ee84` | Plan text accepted. Candidate is partial source preparation only; route API and HIP regions remain gated. Not complete A1/A2/A3 support or dispatchable implementation. Require exact-head Pass 3 for any integration tranche. |
+| Plan C K-capped model view | `4cdc30f923c0d948b43c57d452c4ee4b17cf61d9`; `docs/plans/gpu-plan-c-k-capped-model-view-contract-20261026-amendment.md`; `6d9c0e6320acd503c8595fa619e8beeba24af88f36e49337d7325331a899ff0b` | No implementation head pinned | Plan text accepted. Restrict model context to the reviewed policy-prefix rows and continuation row; implementation and source integration remain outstanding. |
+| Plan C route decision/selection | `8567fd92d4dc9e214e8502f2249bb02203ac8c03`; `docs/plans/gpu-resident-route-decision-slice-20261025.md`; `ac5847d65de2af5ccb17d6a1bc109dceefeab71c5d707253980570020c1e885a` | No implementation head pinned | Plan text accepted and aligned to shared ABI. Code must preserve device-resident query/selection evidence and compose with the K-capped view. The older `dd6` source is historical, not accepted implementation. |
+| Action/macro boundary | `41e3da95b8c9cb8bc6aa8ed5b4ced9cf5d739035`; `docs/plans/meco-device-action-macro-boundary-20261025.md`; `f9a810a8d0ab0ec7c5aca1d8936d55017297d2d396e978ed1d921d74c3e58424` | No implementation head pinned | Plan text accepted. Depends on shared ABI and A/C chosen-action contracts; does not authorize compact numeric D2H or establish producer implementation. |
+| Five-track PPO/rollout residency | `6e1e6981fc868f1a956f9c55fad5bd7a0947b726`; `docs/plans/gpu-five-track-ppo-rollout-candidate-residency-expansion-20261026.md`; `076c6c062e48b2cb65fbe1c0d80a75218dc32a72bec43d5aeb62d8421262056e` | No implementation head pinned | Plan text accepted, including durable generation ownership. PPO batch, rollout, reset, pressure/anchor, snapshot/resume, and numerics implementation remains required and must be reviewed as a coordinated hot-path series. |
+| Simulator gamepiece GPU path | `3d1f93f11936dcc79c70f5ae587508cfe8198257`; `docs/plans/gpu-simulator-gamepiece-physics-tranche-20261026.md`; `df12eacc11fb1d1d2c91eea627c77becfe7221f954f1105f14d05b0a5ef2afaa` | `c26244dc038a4ad044d2c730dc7e9cf8750d497a` | Plan accepted; source candidate is partial fixed-shape/masked preparation only. The `passed.any().item()` RNG-sensitive branch and other simulation residency work remain unresolved. Not full GPU simulation or parity evidence; exact-head Pass 3 is required before integration. |
+| Dashboard human-display reader | `a282b04286a7deb266a7ba9de6a88f945629477d`; `docs/plans/dashboard-v2-human-display-reader-20261026.md`; `ae946adb0dfff63bc875a98017444c1465f9d62ec35fa5d9fac8a78c88097321` | No reader implementation pinned | Accepted plan is display-only and waits for the exact PPO envelope. It must not become a metric producer, cache, gate, or provenance authority. Restart/currentness and fresh replay are post-release runtime evidence. |
+
+### Refreshed dependency order and campaign boundary
+
+1. Keep the active two-WX9100 campaign and its live checkout, supervisor,
+   inputs, outputs, checkpoints, and leases untouched. Training may continue
+   uninterrupted until the user manually stops it. The available diagnostic
+   evaluation is unbound and cannot count as a Stage 1 pass. Update counts,
+   lane completion, old checkpoints, and stale replays are not substitutes for
+   a source/protocol-bound Stage 1 result.
+2. While the campaign owns the devices, allow only isolated documentation and
+   source-preparation work explicitly permitted by an accepted Pass 1
+   amendment. Do not import, test, compile, initialize/query a device context,
+   run simulation/evaluation, or restart dashboard services under this
+   sequence. Preserve the user's dirty
+   `frc_defense/csrc/tensor_collision_multi_hip_kernel.hip` file.
+3. After manual stop and independent verification that the supervisor and its
+   workers are terminal and both WX9100 leases are released, integrate in this
+   order: shared ABI; Plan C route decision and K-capped view as a coordinated
+   device-query/model-input tranche; Plan A support and decision against that
+   shared route API; PPO rollout/batch/reset/snapshot/numerics as one reviewed
+   training-hot-path series; then action/macro handoff against finalized A/C
+   actions and PPO replay contracts. Review and integrate gamepiece/simulator
+   source before making any simulator parity claim. Keep every patch inside
+   its approved path allowlist.
+4. For every implementation patch, resolve current base and candidate full
+   hashes, inspect the approved paths, preserve semantic/provenance invariants,
+   obtain independent exact-head Pass 3, then integrate those reviewed bytes.
+   A changed base, candidate, plan artifact, or path set invalidates approval.
+   Accepted plan text alone never authorizes source integration.
+5. Only after source review/integration and lease release, run approved
+   device-residency, parity, determinism, snapshot, safety, and performance
+   gates on the two WX9100s. Then run seeded end-to-end simulator evaluation
+   of changed behavior, inspect its fresh record/replay, restart and verify
+   current dashboard backend and frontend, and generate a fresh dashboard
+   replay. Record scenario, seed, replay ID, source/checkpoint/protocol
+   provenance, service identity, and served asset hashes. Do not use the P600
+   or CPU numerical fallback.
+6. Close Phase 0 authority and Phase 2 data/warm-start artifacts, then bind
+   current-source checkpoints and a non-diagnostic five-track protocol.
+   Stage 1 passes only when all five A1/A2/A3/C1/C2 rows satisfy the curriculum's
+   paired workload, confidence, safety, replay, and dashboard gates. A ready
+   preflight or unbound diagnostic evaluation is not a pass.
+7. After independently verified Stage 1 completion, continue all five tracks
+   with healthy evaluation/checkpoint cadence and no starvation or incomplete
+   cycles. Continue until the user manually stops training. Qualification,
+   promotion, and remaining full-plan experiments are separate later gates.
+
+### Pass 1 review checklist
+
+- Confirm the patch changes only this sequence document and record its exact
+  blob SHA-256 in the review result.
+- Confirm each pinned commit and plan artifact SHA-256 resolves to the stated
+  local object and exact bytes.
+- Check that accepted plan text and partial source candidates are distinct;
+  plan acceptance is not implementation, source integration, runtime
+  validation, or Stage 1 success.
+- Confirm source integration requires independent Pass 3 on the exact head
+  before merge, and that a moved base/head invalidates review.
+- Confirm training remains uninterrupted, only the two WX9100s are in scope,
+  the dirty user HIP file is preserved, and runtime/dashboard gates wait for
+  manual stop plus verified lease release.
+- Confirm unbound diagnostic evaluation and progress counters cannot satisfy
+  Stage 1; seeded simulator replay and dashboard backend/frontend currentness
+  remain explicit post-release gates.
+- Confirm the amendment does not claim implementation or achievement of the
+  five-track objective.
+
+## Historical pinned candidate inventory (superseded where amended above)
 
 Remote heads were freshly read from `origin`; hashes below identify immutable
 observed heads, not approval. An implementation head is **pending** until its
