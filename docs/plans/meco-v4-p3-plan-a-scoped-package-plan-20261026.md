@@ -1,11 +1,11 @@
 # P3 Plan A A1/A2/A3 scoped package plan
 
 **Date:** 2026-10-26  
-**Status:** G0/source-authoring gate amendment candidate; original P3 plan received Pass 1 ACCEPT; this amendment requires fresh independent exact-head review
+**Status:** Original P3 plan received Pass 1 ACCEPT; gate amendment at `c2094a60484efa58e7e4b0a626398dcae71e665b` received REVISE (review commit `baa7f1d831edaa0bcdf81548709cce51fab23d77`, stale overall-plan status pin). Corrected successor and fresh independent exact-head Pass 1 review are pending.
 **Planner identity:** `/root/closure_wave1_reviewer` (author for this package plan only; not implementer or reviewer)  
 **Implementation source base:** `6ed961a09c08dfc1796d98ae3566bd3f0eaaaf22`  
 **Original accepted overall plan:** `6325920252773cfa05d63167ba3c29a90debdb01`, file SHA-256 `9a12708980529cb03810ad40f43dbfe1e29461485a4f50fd1a7b06c7202dec5a`; Pass 1 ACCEPT record `be845d7fb2d2ece861dcd158ac8b8dd89e3dc59d`, record SHA-256 `5a6e94f978c8a7e18d9623897ceba6f32f5b5eadb0aba6605f21c9d1e941a886`
-**Overall-plan G0/source-authoring amendment:** `8efec9378d1912f0839d7c6cd8e88467fceb1d5a`, file SHA-256 `57f20a1bcfe6f229429d402140de93a0ee1780372e21a9ac3344f81c72faca90`; pending fresh independent review
+**Accepted overall-plan G0/source-authoring amendment:** `8efec9378d1912f0839d7c6cd8e88467fceb1d5a`, file SHA-256 `57f20a1bcfe6f229429d402140de93a0ee1780372e21a9ac3344f81c72faca90`; exact Pass 1 ACCEPT record commit `b0b2962d299b1ecaab053b873ef2ae09e3c5f467`, record SHA-256 `54e68870b3b95fd91b92d3f934e44d5ec9bb63e1fb6d03f67e6d95f10d3abb4a`
 **Accepted P0 package plan:** `13dbd7f8f953995850e811202f7e9c5264c49dca`, file SHA-256 `09ec722d64d01d99b60cc9ed52e47ce68790e548f66107cc1a19dd9a7a588adf`; Pass 1 ACCEPT record `037f0f9386cc0efadb1fb54efe5f38f097926d0e`, record SHA-256 `1ee70a6e9d24dc5201da5eec446820167cb8c4d4436fbbe013eb16de66b0280d`  
 **P0 G0/source-authoring amendment:** `c4f136b267f8e41e0baec53394f28fac28f16eb5`, file SHA-256 `ef989468059b16fc184d6a7740ad8dfa07db776b0f5dd9a9d220525f25a491b2`; pending fresh independent review
 **Accepted P1 package plan:** `53686a254318484f9c6bc3496ecc1c461572c53a`, file SHA-256 `21c07b2c08d37e48ed5d0dac1f149e4a45eb89d59360f466b587f534cf81e076`; Pass 1 ACCEPT record `854d5286947074ed33f7ac059d67f2f9ccbf9257`, record SHA-256 `0680a57e5ff0427b20a0a5bd86c224085583b241b3f57bcb18bde69cab0f158f` (P1 implementation API head is still a future Pass 3 dependency)  
