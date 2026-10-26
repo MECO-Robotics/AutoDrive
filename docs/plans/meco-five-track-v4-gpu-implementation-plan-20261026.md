@@ -129,7 +129,8 @@ is open. Do not reuse the live campaign checkout or its output directory.
 
 | Package | Planner | Pass 2 worktree / branch | Pass 3 reviewer | Main owned scope |
 |---|---|---|---|---|
-| P0 — Phase 0 protocol and readiness | phase0 planner | `.worktrees/autodrive-v4-p0-phase0` / `codex/v4-p0-phase0-YYYYMMDD` | independent protocol reviewer | qualification/protocol/config/artifact paths listed in the accepted P0 plan |
+| P0a — Phase 0 preregistration | phase0 planner | `.worktrees/autodrive-v4-p0-phase0` / `codex/v4-p0-phase0-YYYYMMDD` | independent protocol reviewer | score/rules estimand, v5 schema, cases/seeds and calibration/margin method; no final calibration artifact |
+| P0b — Phase 0 final calibration | phase0 planner | same P0 worktree after reviewed source freeze, or a fresh exact-base worktree | independent protocol reviewer | final calibration, immutable source-bound Phase 0 artifact and v5 protocol after P1–P6 source is frozen |
 | P1 — V4 schema, score events and envelope | ABI/artifact planner | `.worktrees/autodrive-v4-p1-schema` / `codex/v4-p1-schema-YYYYMMDD` | independent schema reviewer | schema and serialization modules, canonical score event producer/consumer paths after discovery, artifact/manifest code and schema fixtures |
 | P2 — GPU-resident environment/observation/route core | device-runtime planner | `.worktrees/autodrive-v4-p2-device-core` / `codex/v4-p2-device-core-YYYYMMDD` | independent residency reviewer | environment observation, target handles, candidate generation, route/search kernels and their dedicated modules |
 | P3 — Plan A A1/A2/A3 | Plan A planner | `.worktrees/autodrive-v4-p3-plan-a` / `codex/v4-p3-plan-a-YYYYMMDD` | independent Plan A reviewer | Plan A support, model adapter and A1/A2/A3-specific kernels/fixtures |
@@ -177,51 +178,95 @@ base. Until G0 is complete, no source,
 test, build, runtime, device, dashboard, qualification, or training work
 begins. This plan does not claim G0 is satisfied.
 
-### P0 — Phase 0 baseline, calibration, protocol v5 and frozen seeds
+### P0a — preregister Phase 0 rules and protocol before source implementation
 
-**Dependencies:** G0. Complete before model implementation is integrated or
-any fresh five-track training starts.
+**Dependencies:** G0. This is a documentation/configuration decision package;
+it precedes P1–P6 source implementation. It does not run calibration or emit
+the final Phase 0 artifact or protocol.
 
-1. Freeze source/rules/config identity, field geometry and legal graph,
-   robot/physics/sensor/controller settings, opponent families, layouts/start
-   states, D0 behavior, runtime update cadence, and the exact simulated-score
-   source definition. Trace the real producer and consumer for each scoring
-   event; the base checkout does not contain a `meco_simulated_score_ledger.py`
-   module, so P0/P1 must locate the authoritative source rather than invent
-   one.
-2. Define disjoint train, Phase 0 calibration, validation, and final-test seed
-   partitions before training. Retain seed-list bytes and hashes. Calibration
-   repeats the frozen D0 cases sufficiently to estimate across-seed and
-   repeat-run variance. Freeze useful-gain and safety noninferiority margins
-   from that evidence; do not pick thresholds after seeing candidate results.
-3. Produce an immutable Phase 0 artifact that binds the source/rules hash,
-   score estimand and accepted-event rules, scenario/layout/opponent case
-   matrix, seed partitions, calibration reports, variance, margins and
-   approval provenance. Record required human decision/approval as a separate
-   explicit gate; an agent-generated hash is not approval or authentication.
-4. Replace or version beyond the v2 protocol described in
-   `docs/MECO_QUALIFICATION.md`. The reconciliation requires a target-scoped
-   v5 protocol. The new immutable protocol must bind the Phase 0 artifact,
-   source/profile/device identity, exact case/seed table, the target and all
-   transitive prerequisites, score/safety metrics, margins and promotion
-   predicates. Legacy v1/v2 protocols and diagnostic runs remain readable
-   history only and cannot advance this Stage 1 goal. If the v5 schema or its
-   approval provenance cannot be source-bound, pause qualification rather
-   than weakening the gate.
-5. Pin the five-track supervisor config: tracks/codes, one-track-per-run
-   profile, shared frozen task and seed assignment, per-track run identity,
-   two WX9100 UUIDs/runtime, GPU scheduling allocation, checkpoint cadence,
-   evaluation cadence, failure policy and stop-file/manual-stop semantics.
+1. Preregister the `simulated_match_score` estimand and accepted-event rules:
+   accepted active-HUB FUEL awards only. Current source evidence identifies
+   `fuel_scored_event` and `fuel_score_count` in
+   `frc_defense/gamepiece_actions.py`, consumed by reward/info paths in
+   `frc_defense/tensor_3v3.py`; `frc_defense/curriculum_metrics.py` is a
+   distinct task-reward metric. P1 owns implementation of the reconciled
+   typed event table. P0a records the intended semantics and requires P1 to
+   verify producer/consumer sites against its exact source base.
+2. Approve the immutable target-scoped protocol v5 schema, including target
+   IDs, transitive prerequisite closure, case/layout/opponent table, field and
+   rule identity, split labels, metric definitions, stopping/promotion rules,
+   artifact provenance and fail-closed behavior. Existing v1/v2 protocols
+   remain history; they do not satisfy the v5 contract.
+3. Freeze disjoint train, calibration, validation and final-test case/seed
+   partitions and their canonical bytes before candidate outcomes are
+   observed. Record the case-generation procedure, seed derivation, split
+   membership and permitted regeneration conditions. Any change to source,
+   rules, case matrix or seed-generation code requires a new preregistration
+   revision before results are examined.
+4. Preregister the D0 calibration design, repeats, uncertainty calculation,
+   useful-gain and safety noninferiority margin method, minimum evidence and
+   decision procedure. Do not finalize numeric margins from unrun or
+   unreviewed evidence, and do not tune the method after candidate results.
+   Record which product/maintainer decisions require explicit human approval;
+   hashes and agent-authored records are not approval or authentication.
+5. Define source-identity inputs and the canonical Phase 0 artifact/protocol
+   hash boundary. Specify that P0b binds the final reviewed source tree,
+   reconciled profile, device pair, score rules, exact cases/seeds, calibration
+   evidence, margins and approval record. P0b must fail closed if any bound
+   input changes.
 
-**Acceptance:** independent reviewer verifies artifact/protocol hashes,
-disjoint seeds, calibration recomputation, fixed gates and approvals; a
-no-training dry validation of schemas may run only after its separately
-scoped Pass 2/Pass 3 authorization. No Stage 1 round uses an uncalibrated or
-legacy protocol.
+**P0a acceptance:** independent Pass 3 review accepts the exact preregistration
+head; all required human decisions are recorded by the authorized maintainer;
+the protocol/schema, cases/seeds, estimand and calibration/margin procedure
+are sufficiently fixed that P1–P6 can implement against them. No calibration
+results, final Phase 0 artifact, protocol instance, training, or qualification
+are produced in P0a. P1–P6 source packages may start only after P0a ACCEPT and
+the G0 release/authorization gate.
+
+### P0b — final calibration and immutable Phase 0 artifact after source freeze
+
+**Dependencies:** accepted P0a; P1–P6 source implementation and integration
+are complete, frozen and independently reviewed, including all scoring,
+simulation, evaluation and qualification-runner source owned by P6. P0b does
+not depend on P6 runtime qualification results. P6 runtime/qualification does
+depend on accepted P0b. This sequencing prevents a P0↔P6 cycle.
+
+1. Recompute the source/rules/config identity from the exact frozen
+   integration commit. Verify the final score producer/consumer mapping,
+   field geometry/legal graph, robot/physics/sensor/controller settings,
+   case matrix and source-bound metric code against P0a. If any relevant
+   source or preregistered input changed, return to P0a revision or restart
+   calibration as the change requires.
+2. Run only the preregistered D0 cases, seed partitions and repeat schedule on
+   the two assigned WX9100 devices, with no CPU numerical fallback. Retain
+   raw records and independently recompute the prescribed uncertainty and
+   margins. Existing qualification code's v2 protocol and CPU default are not
+   acceptable as the v5 implementation.
+3. Emit the immutable Phase 0 artifact containing exact source/rules/profile/
+   device identity, score estimand/rules, cases and split seed bytes/hashes,
+   calibration records, uncertainty, margins and explicit approval
+   provenance. Emit the final target-scoped v5 protocol bound to that artifact,
+   exact target and prerequisite closure, metrics and promotion predicates.
+   Never overwrite legacy protocol or calibration records.
+4. Verify artifact and protocol bytes/hashes, source binding, seed disjointness,
+   calibration recomputation and required approvals. A post-freeze change to
+   any scoring/simulation/evaluation/qualification source invalidates the
+   affected P0b source binding; regenerate and review P0b before fresh
+   training or qualification.
+5. Pin the five-track supervisor config and device identities. Training and
+   Stage 1 qualification may begin only after P0b is accepted and fresh
+   source-bound checkpoints are available.
+
+**P0b acceptance:** independent exact-head review accepts the artifact and
+protocol; calibration recomputes from retained records under P0a's method;
+the final hashes bind the frozen P1–P6 integration source and reconciled
+profile; seed partitions are disjoint; margins and all required human
+approvals are explicit. No Stage 1 round uses an uncalibrated, stale or legacy
+protocol.
 
 ### P1 — V4 typed schema, device-native score events and artifacts
 
-**Dependencies:** G0, accepted P0 contract for score source/rules, exact
+**Dependencies:** G0, accepted P0a preregistration for score source/rules, exact
 reconciliation/profile hash. P1 begins with source tracing because the named
 score-ledger file is absent from the base checkout.
 
@@ -256,7 +301,8 @@ reopens reconciliation.
 
 ### P2 — GPU-only environment, observation, candidate and route pipeline
 
-**Dependencies:** P1 interfaces; exact profile and P0 runtime identity.
+**Dependencies:** P1 interfaces; exact profile and accepted P0a device/runtime
+identity preregistration. Final P0b source binding follows the P2 source freeze.
 
 1. Build a residency ledger for every tensor and algorithm in the entire
    train/eval route, including simulator state and physics, observations,
@@ -348,7 +394,8 @@ records on each track; all compute remains on the two devices.
 
 ### P5 — PPO, end causes, horizons, RNG and atomic checkpoint continuation
 
-**Dependencies:** P1 schema and artifacts, P2 device pipeline, P3/P4 interfaces.
+**Dependencies:** P1 schema and artifacts, P2 device pipeline, P3/P4 interfaces,
+and accepted P0a preregistration. Final source-bound protocol/artifact is P0b.
 This package exclusively owns shared trainer edits to
 `frc_defense/meco_track_training.py` to avoid conflicts.
 
@@ -391,9 +438,12 @@ result and end-cause record. No tests alone can close the behavior gate.
 
 ### P6 — five-lane training/evaluation, Stage 1 and dashboard evidence
 
-**Dependencies:** P0–P5 accepted and integrated; fresh five-track checkpoints;
-frozen protocol v5; dual-device readiness; a separate human authorization to
-start the new campaign.
+**Source implementation dependencies:** accepted P0a and P1–P5. P6 source
+must be frozen and reviewed before P0b final calibration. **Runtime
+qualification dependencies:** accepted P0b, P1–P6 integrated and reviewed,
+fresh five-track checkpoints, frozen protocol v5, dual-device readiness and a
+separate human authorization to start the new campaign. P0b does not require
+P6 runtime results; P6 qualification cannot run before P0b ACCEPT.
 
 - Start A1/A2/A3/C1/C2 from fresh source-bound runs under the same supervisor
   identity, assigned task/category/seed schedule, runtime, profile and device
@@ -475,8 +525,9 @@ authorized in this planning tranche.
 ## Completion definition and explicit non-goals
 
 The goal is complete only when the exact reconciled ABI/profile is implemented
-without undocumented field/byte drift; the v5 Phase 0 and qualification
-artifacts are independently accepted and source/rules bound; all five
+without undocumented field/byte drift; the P0a preregistration is accepted
+before source work and the P0b v5 Phase 0/calibration artifacts are
+independently accepted and bound to the reviewed P1–P6 source; all five
 source-bound checkpoints can resume with exact optimizer and RNG continuation;
 the complete algorithmic path uses both approved WX9100 devices without CPU
 fallback; representative simulator records and current-dashboard replays
