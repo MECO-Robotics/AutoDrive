@@ -134,9 +134,13 @@ claim implementation or global ABI publication.
    code registries (response commit `602565ef99986996d2c12d06024833247dc3d395`,
    SHA-256 `219f3466741c17d9e49a4d402f0b3f8ae6f016f0738a068034a8ad312f610d75`).
    Observation/native ADOPTs V4 and defines the anonymous generation-safe
-   target-handle and snapshot lifecycle used by this mapping (response commit
-   `fa21a91d81b11008014925e8c62ed4c42f4c58e8`, file SHA-256
-   `b43f1a57da8548088f439e65475c6d4963206638`). The Route owner now ADOPTs
+   target-handle and snapshot lifecycle used by this mapping (corrected
+   response commit `f6af063a025eef967be442468355eb5a73d742c9`, file SHA-256
+   `886a177f91250cdbbb4a9c4a767c3424a1b56a0ce0033c419a570facb26582d0`,
+   Git blob `a58f84aa1c19679d5fb34f0fbd116776a1c7216b`). Its exact-head Pass 3
+   ACCEPT is review commit `ae991535600b3fc5c67dd6ea1d167a379e3a5c64`, review
+   SHA-256 `53649f76ee8204823cf7850cc3cbed7934a7b34a8a6fa71aec8210a906567cff`.
+   The Route owner now ADOPTs
    V4 for its pinned profile and binds policy sink row `q` to source-global row
    `r=q`, carries that row in `policy_source_row` and `route_ref`, maps
    continuation to row 536, preserves full target handles, and specifies
