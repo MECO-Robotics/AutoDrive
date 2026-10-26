@@ -17,15 +17,15 @@
 
 The envelope digest is the raw proposal digest `0c5ba39c3a4fa7c9bdf168ccf7c1dc792f4d3e27bd6f532517a967fca4b025b6`. The accepted evaluation estimand is `simulated_match_score`: accepted active-HUB FUEL awards only. The fixed strategic horizon is 160 physics ticks, at most 12 ticks per macro (last may be partial), gamma 0.993 per macro, exponent zero on the first branch and one increment per continuation decision. Route and risk costs remain separate from gross reward. These are source and protocol targets, not claims of current conformance.
 
-### P3, P4 and P5 are not accepted or pinned
+### P3, P4 and P5 package-plan status; implementation heads remain pending
 
-P6 requires the exact accepted implementation and integration heads for P3, P4 and P5 before its Pass 2 source work starts. The planning artifacts below are status leads only and do not authorize or establish those dependencies:
+P3 and P5 have accepted Pass 1 package plans. Those ACCEPT records approve only the plan artifacts; they do not accept implementation code, API interfaces, or integration heads. P4 remains pending Pass 1 review. P6 requires the exact accepted implementation/API and integration heads for all three packages before its Pass 2 source work starts.
 
 | Package | Current planning reference | Required before P6 Pass 2 |
 |---|---|---|
-| P3 Plan A A1/A2/A3 | Candidate plan commit `8b641ccc56b7c73a880a095b3c6940cb03b617f3`, file SHA-256 `6958cb883a339a251e6069378d8ebb853be97e4965d30ca0eba8d3003fbc0a9b`; independent Pass 1 result pending. | Accepted P3 plan/review, then exact accepted P3 implementation and integration head. |
+| P3 Plan A A1/A2/A3 | Accepted plan commit `8b641ccc56b7c73a880a095b3c6940cb03b617f3`, file SHA-256 `6958cb883a339a251e6069378d8ebb853be97e4965d30ca0eba8d3003fbc0a9b`; Pass 1 ACCEPT record commit `a11e68b6240c6701a14d6fafe932f65f0b05d6e2`, record SHA-256 `8da034c3d3b01b1bf113fb429f4fc0f3ed7fa708d19279d266e71ca61918e685`. | Exact accepted P3 implementation/API and integration head; plan acceptance alone does not establish those interfaces. |
 | P4 Plan C C1/C2 | P4 plan and implementation heads not pinned in this document; independent plan/artifact review is pending. | Accepted P4 plan/review, then exact accepted P4 implementation and integration head. |
-| P5 PPO/RNG/end-cause/atomic checkpoint integration | P5 plan is still being prepared; no accepted plan or implementation head is pinned here. | Accepted P5 plan/review, then exact accepted P5 implementation and integration head. P5 remains sole owner of `frc_defense/meco_track_training.py`. |
+| P5 PPO/RNG/end-cause/atomic checkpoint integration | Accepted plan commit `2742920fc22a87865bdcd03f162ef3a3b9a67978`, file SHA-256 `b9dee65073c9118745cf0cc0ab08606ff42d5220cf6ec0e25701829d11d30e62`; Pass 1 ACCEPT record commit `43901154cfb59981fca39137e7804cf74dd864c0`, record SHA-256 `59730f012fbe06a7a03a3274bf135c9ac73907890d0a5ab0e24311ac901c6223`. | Exact accepted P5 implementation/API and integration head; plan acceptance alone does not establish those interfaces. P5 remains sole owner of `frc_defense/meco_track_training.py`. |
 
 P6 source implementation also waits for accepted P0a decisions and accepted, integrated P1/P2 interfaces. P0b is deliberately later: it depends on frozen, reviewed P1–P6 source; P6 runtime qualification depends on accepted P0b. P6 source must not wait on P0b, and P0b must not wait on P6 runtime results.
 
