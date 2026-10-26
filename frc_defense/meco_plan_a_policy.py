@@ -45,10 +45,74 @@ class PlanAActionSupport:
     support_digest: str
     fallback_pair_tensor: torch.Tensor | None = None
     order_digest: str = ""
+    # Plan A has one canonical full support table, so its source-global row
+    # and policy-local row are the same device tensor. Keep the alias explicit
+    # for the shared command ABI instead of reconstructing row identity at the
+    # training/simulator boundary.
+    support_row_ids: torch.Tensor | None = None
+
+    def __post_init__(self):
+        rows = self.support_row_ids
+        if rows is None:
+            rows = torch.arange(self.valid_mask.numel(), device=self.valid_mask.device,
+                                dtype=torch.int64)
+            object.__setattr__(self, "support_row_ids", rows)
+        if (not torch.is_tensor(rows) or rows.dtype != torch.int64 or
+                rows.ndim != 1 or rows.numel() != self.valid_mask.numel() or
+                rows.device != self.valid_mask.device):
+            raise ValueError("Plan A support row IDs must be int64 [P] on the support device")
+
+    @property
+    def source_global_rows(self) -> torch.Tensor:
+        """Canonical all-node row IDs for `source_global_row` command values."""
+        if self.support_row_ids is None:
+            raise RuntimeError("Plan A support row IDs were not initialized")
+        return self.support_row_ids
+
+    @property
+    def policy_local_indices(self) -> torch.Tensor:
+        """Plan A's policy rows alias the canonical all-node support rows."""
+        if self.support_row_ids is None:
+            raise RuntimeError("Plan A support row IDs were not initialized")
+        return self.support_row_ids
+
+    def require_device(self, device) -> None:
+        """Check tensor placement without reading tensor values."""
+        selected = torch.device(device)
+        fields = {
+            "node_ids": self.node_ids,
+            "behavior_ids": self.behavior_ids,
+            "action_ids": self.action_ids,
+            "pair_node_ids": self.pair_node_ids,
+            "descriptor_ids": self.descriptor_ids,
+            "valid_mask": self.valid_mask,
+            "distances_m": self.distances_m,
+            "route_cost": self.route_cost,
+            "parent_ids": self.parent_ids,
+            "parent_edge_m": self.parent_edge_m,
+            "traversal_order": self.traversal_order,
+            "ancestor_jumps": self.ancestor_jumps,
+            "goal_xy": self.goal_xy,
+            "goal_heading": self.goal_heading,
+            "fallback_pair_tensor": self.fallback_pair_tensor,
+            "support_row_ids": self.support_row_ids,
+            "root_node": self.root_node,
+            "root_connector_m": self.root_connector_m,
+        }
+        for name, tensor in fields.items():
+            if not torch.is_tensor(tensor) or tensor.device != selected:
+                raise RuntimeError(f"Plan A support field {name} is not on {selected}")
+        if self.source_global_rows is not self.policy_local_indices:
+            raise RuntimeError("Plan A local/global row aliases must share one device tensor")
 
     @property
     def pair_count(self):
         return int(self.valid_mask.numel())
+
+
+# Public name used by the shared device command contract. Retain the original
+# spelling for existing A-track and offline fixture callers.
+DevicePlanASupport = PlanAActionSupport
 
 
 @dataclass(frozen=True)
@@ -91,6 +155,7 @@ def _plan_a_support_tensors(support: PlanAActionSupport, graph):
         "descriptor_ids": support.descriptor_ids,
         "valid_mask": support.valid_mask,
         "fallback_pair_tensor": support.fallback_pair_tensor,
+        "support_row_ids": support.support_row_ids,
         "distances_m": support.distances_m,
         "route_cost": support.route_cost,
         "parent_ids": support.parent_ids,
@@ -214,7 +279,7 @@ def plan_a_support_order_digest(support: PlanAActionSupport, graph) -> str:
 
 @torch.no_grad()
 def build_plan_a_support(env, graph, observation, snapshot_id: str, *,
-                         require_hip_shortest_path: bool = False) -> PlanAActionSupport:
+                         require_hip_shortest_path: bool = False) -> DevicePlanASupport:
     """Build all reachable legal node × currently legal behavior pairs.
 
     One Dijkstra pass over the legal SE(2) graph supplies deterministic route
@@ -422,10 +487,12 @@ def build_plan_a_support(env, graph, observation, snapshot_id: str, *,
         goal_xy=graph.xy.detach().clone(),
         goal_heading=graph.heading.detach().clone(), snapshot_id=snapshot_id,
         support_digest="", fallback_pair_tensor=fallback_pair_tensor.reshape(()))
-    return PlanAActionSupport(**{
+    result = PlanAActionSupport(**{
         **support.__dict__,
         "order_digest": plan_a_support_order_digest(support, graph),
     })
+    result.require_device(device)
+    return result
 
 
 def gather_pose_behavior_logits(track: str, raw, graph, raster, support: PlanAActionSupport,
