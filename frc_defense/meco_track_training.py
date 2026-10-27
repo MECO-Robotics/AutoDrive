@@ -2419,12 +2419,21 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
     run_manifest["initialization"] = initialization_record or {"mode": "random_initialization"}
     _atomic_json(output / "run.json", run_manifest)
     heartbeat_path = output / "heartbeat.json"
-    def update_heartbeat():
+    heartbeat_write_interval_s = 10.0
+    last_heartbeat_write = None
+    run_manifest["heartbeat_write_interval_s"] = heartbeat_write_interval_s
+    def update_heartbeat(*, force=False):
+        nonlocal last_heartbeat_write
+        now = time.monotonic()
+        if (not force and last_heartbeat_write is not None and
+                now - last_heartbeat_write < heartbeat_write_interval_s):
+            return
         _atomic_json(heartbeat_path, {"schema_version": 1, "run_id": run_id,
             "track": config.track, "pid": os.getpid(),
             "heartbeat_utc": datetime.now(timezone.utc).isoformat(),
             "completed_updates": update})
-    update_heartbeat()
+        last_heartbeat_write = now
+    update_heartbeat(force=True)
     hidden = None
     tracking_was_available = None
     commitment = None
@@ -2856,12 +2865,12 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
         run_manifest["task_outcomes"] = task_outcomes_payload()
         _atomic_json(output / "task-outcomes.json", run_manifest["task_outcomes"])
         _atomic_json(output / "run.json", run_manifest)
-        update_heartbeat()
+        update_heartbeat(force=True)
     except BaseException as exc:
         run_manifest.update(status="failed", error=f"{type(exc).__name__}: {exc}",
                             failed_utc=datetime.now(timezone.utc).isoformat())
         _atomic_json(output / "run.json", run_manifest)
-        update_heartbeat()
+        update_heartbeat(force=True)
         raise
     finally:
         close = getattr(env, "close", None)
