@@ -387,26 +387,31 @@ def _path_weighted_cost_device(scratch, path_xy: torch.Tensor,
     return per_segment.sum(dim=-1)
 
 
-def _scratch_planner(env, query_rows: list[tuple[RouteQuery, torch.Tensor]]) -> TensorADStar:
+def _scratch_planner(env, query_rows: list[tuple[RouteQuery, torch.Tensor]], *,
+                     world_index=None, slot_index=None) -> TensorADStar:
     """Build a fresh planner workspace; never borrow live planner buffers."""
     live = env.planner
     device = env.device
     count = len(query_rows)
-    starts = torch.stack([env.policy_pose[q.world, q.slot, :2] for q, _ in query_rows])
-    headings = torch.stack([env.policy_pose[q.world, q.slot, 2] for q, _ in query_rows])
-    velocity = torch.stack([env.sim.velocity[q.world, q.slot] for q, _ in query_rows])
+    if world_index is None and slot_index is None:
+        world_index = torch.tensor([q.world for q, _ in query_rows],
+                                   device=device, dtype=torch.long)
+        slot_index = torch.tensor([q.slot for q, _ in query_rows],
+                                  device=device, dtype=torch.long)
+    elif world_index is None or slot_index is None:
+        raise ValueError("world and slot indices must be supplied together")
+    pose = env.policy_pose[world_index, slot_index, :3]
+    velocity = env.sim.velocity[world_index, slot_index]
     sim = SimpleNamespace(
-        pose=torch.cat((starts, headings[:, None]), dim=-1)[:, None, :],
+        pose=pose[:, None, :],
         velocity=velocity[:, None, :],
         field_length=env.sim.field_length,
         field_width=env.sim.field_width,
         field_colliders=env.sim.field_colliders,
         obstacles=env.sim.obstacles,
         swerve=getattr(env.sim, "swerve", None),
-        omega_limit=torch.stack([env.sim.omega_limit[q.world, q.slot]
-                                 for q, _ in query_rows]),
-        alpha=torch.stack([env.sim.alpha[q.world, q.slot]
-                           for q, _ in query_rows]),
+        omega_limit=env.sim.omega_limit[world_index, slot_index],
+        alpha=env.sim.alpha[world_index, slot_index],
     )
     scratch_env = SimpleNamespace(device=device, n=count, sim=sim,
                                   field_boxes=env.field_boxes)
@@ -527,12 +532,11 @@ def evaluate_device_routes(env, queries: tuple[DeviceRouteQuery, ...] | list[Dev
     safe_obstacles = torch.nan_to_num(obstacles, nan=0., posinf=0., neginf=0.)
     goal_distance = torch.linalg.vector_norm(safe_goal - safe_start, dim=-1)
     at_goal = active & (goal_distance <= goal_tolerance_m)
-    safe_queries = tuple(DeviceRouteQuery(query.candidate_id, query.snapshot_id,
-        worlds[index], slots[index], intake[index])
-        for index, query in enumerate(items))
-    query_rows = [(query, safe_goal[index])
-                  for index, query in enumerate(safe_queries)]
-    scratch = _scratch_planner(env, query_rows)
+    # The scratch planner needs the row count; goal tensors are passed to plan
+    # below and need not be indexed individually here.
+    query_rows = [(query, None) for query in items]
+    scratch = _scratch_planner(env, query_rows, world_index=world_index,
+                               slot_index=slot_index)
     gx, gy = scratch._indices(safe_goal)
     blocked = scratch._blocked(safe_heading, safe_length, safe_width)
     blocked = scratch._block_robot_obstacles(blocked, safe_length, safe_width,
