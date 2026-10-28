@@ -907,9 +907,11 @@ class SE2MessageBlock(nn.Module):
         status = ~(edge_mask & (~edge_valid | ~destination_valid | ~source_valid)).any()
         safe_mask = edge_mask & edge_valid & destination_valid & source_valid
         safe = torch.where(safe_mask, edges, torch.zeros_like(edges))
-        expanded = nodes[:, :, None, :].expand(-1, -1, safe.shape[-1], -1)
-        neighbors = expanded.gather(1, safe[..., None].expand(-1, -1, -1, nodes.shape[-1]))
-        messages = self.message(neighbors)
+        # Each edge uses only its destination node, so compute the message
+        # network once per node before gathering repeated destinations.
+        node_messages = self.message(nodes)
+        expanded = node_messages[:, :, None, :].expand(-1, -1, safe.shape[-1], -1)
+        messages = expanded.gather(1, safe[..., None].expand(-1, -1, -1, nodes.shape[-1]))
         mask = safe_mask[..., None].to(messages.dtype)
         aggregate = (messages * mask).sum(2) / mask.sum(2).clamp_min(1.)
         result = self.norm(nodes + self.update(torch.cat((nodes, aggregate), -1)))
