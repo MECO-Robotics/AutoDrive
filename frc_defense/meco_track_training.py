@@ -2112,6 +2112,21 @@ def _policy_inputs_for_row(track, model, row, hidden, config):
     return decision
 
 
+def _ppo_metric_summary(policy_losses, value_losses, entropies, rewards, count):
+    """Read PPO scalar metrics in one transfer, preserving Python sum order."""
+    lengths = (len(policy_losses), len(value_losses), len(entropies))
+    tensors = [*policy_losses, *value_losses, *entropies, rewards.sum().detach()]
+    scalars = torch.stack(tensors).detach().cpu().tolist()
+    offset = 0
+    averages = []
+    for length in lengths:
+        averages.append(sum(scalars[offset:offset + length]) / max(1, length))
+        offset += length
+    return {"policy_loss": averages[0], "value_loss": averages[1],
+            "entropy": averages[2], "rollout_return": scalars[offset],
+            "rollout_steps": count}
+
+
 def _ppo_update(track, model, value_head, optimizer, rows, config, bootstrap_value,
                 *, update_number, diagnostic_output,
                 source_identity_sha256):
@@ -2227,9 +2242,9 @@ def _ppo_update(track, model, value_head, optimizer, rows, config, bootstrap_val
                 nn.utils.clip_grad_norm_(list(model.parameters()) + list(value_head.parameters()),
                                          config.max_grad_norm)
                 optimizer.step()
-                policy_losses.append(0.)
-                value_losses.append(float(value_loss.detach()))
-                entropies.append(0.)
+                policy_losses.append(value_loss.detach().new_zeros(()))
+                value_losses.append(value_loss.detach())
+                entropies.append(value_loss.detach().new_zeros(()))
                 continue
             dist = categorical_from_candidate_logits(logits)
             action = row["action"].reshape(1)
@@ -2245,14 +2260,10 @@ def _ppo_update(track, model, value_head, optimizer, rows, config, bootstrap_val
             nn.utils.clip_grad_norm_(list(model.parameters()) + list(value_head.parameters()),
                                      config.max_grad_norm)
             optimizer.step()
-            policy_losses.append(float(policy_loss.detach()))
-            value_losses.append(float(value_loss.detach()))
-            entropies.append(float(entropy.detach()))
-    return {"policy_loss": sum(policy_losses) / max(1, len(policy_losses)),
-            "value_loss": sum(value_losses) / max(1, len(value_losses)),
-            "entropy": sum(entropies) / max(1, len(entropies)),
-            "rollout_return": float(rewards.sum().detach()),
-            "rollout_steps": count}
+            policy_losses.append(policy_loss.detach())
+            value_losses.append(value_loss.detach())
+            entropies.append(entropy.detach())
+    return _ppo_metric_summary(policy_losses, value_losses, entropies, rewards, count)
 
 
 def _training_fuel_physics_config(track):
