@@ -59,7 +59,7 @@ def _normalize_bdf(value) -> str:
     if not isinstance(value, str):
         raise RuntimeError("HIP runtime PCI BDF is unavailable")
     match = re.fullmatch(
-        r"(?:(?P<domain>[0-9a-fA-F]{4}):)?(?P<bus>[0-9a-fA-F]{2}):"
+        r"(?:(?P<domain>[0-9a-fA-F]{4,8}):)?(?P<bus>[0-9a-fA-F]{2}):"
         r"(?P<slot>[0-9a-fA-F]{2})\.(?P<function>[0-7])", value.strip())
     if match is None:
         raise RuntimeError("HIP runtime PCI BDF is malformed")
