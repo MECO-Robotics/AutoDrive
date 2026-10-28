@@ -247,10 +247,55 @@ __global__ void plan_a_dijkstra_batch_kernel(const int64_t* edge_dst,
       status + b);
 }
 
+// Preserve per-edge errors: only errors on edges reached by the ordered search
+// invalidate the route, matching the original graph kernel.
+__global__ void plan_a_precompute_graph_edges(const double* xy, const double* heading,
+    const int64_t* edge_dst, const bool* edge_allowed, const bool* node_valid,
+    const double* heading_values, const double* turns, int64_t heading_count,
+    int64_t n, int64_t slots, double* edge_cost, double* edge_length, uint8_t* error) {
+  const int64_t offset = int64_t(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (offset >= n * slots) return;
+  error[offset] = 0;
+  if (!edge_allowed[offset]) return;
+  const int64_t src = offset / slots;
+  const int64_t dst = edge_dst[offset];
+  if (dst < 0 || dst >= n || !node_valid[dst]) {
+    error[offset] = 1;
+    return;
+  }
+  const double sx = xy[src * 2], sy = xy[src * 2 + 1];
+  const double dx = xy[dst * 2], dy = xy[dst * 2 + 1];
+  const double hs = heading[src], hd = heading[dst];
+  if (!isfinite(sx) || !isfinite(sy) || !isfinite(dx) || !isfinite(dy) ||
+      !isfinite(hs) || !isfinite(hd)) {
+    error[offset] = 1;
+    return;
+  }
+  const double length = plan_a_python_hypot(sx - dx, sy - dy);
+  int64_t hi = -1, hj = -1;
+  for (int64_t i = 0; i < heading_count; ++i) {
+    if (heading_values[i] == hs) hi = i;
+    if (heading_values[i] == hd) hj = i;
+  }
+  if (hi < 0 || hj < 0) {
+    error[offset] = 4;
+    return;
+  }
+  const double turn = turns[hi * heading_count + hj];
+  const double cost = length + 0.25 * turn;
+  if (!isfinite(length) || !isfinite(turn) || !isfinite(cost) ||
+      length < 0.0 || turn < 0.0 || cost < 0.0) {
+    error[offset] = 1;
+    return;
+  }
+  edge_cost[offset] = cost;
+  edge_length[offset] = length;
+}
+
 __global__ void plan_a_dijkstra_graph_kernel(const double* xy,
     const double* heading, const int64_t* edge_dst, const bool* edge_allowed,
-    const bool* node_valid, const double* heading_values, const double* turns,
-    int64_t heading_count,
+    const bool* node_valid, const double* edge_cost, const double* edge_length,
+    const uint8_t* edge_error,
     const int64_t* root_index, const double* root_start_cost_ptr,
     const double* root_connector_m_ptr,
     double* route, double* physical, int64_t* parent, double* parent_length,
@@ -286,35 +331,12 @@ __global__ void plan_a_dijkstra_graph_kernel(const double* xy,
       const int64_t offset = src * slots + slot;
       if (!edge_allowed[offset]) continue;
       const int64_t dst = edge_dst[offset];
-      if (dst < 0 || dst >= n || !node_valid[dst]) {
-        *status = 1;
+      if (edge_error[offset]) {
+        *status = edge_error[offset];
         return;
       }
-      const double sx = xy[src * 2], sy = xy[src * 2 + 1];
-      const double dx = xy[dst * 2], dy = xy[dst * 2 + 1];
-      const double hs = heading[src], hd = heading[dst];
-      if (!isfinite(sx) || !isfinite(sy) || !isfinite(dx) || !isfinite(dy) ||
-          !isfinite(hs) || !isfinite(hd)) {
-        *status = 1;
-        return;
-      }
-      const double length = plan_a_python_hypot(sx - dx, sy - dy);
-      int64_t hi = -1, hj = -1;
-      for (int64_t i = 0; i < heading_count; ++i) {
-        if (heading_values[i] == hs) hi = i;
-        if (heading_values[i] == hd) hj = i;
-      }
-      if (hi < 0 || hj < 0) {
-        *status = 4;
-        return;
-      }
-      const double turn = turns[hi * heading_count + hj];
-      const double cost = length + 0.25 * turn;
-      if (!isfinite(length) || !isfinite(turn) || !isfinite(cost) ||
-          length < 0.0 || turn < 0.0 || cost < 0.0) {
-        *status = 1;
-        return;
-      }
+      const double length = edge_length[offset];
+      const double cost = edge_cost[offset];
       const double proposal = distance + cost;
       if (!isfinite(proposal)) {
         *status = 1;
@@ -510,10 +532,14 @@ void plan_a_dijkstra_graph_launch(const double* xy, const double* heading,
     const double* root_connector_m, double* route, double* physical,
     int64_t* parent, double* parent_length, int64_t* traversal, int64_t n,
     int64_t slots, int64_t heap_capacity, double* heap_distance,
-    int64_t* heap_node, int64_t* status, hipStream_t stream) {
+    int64_t* heap_node, int64_t* status, double* edge_cost, double* edge_length,
+    uint8_t* edge_error, hipStream_t stream) {
+  hipLaunchKernelGGL(plan_a_precompute_graph_edges, dim3((n * slots + 255) / 256),
+      dim3(256), 0, stream, xy, heading, edge_dst, edge_allowed, node_valid,
+      heading_values, turns, heading_count, n, slots, edge_cost, edge_length, edge_error);
   hipLaunchKernelGGL(plan_a_dijkstra_graph_kernel, dim3(1), dim3(1), 0, stream,
-      xy, heading, edge_dst, edge_allowed, node_valid, heading_values, turns,
-      heading_count, root_index, root_start_cost,
+      xy, heading, edge_dst, edge_allowed, node_valid, edge_cost, edge_length,
+      edge_error, root_index, root_start_cost,
       root_connector_m, route, physical, parent, parent_length, traversal, n,
       slots, heap_capacity, heap_distance, heap_node, status);
 }

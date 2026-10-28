@@ -14,7 +14,7 @@ void plan_a_dijkstra_graph_launch(const double*, const double*, const int64_t*,
     const bool*, const bool*, const double*, const double*, int64_t,
     const int64_t*, const double*, const double*, double*, double*,
     int64_t*, double*, int64_t*, int64_t, int64_t, int64_t, double*, int64_t*,
-    int64_t*, hipStream_t);
+    int64_t*, double*, double*, uint8_t*, hipStream_t);
 void plan_a_dijkstra_batch_launch(const int64_t*, const double*, const double*,
     const bool*, const int64_t*, const double*, const double*, double*, double*,
     int64_t*, double*, int64_t*, int64_t, int64_t, int64_t, int64_t, double*,
@@ -181,6 +181,9 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
   auto heap_node = torch::empty({heap_capacity}, edge_dst.options());
   auto heap_distance = torch::empty({heap_capacity}, options);
   auto status = torch::zeros({}, edge_dst.options());
+  auto edge_cost = torch::empty({n, slots}, options);
+  auto edge_length = torch::empty({n, slots}, options);
+  auto edge_error = torch::empty({n, slots}, edge_dst.options().dtype(at::kByte));
   plan_a_dijkstra_graph_launch(xy64.data_ptr<double>(), heading64.data_ptr<double>(),
       edge_dst.data_ptr<int64_t>(), edge_allowed.data_ptr<bool>(),
       node_valid.data_ptr<bool>(), heading_values.data_ptr<double>(),
@@ -191,7 +194,8 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
       parent_length.data_ptr<double>(), traversal.data_ptr<int64_t>(), n, slots,
       heap_capacity,
       heap_distance.data_ptr<double>(), heap_node.data_ptr<int64_t>(),
-      status.data_ptr<int64_t>(), c10::cuda::getCurrentCUDAStream(xy.get_device()));
+      status.data_ptr<int64_t>(), edge_cost.data_ptr<double>(), edge_length.data_ptr<double>(),
+      edge_error.data_ptr<uint8_t>(), c10::cuda::getCurrentCUDAStream(xy.get_device()));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   // Stable sorting preserves ascending node IDs for equal route costs.
   // Leave unreachable rows and all rows from a failed search as -1.
