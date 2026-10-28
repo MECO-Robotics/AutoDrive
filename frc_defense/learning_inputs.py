@@ -3,10 +3,53 @@ from __future__ import annotations
 
 import math
 import time
+from dataclasses import dataclass
 
 import torch
 
-from .learning_contract import ObservationSnapshot
+from .learning_contract import ObservationSnapshot, _finite_tuple
+
+
+@dataclass(frozen=True, slots=True)
+class DeviceRasterObservationSnapshot:
+    """Snapshot with lazy tuple serialization and private device raster storage."""
+    snapshot_id: str
+    episode_id: str
+    sequence: int
+    timestamp: float
+    raster_shape: tuple[int, int, int]
+    _device_raster: torch.Tensor
+    globals: tuple[float, ...]
+    capture_monotonic: float
+    schema_version: int = 1
+
+    def __post_init__(self):
+        if not self.snapshot_id or not self.episode_id or self.schema_version != 1:
+            raise ValueError("unsupported observation schema or empty identity")
+        capture = float(self.capture_monotonic)
+        if (self.sequence < 0 or not math.isfinite(self.timestamp) or
+                not math.isfinite(capture) or capture < 0):
+            raise ValueError("sequence and timestamp must be nonnegative/finite")
+        if len(self.raster_shape) != 3 or any(size <= 0 for size in self.raster_shape):
+            raise ValueError("raster_shape must contain three positive dimensions")
+        if not isinstance(self._device_raster, torch.Tensor) or self._device_raster.numel() != math.prod(self.raster_shape):
+            raise ValueError("raster has incorrect size")
+        if not bool(torch.isfinite(self._device_raster).all()):
+            raise ValueError("raster values must be finite")
+        globals_ = _finite_tuple(self.globals, "globals")
+        if len(globals_) != 7:
+            raise ValueError("globals must contain exactly seven values")
+        object.__setattr__(self, "_device_raster", self._device_raster.detach().reshape(-1).clone())
+        object.__setattr__(self, "globals", globals_)
+        object.__setattr__(self, "raster_shape", tuple(self.raster_shape))
+        object.__setattr__(self, "capture_monotonic", capture)
+
+    @property
+    def raster(self):
+        return tuple(self._device_raster.cpu().tolist())
+
+    def raster_tensor(self, *, device):
+        return self._device_raster.to(device=device, dtype=torch.float32).clone()
 
 
 RASTER_CELL_METERS = 0.3302
@@ -59,7 +102,8 @@ def _deposit(raster, channel: int, world: int, positions, confidence, age,
 @torch.no_grad()
 def build_observation_snapshot(env, *, world: int = 0, slot: int = 3,
                                episode_id: str | None = None,
-                               sequence: int | None = None) -> ObservationSnapshot:
+                               sequence: int | None = None,
+                               device_raster: bool = False) -> ObservationSnapshot:
     """Pack `[6,H,W]` tracks and the proposal's seven global scalars.
 
     Signed-time cells contain negative track age (seconds before this snapshot);
@@ -117,13 +161,16 @@ def build_observation_snapshot(env, *, world: int = 0, slot: int = 3,
     if step < 0:
         raise ValueError("sequence must be nonnegative")
     snapshot_id = f"{episode}:{step}"
-    return ObservationSnapshot(
+    snapshot_type = DeviceRasterObservationSnapshot if device_raster else ObservationSnapshot
+    raster_args = ({"_device_raster": raster[0]} if device_raster else
+                   {"raster": tuple(raster[0].reshape(-1).cpu().tolist())})
+    return snapshot_type(
         snapshot_id=snapshot_id,
         episode_id=episode,
         sequence=step,
         timestamp=float(env.match_elapsed[world].item()),
         capture_monotonic=capture_monotonic,
         raster_shape=(6, height, width),
-        raster=tuple(raster[0].reshape(-1).cpu().tolist()),
+        **raster_args,
         globals=globals_,
     )

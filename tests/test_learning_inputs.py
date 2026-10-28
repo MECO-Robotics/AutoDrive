@@ -13,6 +13,7 @@ def _env():
         n=1,
         device=torch.device('cpu'),
         sim=sim,
+        policy_pose=pose,
         team_ids=torch.tensor([0, 0, 0, 1, 1, 1]),
         track_mask=torch.tensor([[[False, False], [False, False], [False, False],
                                   [True, True], [False, False], [False, False]]]),
@@ -74,3 +75,30 @@ def test_ally_channel_uses_explicit_current_team_telemetry():
     assert not torch.equal(before_raster[2], after_raster[2])
     assert torch.equal(before_raster[:2], after_raster[:2])
     assert torch.equal(before_raster[4:], after_raster[4:])
+
+
+def test_device_raster_snapshot_matches_legacy_and_keeps_frozen_copy():
+    env = _env()
+    legacy = build_observation_snapshot(env, episode_id="parity")
+    device = build_observation_snapshot(env, episode_id="parity", device_raster=True)
+    assert device.snapshot_id == legacy.snapshot_id
+    assert device.timestamp == legacy.timestamp
+    assert device.raster_shape == legacy.raster_shape
+    assert device.globals == legacy.globals
+    assert device.raster == legacy.raster
+    device_tensor = device.raster_tensor(device=env.device)
+    assert device_tensor.device == env.device
+    assert torch.equal(device_tensor, torch.tensor(legacy.raster))
+    device_tensor.zero_()
+    before = device.raster
+    env.track_pos[0, 3, 0] = torch.tensor([6., 3.])
+    assert device.raster == before
+
+
+def test_device_raster_rejects_nonfinite_values():
+    import pytest
+    from frc_defense.learning_inputs import DeviceRasterObservationSnapshot
+    with pytest.raises(ValueError, match="raster values must be finite"):
+        DeviceRasterObservationSnapshot(snapshot_id="x:0", episode_id="x",
+            sequence=0, timestamp=0., capture_monotonic=0., raster_shape=(1, 1, 1),
+            _device_raster=torch.tensor([float("nan")]), globals=(0.,) * 7)

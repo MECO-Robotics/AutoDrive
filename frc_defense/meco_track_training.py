@@ -1100,7 +1100,9 @@ def _phase4_route_goal_lifecycle_id(*, action, plan_a_node_id=None,
 
 def _snapshot_tensors(snapshot, *, device):
     """Recover the exact six-channel/seven-scalar tensors bound by a snapshot."""
-    raster = torch.tensor(snapshot.raster, device=device, dtype=torch.float32).reshape(
+    raster = (snapshot.raster_tensor(device=device)
+              if callable(getattr(snapshot, "raster_tensor", None)) else
+              torch.tensor(snapshot.raster, device=device, dtype=torch.float32)).reshape(
         1, *snapshot.raster_shape)
     globals_ = torch.tensor(snapshot.globals, device=device, dtype=torch.float32).reshape(1, 7)
     return raster, globals_
@@ -1503,7 +1505,7 @@ def _prepare_plan_a_decision(track, model, env, graph, episode_id, hidden, *,
     # table, teacher action, or candidate feature rows. Capture only that
     # observation so C's legacy candidate projection stays out of this path.
     observation = build_observation_snapshot(env, world=0, slot=3,
-                                              episode_id=episode_id)
+                                              episode_id=episode_id, device_raster=True)
     support = build_plan_a_support(env, graph, env._last_obs,
                                    observation.snapshot_id,
                                    require_hip_shortest_path=True)
