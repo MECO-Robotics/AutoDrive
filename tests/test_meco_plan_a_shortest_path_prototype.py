@@ -257,7 +257,7 @@ def test_candidate_offline_enforces_both_gates_before_fixtures(monkeypatch):
             patch.setattr(shortest_path, gate, True)
             with pytest.raises(RuntimeError, match="production gate changed"):
                 harness.run_offline()
-    assert harness._closed_gate_provenance() == {
+    assert harness._closed_gate_provenance(Path(__file__).resolve().parents[1]) == {
         "production_gate_open": False,
         "production_gates_open": {"graph": False, "preweighted": False},
     }
@@ -277,3 +277,15 @@ def test_candidate_failure_report_leaves_gate_state_unknown(monkeypatch, tmp_pat
     report = json.loads(Path(capsys.readouterr().out.strip()).read_text())
     assert report["production_gate_open"] is None
     assert report["production_gates_open"] == {"graph": None, "preweighted": None}
+
+
+def test_offline_rejects_gate_provenance_from_another_checkout(tmp_path, monkeypatch):
+    import pytest
+    from frc_defense import meco_plan_a_hip_parity_harness as harness
+
+    def forbidden(_root):
+        raise AssertionError("fixtures must not run with unbound gate provenance")
+
+    monkeypatch.setattr(harness, "_fixture_result", forbidden)
+    with pytest.raises(RuntimeError, match="gate provenance.*requested checkout"):
+        harness.run_offline(tmp_path)

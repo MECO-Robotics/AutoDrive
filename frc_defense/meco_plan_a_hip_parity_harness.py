@@ -303,9 +303,13 @@ def _fixture_result(root: Path) -> tuple[dict, list[dict]]:
     return raw, results
 
 
-def _closed_gate_provenance() -> dict:
+def _closed_gate_provenance(root: Path) -> dict:
     """Record both gate states only after confirming they are strictly closed."""
     from . import meco_plan_a_shortest_path as shortest
+    root = root.resolve()
+    if (Path(__file__).resolve() != root / "frc_defense/meco_plan_a_hip_parity_harness.py" or
+            Path(shortest.__file__).resolve() != root / "frc_defense/meco_plan_a_shortest_path.py"):
+        raise RuntimeError("candidate gate provenance must come from the requested checkout")
     preweighted = shortest.PLAN_A_HIP_PARITY_PROFILE_GATE_PASSED
     graph = shortest.PLAN_A_HIP_GRAPH_PARITY_PROFILE_GATE_PASSED
     if preweighted is not False or graph is not False:
@@ -315,8 +319,8 @@ def _closed_gate_provenance() -> dict:
 
 
 def run_offline(root: Path | None = None) -> dict:
-    gates = _closed_gate_provenance()
     root = (root or _root()).resolve()
+    gates = _closed_gate_provenance(root)
     fixture, results = _fixture_result(root)
     git = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"],
         check=True, capture_output=True, text=True).stdout.strip()
@@ -469,7 +473,7 @@ def _run_device_under_lease(root: Path, device: str, fixture: dict, lease,
             model != attested[device]["model"] or not uuid or
             uuid.casefold() != str(attested[device]["hip_uuid"]).casefold()):
         raise RuntimeError("selected WX9100 identity does not match post-lease physical attestation")
-    gates = _closed_gate_provenance()
+    gates = _closed_gate_provenance(root)
     # Import/compile is reached only after explicit device and lease checks.
     from .meco_plan_a_shortest_path_hip import extension
     import frc_defense.meco_plan_a_shortest_path_hip as hip_loader
