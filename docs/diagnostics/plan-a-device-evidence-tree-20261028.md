@@ -9,8 +9,9 @@ The prototype `tree-sha256-v2` hashes the same byte stream in fixed 1,024-byte
 chunks, recursively hashes ordered chunks of those hashes until at most 1,024
 bytes remain, then hashes a domain tag, the big-endian stream length and chunk
 size, and those remaining hashes. It is a different digest: rows record
-the scheme, the replay check uses the recorded scheme before any optimizer
-step, and rows without a scheme retain the v1 interpretation. Mixed-device v2
+the scheme, and GPU-only PPO requires v2 before any optimizer step. Legacy
+v1 fingerprints remain available for offline inspection but are not accepted
+for training replay. Mixed-device v2
 inputs fail closed. CPU digest support provides a reference oracle.
 
 The HIP path requires a separately compiled native module. Its maintained

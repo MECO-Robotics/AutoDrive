@@ -2181,11 +2181,13 @@ def _ppo_update(track, model, value_head, optimizer, rows, config, bootstrap_val
             if source_route_evidence != source_identity_sha256:
                 raise RuntimeError(
                     "Plan A route evidence is bound to a different training source")
+            route_scheme = row.get("route_evidence_scheme")
+            if route_scheme != "tree-sha256-v2":
+                raise RuntimeError("Plan A GPU-only PPO requires v2 route evidence")
             actual_route_evidence = _plan_a_route_evidence_digest(
                 row.get("route_batch"), source_route_evidence,
                 row.get("route_cost_nodes"), row.get("risk_cost_nodes"),
-                scheme=row.get("route_evidence_scheme", "sha256-v1"),
-                require_hip=row.get("route_evidence_scheme") == "tree-sha256-v2")
+                scheme=route_scheme, require_hip=True)
             if (not expected_route_evidence or
                     expected_route_evidence != actual_route_evidence):
                 raise RuntimeError(
