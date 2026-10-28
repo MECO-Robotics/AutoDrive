@@ -368,6 +368,94 @@
       }
     },
     {
+      "graph": {
+        "edge_allowed": [
+          [
+            true,
+            true
+          ],
+          [
+            false,
+            false
+          ],
+          [
+            true,
+            false
+          ],
+          [
+            false,
+            false
+          ]
+        ],
+        "edge_dst": [
+          [
+            2,
+            3
+          ],
+          [
+            0,
+            0
+          ],
+          [
+            1,
+            0
+          ],
+          [
+            0,
+            0
+          ]
+        ],
+        "heading": [
+          0.0,
+          0.0,
+          0.0,
+          0.7853981852531433
+        ],
+        "root": 0,
+        "root_connector_m": 0.0,
+        "root_start_cost": 0.0,
+        "xy": [
+          [
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0
+          ]
+        ]
+      },
+      "graph_sha256": "338e3e8eaa477426a697817ec82662c26442159961b021b147c9cba97209b911",
+      "id": "geometry_float32_turn_and_zero_cost_order",
+      "purpose": "Float32 heading turn rounding and final ordering after zero-cost discovery",
+      "route_kind": "geometry",
+      "route_output_field_sha256": {
+        "parent_edge_m": "7283b228c09abbcb998d9a80b34eaa51c450c91689dbfd0ffd15505002b02b42",
+        "parent_ids": "1e0a2c7619685fbfb656fe0ccde96370b6de3d9ef50edfaef50b567e863ccc13",
+        "physical_distance": "7283b228c09abbcb998d9a80b34eaa51c450c91689dbfd0ffd15505002b02b42",
+        "route_cost": "56ddccfc2de14d4cd4e546753e27698374b1c7d1b4da0238390d48251c29f06c",
+        "traversal_order": "f2f991d74dfbb2edf7f4475dcb7d82989de00a71e44bb11d4a6fbb49442577b6"
+      },
+      "route_output_sha256": "8b3f46328003665dd0f4245b93a1ce2c78bcaf52744b9949a16e2e0104b2306c",
+      "support_digest_sha256": "7bbf8c576ef537ee546a1ef9bc32017cd5acde98cd1f86be6d5c6526a29d518f",
+      "tensor_sha256": {
+        "edge_allowed": "21407c4e47103c66e599633d0d084792316c43581176052cdf80c1954608de6e",
+        "edge_costs": "bc1caa664dd49fbd5f5b686e4a5609b79952d7feb29a05feed41cebdf7b4e676",
+        "edge_dst": "35cc0a32c181e1c2246f3f86de1097d6417dcaf0be2a6fbc36095cffe4f87382",
+        "edge_lengths": "2c5f00c40f0df2c24839c9e23dc723cb8aec2d604aeae4a4a315f3f2599b7aff",
+        "heading": "3c3f02ef7ae29a84c6dbc80874270627d55ceee597e424276afdb762b9c632f3",
+        "xy": "2c5f00c40f0df2c24839c9e23dc723cb8aec2d604aeae4a4a315f3f2599b7aff"
+      }
+    },
+    {
       "graph_sha256": "e71a155a4675bfb65186763036a2e8824e20a6f9b3d75f038e9e1d6a0ebcaa6a",
       "id": "production_pose_lattice_8heading_100x80",
       "purpose": "Open-field 8-heading pose-lattice shape, 64,000 nodes \u00d7 10 slots",
@@ -402,15 +490,15 @@
     }
   ],
   "fixture_set": "plan_a_exact_heap_parity_v1",
-  "manifest_payload_sha256": "7409967ea747b9135de499f87755c6e285bba81c97247ac8f5768925466dcec9",
+  "manifest_payload_sha256": "b59a24f49cbe90d89efe8a182813111994de0d344397ee52a4501f1d1ce9c51d",
   "schema_version": 1,
   "source_sha256": {
     "frc_defense/csrc/meco_plan_a_shortest_path_hip.cpp": "5a34d3da1ed9ced7a25fc47efd28eec7624af3a7941352b3b0e3ef3fb0c11742",
-    "frc_defense/csrc/meco_plan_a_shortest_path_hip_kernel.cu": "46389291a60f5d0d32df175ba78054029c5a3de9e3a2f24c2793215c8ca9c59f",
+    "frc_defense/csrc/meco_plan_a_shortest_path_hip_kernel.cu": "6b3a9a75c59f045daf1b615a534dc2aa7316ef05282cfab160a6f2079de3d79e",
     "frc_defense/meco_device_lease.py": "ffb9f134086c614053f084fdf17ca55f37a3e54fca0412a0f8a7416220228597",
     "frc_defense/meco_gpu_attestation.py": "c6fa5aa807d492715abd848895a85f4c61213d7d15ac671f093c8d4c5f9af75e",
     "frc_defense/meco_plan_a_hip_fixture_graph.py": "e5b63f9373a90d159c21482d39c3f0d1fabc11767bbe735ae0c1fb64bbd7ce36",
-    "frc_defense/meco_plan_a_hip_parity_harness.py": "4409ca7e2e8128c249abb6692df304041a9beb79fd0cb10a347a2496cbf098cc",
+    "frc_defense/meco_plan_a_hip_parity_harness.py": "687521e758fbc0958a7a0657d90ad689564dda1f5119c7e8718472415f8b4510",
     "frc_defense/meco_plan_a_policy.py": "21d18e39043546390dbbeecced9eafbd5e39941ded0247ce0e144aea3519ec54",
     "frc_defense/meco_plan_a_shortest_path.py": "85bb16e1cbaf1391bb3611e347a1478109c225f1b9fa7f344c3b0e1e49391150",
     "frc_defense/meco_plan_a_shortest_path_hip.py": "0295e866d4da3cbc495f1ba2cd4c1441e66c36cc82ae8b3f74b057a506363470",

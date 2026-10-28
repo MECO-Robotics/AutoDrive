@@ -241,6 +241,7 @@ def _fixture_result(root: Path) -> tuple[dict, list[dict]]:
     required = {"equal_distance_node_and_edge_slot_ties",
         "strict_relaxation_epsilon", "disconnected_defaults",
         "geometry_root_connector_and_turn_cost",
+        "geometry_float32_turn_and_zero_cost_order",
         "invalid_active_edge_destination", "invalid_active_geometry",
         "production_pose_lattice_8heading_100x80"}
     if not required.issubset(by_id):
@@ -577,7 +578,8 @@ def _run_device_under_lease(root: Path, device: str, fixture: dict, lease,
                 if key == "traversal_order":
                     host = [node for node in host if node >= 0]
                 device_host[key] = host
-            mismatches = [key for key in OUTPUT_KEYS if device_host[key] != cpu[key]]
+            mismatches = [key for key in OUTPUT_KEYS
+                          if _field_hash(device_host[key]) != _field_hash(cpu[key])]
             output_comparisons = [{"field": key, "exact_equal": key not in mismatches,
                 "cpu_sha256": _field_hash(cpu[key]),
                 "hip_sha256": _field_hash(device_host[key])} for key in OUTPUT_KEYS]

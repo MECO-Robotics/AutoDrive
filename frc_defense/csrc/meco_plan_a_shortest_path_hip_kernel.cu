@@ -71,6 +71,7 @@ void plan_a_sha256_bytes_launch(const uint8_t* input, int64_t length,
 
 // Adaptation of CPython 3.12 vector_norm (PSF License 2.0):
 // https://github.com/python/cpython/blob/v3.12.14/Modules/mathmodule.c
+// Specialized for two operands and HIP, with nonrecursive subnormal scaling.
 __device__ double plan_a_python_hypot(double a,double b) {
   a=fabs(a); b=fabs(b);
   double max=fmax(a,b);
