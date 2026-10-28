@@ -337,7 +337,6 @@ __global__ void plan_a_dijkstra_graph_kernel(const double* xy,
       }
     }
   }
-  sorted_traversal(route, traversal, n, heap_distance, heap_node);
 }
 
 // Exact ordered connectivity partition used by the Python oracle. A single

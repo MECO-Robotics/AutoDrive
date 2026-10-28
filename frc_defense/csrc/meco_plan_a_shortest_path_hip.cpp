@@ -193,6 +193,11 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
       heap_distance.data_ptr<double>(), heap_node.data_ptr<int64_t>(),
       status.data_ptr<int64_t>(), c10::cuda::getCurrentCUDAStream(xy.get_device()));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
+  // Stable sorting preserves ascending node IDs for equal route costs.
+  // Leave unreachable rows and all rows from a failed search as -1.
+  auto sorted = at::sort(route, /*stable=*/true, /*dim=*/0, /*descending=*/false);
+  traversal = torch::where(torch::isfinite(std::get<0>(sorted)) & (status == 0),
+      std::get<1>(sorted), -1);
   return {route, physical, parent, parent_length, traversal, status};
 }
 
