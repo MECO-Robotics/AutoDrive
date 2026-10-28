@@ -47,11 +47,15 @@ void dijkstra_batch_into(torch::Tensor dst, torch::Tensor cost, torch::Tensor le
   TORCH_CHECK(out.size() == 8, "batch requires five outputs, two heaps, and status");
   for (int i = 0; i < 8; ++i) {
     check(out[i], (i == 2 || i == 4 || i == 6 || i == 7) ? at::kLong : at::kDouble);
-    if (i < 5) TORCH_CHECK(out[i].dim() == 2 && out[i].size(0) == b && out[i].size(1) == n,
-        "invalid batch output shape");
-    else if (i < 7) TORCH_CHECK(out[i].dim() == 2 && out[i].size(0) == b && out[i].size(1) == cap,
-        "invalid batch heap shape");
-    else TORCH_CHECK(out[i].dim() == 1 && out[i].size(0) == b, "invalid batch status shape");
+    if (i < 5) {
+      TORCH_CHECK(out[i].dim() == 2 && out[i].size(0) == b && out[i].size(1) == n,
+          "invalid batch output shape");
+    } else if (i < 7) {
+      TORCH_CHECK(out[i].dim() == 2 && out[i].size(0) == b && out[i].size(1) == cap,
+          "invalid batch heap shape");
+    } else {
+      TORCH_CHECK(out[i].dim() == 1 && out[i].size(0) == b, "invalid batch status shape");
+    }
   }
   c10::cuda::CUDAGuard guard(dst.device());
   plan_a_dijkstra_batch_launch(dst.data_ptr<int64_t>(), cost.data_ptr<double>(),
