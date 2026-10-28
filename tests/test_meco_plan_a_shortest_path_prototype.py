@@ -241,3 +241,39 @@ def test_graph_and_preweighted_gates_are_independent(monkeypatch):
         graph()
     with pytest.raises(ReachedDeviceCheck):
         preweighted()
+
+
+def test_candidate_offline_enforces_both_gates_before_fixtures(monkeypatch):
+    import pytest
+    from frc_defense import meco_plan_a_hip_parity_harness as harness
+
+    def forbidden(_root):
+        raise AssertionError("fixtures must not run with an open gate")
+
+    monkeypatch.setattr(harness, "_fixture_result", forbidden)
+    for gate in ("PLAN_A_HIP_GRAPH_PARITY_PROFILE_GATE_PASSED",
+                 "PLAN_A_HIP_PARITY_PROFILE_GATE_PASSED"):
+        with monkeypatch.context() as patch:
+            patch.setattr(shortest_path, gate, True)
+            with pytest.raises(RuntimeError, match="production gate changed"):
+                harness.run_offline()
+    assert harness._closed_gate_provenance() == {
+        "production_gate_open": False,
+        "production_gates_open": {"graph": False, "preweighted": False},
+    }
+
+
+def test_candidate_failure_report_leaves_gate_state_unknown(monkeypatch, tmp_path, capsys):
+    import json
+    import sys
+    from scripts import verify_plan_a_hip_parity as runner
+
+    def fail(_root):
+        raise RuntimeError("intentional failure")
+
+    monkeypatch.setattr(runner, "run_offline", fail)
+    monkeypatch.setattr(sys, "argv", ["verify", "--mode", "offline", "--report-dir", str(tmp_path)])
+    assert runner.main() == 1
+    report = json.loads(Path(capsys.readouterr().out.strip()).read_text())
+    assert report["production_gate_open"] is None
+    assert report["production_gates_open"] == {"graph": None, "preweighted": None}

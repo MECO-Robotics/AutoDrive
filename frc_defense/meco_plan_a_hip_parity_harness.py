@@ -303,7 +303,19 @@ def _fixture_result(root: Path) -> tuple[dict, list[dict]]:
     return raw, results
 
 
+def _closed_gate_provenance() -> dict:
+    """Record both gate states only after confirming they are strictly closed."""
+    from . import meco_plan_a_shortest_path as shortest
+    preweighted = shortest.PLAN_A_HIP_PARITY_PROFILE_GATE_PASSED
+    graph = shortest.PLAN_A_HIP_GRAPH_PARITY_PROFILE_GATE_PASSED
+    if preweighted is not False or graph is not False:
+        raise RuntimeError("candidate harness must not run with production gate changed")
+    return {"production_gate_open": False,
+            "production_gates_open": {"graph": graph, "preweighted": preweighted}}
+
+
 def run_offline(root: Path | None = None) -> dict:
+    gates = _closed_gate_provenance()
     root = (root or _root()).resolve()
     fixture, results = _fixture_result(root)
     git = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"],
@@ -314,7 +326,7 @@ def run_offline(root: Path | None = None) -> dict:
     import torch
     return {"schema_version": SCHEMA_VERSION,
         "evidence_class": "offline_fixture_only", "passed": True,
-        "production_gate_open": False, "training_configuration_modified": False,
+        **gates, "training_configuration_modified": False,
         "hip_imported": False, "hip_compiled": False, "device_discovered": False,
         "git_commit": git, "git_dirty": dirty,
         "source_sha256": fixture["source_sha256"],
@@ -457,9 +469,7 @@ def _run_device_under_lease(root: Path, device: str, fixture: dict, lease,
             model != attested[device]["model"] or not uuid or
             uuid.casefold() != str(attested[device]["hip_uuid"]).casefold()):
         raise RuntimeError("selected WX9100 identity does not match post-lease physical attestation")
-    if (shortest.PLAN_A_HIP_PARITY_PROFILE_GATE_PASSED is not False or
-            shortest.PLAN_A_HIP_GRAPH_PARITY_PROFILE_GATE_PASSED is not False):
-        raise RuntimeError("candidate harness must not run with production gate changed")
+    gates = _closed_gate_provenance()
     # Import/compile is reached only after explicit device and lease checks.
     from .meco_plan_a_shortest_path_hip import extension
     import frc_defense.meco_plan_a_shortest_path_hip as hip_loader
@@ -673,7 +683,7 @@ def _run_device_under_lease(root: Path, device: str, fixture: dict, lease,
     compile_identity_sha256 = sha256_bytes(canonical_bytes(compile_identity))
     return {"schema_version": SCHEMA_VERSION,
         "evidence_class": "hip_parity_profile_candidate",
-        "production_gate_open": False, "training_configuration_modified": False,
+        **gates, "training_configuration_modified": False,
         "passed": passed,
         "git_commit": git_commit, "git_dirty": git_dirty,
         "source_sha256": source_id,

@@ -490,7 +490,7 @@
     }
   ],
   "fixture_set": "plan_a_exact_heap_parity_v1",
-  "manifest_payload_sha256": "861cf078ca29db7d56c99cdc2e0120f87007aeb8b502516d0a264a4c705bc65b",
+  "manifest_payload_sha256": "c326d2fc1e7a665a9868dd6f6d860b9196e9f2504da75093fc10f52816041fac",
   "schema_version": 1,
   "source_sha256": {
     "frc_defense/csrc/meco_plan_a_shortest_path_hip.cpp": "d0f7a5f23c420e5cc1e39ab8b85eb8e903dff0b4bd17d1fa6e6f71a9420e4a70",
@@ -498,12 +498,12 @@
     "frc_defense/meco_device_lease.py": "ffb9f134086c614053f084fdf17ca55f37a3e54fca0412a0f8a7416220228597",
     "frc_defense/meco_gpu_attestation.py": "c6fa5aa807d492715abd848895a85f4c61213d7d15ac671f093c8d4c5f9af75e",
     "frc_defense/meco_plan_a_hip_fixture_graph.py": "e5b63f9373a90d159c21482d39c3f0d1fabc11767bbe735ae0c1fb64bbd7ce36",
-    "frc_defense/meco_plan_a_hip_parity_harness.py": "2c1917582bc12c12ff5d4814ccaa245263c91d4db280f49761f97c51cb4487d0",
+    "frc_defense/meco_plan_a_hip_parity_harness.py": "6b9b40de4c9624b66c8e0ca29833ed81d82efe28ebe51dd2e1fa0a428b6f1f32",
     "frc_defense/meco_plan_a_policy.py": "21d18e39043546390dbbeecced9eafbd5e39941ded0247ce0e144aea3519ec54",
     "frc_defense/meco_plan_a_shortest_path.py": "5a5f752dd83e4b8e5808fba43eef71347dea8f3479b34dd169e4b1b6849cc46a",
     "frc_defense/meco_plan_a_shortest_path_hip.py": "0295e866d4da3cbc495f1ba2cd4c1441e66c36cc82ae8b3f74b057a506363470",
     "frc_defense/meco_pose_graph.py": "62251b6cac235207fc669293bf792e73f1ecf7ce2586099ddb7616a7f8f31b67",
     "frc_defense/meco_training_manifest.py": "00da7eb8d8887382af9e4a2c87a66e40c892c79ee28421748746a64cfcc5755f",
-    "scripts/verify_plan_a_hip_parity.py": "a5bb80095f8f2d3f9dc3a43e213c3fbd2f677abd72a3a51b6a0eb35354aaee97"
+    "scripts/verify_plan_a_hip_parity.py": "6c4135507ff641c128811b9544cd25c07441dce68139b85b4f6a880b89fd4997"
   }
 }

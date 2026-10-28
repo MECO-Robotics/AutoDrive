@@ -69,7 +69,8 @@ def main() -> int:
         git_dirty = bool(subprocess.run(["git", "-C", str(root), "status", "--porcelain"],
             check=False, capture_output=True, text=True).stdout)
         report = {"schema_version": 1, "evidence_class": evidence_class,
-            "passed": False, "production_gate_open": False,
+            "passed": False, "production_gate_open": None,
+            "production_gates_open": {"graph": None, "preweighted": None},
             "training_configuration_modified": False,
             "failure_stage": args.mode, "error_type": type(exc).__name__,
             "error": str(exc)[:1000], "git_commit": git_commit,
