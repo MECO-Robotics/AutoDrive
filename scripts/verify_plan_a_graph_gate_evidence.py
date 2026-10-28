@@ -115,6 +115,12 @@ def check_report(root: Path, report_path: Path, expected_report_sha256: str,
             len(graph.get("hip_elapsed_ms", [])) != graph.get("repeats") or
             any(not isinstance(v, (int, float)) or not 0 < v < float("inf") for v in graph.get("hip_elapsed_ms", []))):
             raise ValueError(f"{report_path}: graph parity/profile incomplete: {case['id']}")
+    identity = check_device(report, report_path)
+    return {"report": str(report_path), "report_sha256": hashlib.sha256(raw).hexdigest(),
+            "candidate_commit": commit, **identity}
+
+
+def check_device(report: dict, report_path: Path) -> dict:
     device = report.get("device", {})
     requested = report.get("requested_device")
     auth = report.get("lease_authorization", {})
@@ -124,10 +130,12 @@ def check_report(root: Path, report_path: Path, expected_report_sha256: str,
         device.get("model") != "AMD Radeon Pro WX 9100" or
         auth.get("logical_lease_devices") != [requested] or not auth.get("logical_lease_id") or
         len(devices) != 1 or devices[0].get("device") != requested or
-        devices[0].get("hip_uuid") != device.get("uuid")):
+        not isinstance(device.get("uuid"), str) or not device["uuid"].strip() or
+        devices[0].get("hip_uuid") != device["uuid"] or
+        devices[0].get("model") != device["model"] or
+        not isinstance(devices[0].get("pci_bdf"), str) or not devices[0]["pci_bdf"].strip()):
         raise ValueError(f"{report_path}: device or lease attestation incomplete")
-    return {"report": str(report_path), "report_sha256": hashlib.sha256(raw).hexdigest(),
-            "candidate_commit": commit, "device": requested, "uuid": device.get("uuid")}
+    return {"device": requested, "uuid": device["uuid"], "pci_bdf": devices[0]["pci_bdf"]}
 
 
 def main() -> int:
@@ -144,7 +152,7 @@ def main() -> int:
             raise ValueError("one reviewed SHA-256 is required for each report")
         reports = [check_report(root, path.resolve(), digest, current, graph_source)
                    for path, digest in zip(args.report, args.report_sha256)]
-        if {r["device"] for r in reports} != {"cuda:0", "cuda:1"} or len(reports) != 2 or len({r["uuid"] for r in reports}) != 2:
+        if {r["device"] for r in reports} != {"cuda:0", "cuda:1"} or len(reports) != 2 or len({r["uuid"] for r in reports}) != 2 or len({r["pci_bdf"] for r in reports}) != 2:
             raise ValueError("exactly one report for each distinct WX9100 is required")
     except (ValueError, OSError, KeyError, subprocess.CalledProcessError) as exc:
         print(f"graph gate evidence rejected: {exc}", file=sys.stderr)

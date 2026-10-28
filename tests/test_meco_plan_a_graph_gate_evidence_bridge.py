@@ -25,3 +25,28 @@ def test_report_must_match_independently_supplied_hash(tmp_path):
     report.write_text('{"passed": true}')
     with pytest.raises(ValueError, match="reviewed hash"):
         check_report(tmp_path, report, "0" * 64, {}, b"")
+
+
+def test_device_attestation_requires_uuid_model_and_bdf():
+    from copy import deepcopy
+    from scripts.verify_plan_a_graph_gate_evidence import check_device
+
+    report = {
+        "requested_device": "cuda:0",
+        "device": {"index": 0, "model": "AMD Radeon Pro WX 9100", "uuid": "uuid0"},
+        "lease_authorization": {
+            "logical_lease_devices": ["cuda:0"], "logical_lease_id": "lease",
+            "physical_attestation": {"devices": [{
+                "device": "cuda:0", "hip_uuid": "uuid0",
+                "model": "AMD Radeon Pro WX 9100", "pci_bdf": "0000:19:00.0",
+            }]},
+        },
+    }
+    assert check_device(report, "report")["pci_bdf"] == "0000:19:00.0"
+    for key in ("hip_uuid", "model", "pci_bdf"):
+        changed = deepcopy(report)
+        changed["lease_authorization"]["physical_attestation"]["devices"][0][key] = None
+        if key == "hip_uuid":
+            changed["device"]["uuid"] = None
+        with pytest.raises(ValueError, match="attestation incomplete"):
+            check_device(changed, "report")
