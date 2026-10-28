@@ -12,7 +12,7 @@ import torch
 from frc_defense.meco_device_lease import lease_devices
 from frc_defense.meco_gpu_attestation import verify_post_lease_wx9100
 from frc_defense.meco_plan_a_hip_parity_harness import (
-    _fixture_result, _route_inputs, materialize_case, source_hashes,
+    _field_hash, _fixture_result, _route_inputs, materialize_case, source_hashes,
 )
 from frc_defense.meco_plan_a_shortest_path import plan_a_dijkstra_cpu
 
@@ -45,13 +45,19 @@ def main():
         device = torch.device(args.device)
         torch.cuda.set_device(device)
         cases = {c['id']: c for c in manifest['cases']}
+        cases['zero_cost_late_lower_id'] = {'graph': {
+            'edge_dst': [[2], [], [1]], 'edge_costs': [[0.], [], [0.]],
+            'edge_lengths': [[0.], [], [0.]], 'edge_allowed': [[True], [], [True]],
+            'root': 0, 'root_start_cost': 0., 'root_connector_m': 0.}}
         records = []
-        for case_id in ('equal_distance_node_and_edge_slot_ties',
+        for case_id in ('zero_cost_late_lower_id', 'equal_distance_node_and_edge_slot_ties',
                         'strict_relaxation_epsilon', 'disconnected_defaults',
                         'geometry_root_connector_and_turn_cost',
                         'production_pose_lattice_8heading_100x80'):
             graph = materialize_case(cases[case_id])
+            t = time.perf_counter_ns()
             inputs, _ = _route_inputs(graph)
+            weight_prepare_ms = ms(t)
             n = len(inputs['edge_dst'])
             slots = max(map(len, inputs['edge_dst']))
             def padded(rows, fill):
@@ -108,11 +114,21 @@ def main():
                 for i, expected in enumerate(cpu_results):
                     for j, field in enumerate(fields):
                         got = lists[j][i]
-                        if got != expected[field]:
+                        if _field_hash(got) != _field_hash(expected[field]):
                             raise RuntimeError(f'{case_id} batch={b} search={i} mismatch {field}')
+                if case_id == 'zero_cost_late_lower_id':
+                    if lists[4][0] != [0, 1, 2]:
+                        raise RuntimeError('final traversal is not sorted by cost and node ID')
+                    bad_roots = root_host[0].clone(); bad_roots[-1] = n
+                    bad_ins = [*ins[:4], bad_roots.to(device), *ins[5:]]
+                    launch(bad_ins, out)
+                    status_values = out[-1].cpu().tolist()
+                    if status_values != [0] * (b-1) + [3]:
+                        raise RuntimeError(f'per-search invalid-root status {status_values}')
                 records.append({'case': case_id, 'nodes': n, 'slots': slots, 'batch': b,
                     'roots': roots_list, 'exact_all_fields': True, 'cpu_ms': cpu_samples,
-                    'host_pack_ms': host_pack_ms, 'kernel_ms': kernel, 'full_call_ms': full,
+                    'weight_prepare_ms': weight_prepare_ms, 'host_pack_ms': host_pack_ms,
+                    'kernel_ms': kernel, 'full_call_ms': full,
                     'transfer_inclusive_ms': inclusive,
                     'cpu_over_kernel': statistics.median(cpu_samples)/statistics.median(kernel),
                     'cpu_over_full': statistics.median(cpu_samples)/statistics.median(full),
