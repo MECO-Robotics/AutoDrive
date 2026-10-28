@@ -44,6 +44,10 @@ def _normalize_uuid(value) -> str:
             if len(value) != 16:
                 raise RuntimeError("HIP device UUID bytes are malformed")
             return str(uuid.UUID(bytes=value))
+    elif not isinstance(value, str):
+        # PyTorch ROCm exposes UUIDs as a pybind _CUuuid object whose string
+        # form is canonical, while CUDA builds may return a plain string.
+        value = str(value)
     if not isinstance(value, str) or not value.strip():
         raise RuntimeError("HIP device UUID is unavailable")
     text = value.strip()
