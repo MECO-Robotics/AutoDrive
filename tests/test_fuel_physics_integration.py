@@ -168,7 +168,7 @@ def test_substep_runtime_restores_control_dt_after_failure(monkeypatch):
     assert env.sim.dt == old_dt
 
 
-def test_runtime_does_not_substep_for_inactive_world_speeds(monkeypatch):
+def test_runtime_masks_inactive_world_speeds_from_substep_bound(monkeypatch):
     env = make_env()
     env.piece_active.zero_()
     env.piece_owner.fill_(-1)
@@ -186,7 +186,7 @@ def test_runtime_does_not_substep_for_inactive_world_speeds(monkeypatch):
     monkeypatch.setattr(env.sim, "step", record_step)
     old_dt = env.sim.dt
     advance_with_fuel(env, torch.zeros_like(env.sim.velocity), torch.tensor([True, False]))
-    assert len(calls) == env.fuel_physics.config.substeps
+    assert len(calls) == env.fuel_physics.config.max_adaptive_substeps
     assert sum(calls) == pytest.approx(old_dt)
     assert env.sim.dt == old_dt
 
