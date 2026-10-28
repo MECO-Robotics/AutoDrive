@@ -1208,13 +1208,41 @@ def _plan_a_route_support(env, graph, support, snapshot_id, penalty_map, config)
         kwargs.update(learned_traversal_cost=penalty_map,
                       learned_cost_scale=1.,
                       learned_cost_provenance="plan_a_current_P_v1")
-    routes = evaluate_device_route_chunks(env, queries, support.goal_xy, **kwargs)
+    grid_count = env.planner.nx * env.planner.ny
+    goals = support.goal_xy
+    # Pose graphs include each planner cell once for each of eight headings,
+    # including padded nodes. Reject malformed same-capacity graphs on device;
+    # other capacities retain the general evaluator.
+    if goals.shape == (8 * grid_count, 2):
+        gx, gy = env.planner._indices(goals)
+        grid_index = gx * env.planner.ny + gy
+        grid = torch.stack((env.planner.xx, env.planner.yy), -1).reshape(-1, 2)
+        counts = torch.zeros(grid_count, dtype=torch.long, device=goals.device)
+        counts.scatter_add_(0, grid_index, torch.ones_like(grid_index))
+        canonical = ((counts == 8).all() & (goals == grid[grid_index]).all())
+        grid_queries = tuple(DeviceRouteQuery(
+            candidate_id=f"plan-a-grid:{node}", snapshot_id=snapshot_id,
+            world=0, slot=3) for node in range(grid_count))
+        grid_routes = evaluate_device_route_chunks(env, grid_queries, grid, **kwargs)
+        route_fields = ("status_code", "feasible", "path_xy", "path_length",
+            "distance_m", "endpoint_error_m", "weighted_cost_grid_edges",
+            "bump_cost_grid_edges", "learned_cost_grid_edges")
+        expanded = {name: (None if getattr(grid_routes, name) is None else
+                    getattr(grid_routes, name).index_select(0, grid_index))
+                    for name in route_fields}
+        expanded["status_code"] = torch.where(canonical, expanded["status_code"],
+            torch.full_like(expanded["status_code"], grid_routes.INVALID))
+        expanded["feasible"] = expanded["feasible"] & canonical
+        routes = replace(grid_routes, queries=queries,
+            candidate_index=torch.arange(len(queries), device=goals.device), **expanded)
+    else:
+        routes = evaluate_device_route_chunks(env, queries, goals, **kwargs)
     route_legal = routes.feasible & graph.node_valid[0]
     valid_matrix = support.valid_mask.reshape(-1, 8) & route_legal[:, None]
     pair_mask = valid_matrix.reshape(-1)
     fallback_node = routes.distance_m.to(support.distances_m.dtype).masked_fill(
         ~valid_matrix.any(-1), torch.inf).argmin()
-    fallback_slot = valid_matrix[fallback_node].to(torch.long).argmax()
+    fallback_slot = valid_matrix.index_select(0, fallback_node.reshape(1)).to(torch.long).argmax()
     fallback_pair = torch.where(valid_matrix.any(),
         fallback_node * valid_matrix.shape[1] + fallback_slot,
         torch.full((), -1, device=valid_matrix.device, dtype=torch.long))
