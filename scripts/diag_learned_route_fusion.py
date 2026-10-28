@@ -27,15 +27,34 @@ import frc_defense.tensor_adstar as adstar
 
 def baseline(*args, **kwargs):
     adstar._LEARNED_FUSION_DIAGNOSTIC = False
-    return training._plan_a_route_support(*args, **kwargs)
+    before = len(dispatches)
+    result = training._plan_a_route_support(*args, **kwargs)
+    assert set(dispatches[before:]) == {'bellman'}
+    return result
 
 def candidate(*args, **kwargs):
     adstar._LEARNED_FUSION_DIAGNOSTIC = True
-    return training._plan_a_route_support(*args, **kwargs)
+    before = len(dispatches)
+    result = training._plan_a_route_support(*args, **kwargs)
+    assert set(dispatches[before:]) == {'fused'}
+    return result
 
 out=[]
 with lease_devices(('cuda:0',), owner='plan-a-xy-dedup-full') as lease:
     verify_post_lease_wx9100(lease, ('cuda:0',))
+    extension = adstar._hip_adstar_extension()
+    if extension is None: raise RuntimeError('ADStar HIP extension unavailable')
+    dispatches = []
+    class DispatchSpy:
+        def __getattr__(self, name): return getattr(extension, name)
+        def fused_route(self, *args):
+            dispatches.append('fused')
+            return extension.fused_route(*args)
+        def bellman_sweep(self, *args):
+            dispatches.append('bellman')
+            return extension.bellman_sweep(*args)
+    adstar._HIP_ADSTAR_EXTENSION = DispatchSpy()
+    adstar._HIP_ADSTAR_EXTENSION_ATTEMPTED = True
     env=make_curriculum_env('pickup_simple','single',1,'cuda:0',71,horizon=10,fuel_physics=False)
     env.set_focal_pose_estimate((10.05,4.05,0.))
     graph=build_legal_pose_graph(env)
@@ -48,7 +67,7 @@ with lease_devices(('cuda:0',), owner='plan-a-xy-dedup-full') as lease:
         config=SimpleNamespace(p_mode=mode)
         penalty=(xx*0.01 + yy*0.02) if mode=='learned' else None
         results={}; timings={}
-        for name,fn in (('baseline',baseline),('candidate',candidate),('candidate',candidate),('baseline',baseline)):
+        for name,fn in (('baseline',baseline),('candidate',candidate)) + (('candidate',candidate),('baseline',baseline),('baseline',baseline),('candidate',candidate)) * 5:
             torch.cuda.synchronize(); t=time.perf_counter()
             res=fn(env,graph,support,support.snapshot_id,penalty,config)
             torch.cuda.synchronize(); timings.setdefault(name, []).append(time.perf_counter()-t)

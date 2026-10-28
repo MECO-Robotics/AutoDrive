@@ -223,7 +223,8 @@ def test_fused_static_mask_ignores_unwritten_inactive_rows(monkeypatch):
 @pytest.mark.skipif(not (torch.cuda.is_available() and torch.version.hip),
                     reason="requires ROCm")
 @pytest.mark.parametrize("map_kind", ("zero", "gradient", "barrier", "near_ties"))
-def test_learned_fused_path_matches_bellman_reference(map_kind, monkeypatch):
+@pytest.mark.parametrize("static_active", (False, True))
+def test_learned_fused_path_matches_bellman_reference(map_kind, static_active, monkeypatch):
     device = torch.device("cuda", torch.cuda.current_device())
     baseline = _planner_on_device(8, False, device)
     candidate = _planner_on_device(8, False, device)
@@ -237,18 +238,46 @@ def test_learned_fused_path_matches_bellman_reference(map_kind, monkeypatch):
     active = torch.tensor([True, True, True, True, True, False, True, True], device=device)
     obstacles = torch.zeros((8, 2, 3), device=device)
     obstacles[:, 0] = torch.tensor([8.1, 3.6, .4], device=device)
+    defender = torch.stack((torch.full((8,), 8., device=device),
+                            torch.linspace(2., 6., 8, device=device)), -1)
+    defender_velocity = torch.full_like(defender, .05)
+    for planner in (baseline, candidate):
+        planner.last_path.fill_(37.)
+        planner.last_lengths.fill_(19)
+        planner.potential.fill_(53.)
     xx, yy = baseline.xx, baseline.yy
     if map_kind == 'zero': cost = torch.zeros_like(xx)
     elif map_kind == 'gradient': cost = .01 * xx + .02 * yy
     elif map_kind == 'barrier': cost = ((xx > 7.) & (xx < 9.) & (yy < 6.)).to(xx.dtype) * 20.
     else: cost = torch.remainder(torch.arange(xx.numel(), device=device).reshape_as(xx), 2).to(xx.dtype) * 1e-6
+    extension = _hip_adstar_extension()
+    assert extension is not None
+    calls = []
+    class DispatchSpy:
+        def __getattr__(self, name):
+            return getattr(extension, name)
+        def fused_route(self, *args):
+            calls.append('fused')
+            return extension.fused_route(*args)
+        def bellman_sweep(self, *args):
+            calls.append('bellman')
+            return extension.bellman_sweep(*args)
+    monkeypatch.setattr(adstar_module, '_HIP_ADSTAR_EXTENSION', DispatchSpy())
+    monkeypatch.setattr(adstar_module, '_HIP_ADSTAR_EXTENSION_ATTEMPTED', True)
     monkeypatch.setattr(adstar_module, '_LEARNED_FUSION_DIAGNOSTIC', False)
     baseline.plan(starts, goals, headings, lengths, widths, active_mask=active,
-                  robot_obstacles=obstacles, learned_traversal_cost=cost)
+                  static_active_mask=static_active, robot_obstacles=obstacles,
+                  defender=defender, defender_velocity=defender_velocity, dynamic_defender=True,
+                  learned_traversal_cost=cost, learned_cost_scale=.37)
+    assert calls and set(calls) == {'bellman'}
+    calls.clear()
     monkeypatch.setattr(adstar_module, '_LEARNED_FUSION_DIAGNOSTIC', True)
     candidate.plan(starts, goals, headings, lengths, widths, active_mask=active,
-                   robot_obstacles=obstacles, learned_traversal_cost=cost)
+                   static_active_mask=static_active, robot_obstacles=obstacles,
+                   defender=defender, defender_velocity=defender_velocity, dynamic_defender=True,
+                   learned_traversal_cost=cost, learned_cost_scale=.37)
+    assert calls and set(calls) == {'fused'}
     torch.cuda.synchronize(device)
     for name in ('last_path', 'last_lengths', 'last_start', 'last_goal',
-                 'last_heading', 'last_speed_profile', 'potential'):
+                 'last_heading', 'last_speed_profile', 'last_intercept', 'last_intercept_time', 'potential'):
         assert torch.equal(getattr(baseline, name), getattr(candidate, name)), name
