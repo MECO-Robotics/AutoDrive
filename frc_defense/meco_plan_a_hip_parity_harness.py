@@ -576,23 +576,23 @@ def _run_device_under_lease(root: Path, device: str, fixture: dict, lease,
                     host = [node for node in host if node >= 0]
                 device_host[key] = host
             mismatches = [key for key in OUTPUT_KEYS if device_host[key] != cpu[key]]
-            if mismatches:
-                raise RuntimeError(
-                    f"exact HIP parity mismatch in {case['id']} {path_name}: {mismatches}")
-            output_comparisons = [{"field": key, "exact_equal": True,
+            output_comparisons = [{"field": key, "exact_equal": key not in mismatches,
                 "cpu_sha256": _field_hash(cpu[key]),
                 "hip_sha256": _field_hash(device_host[key])} for key in OUTPUT_KEYS]
             support_digest = _support_digest(graph, device_host, case["id"])
-            if support_digest != case["support_digest_sha256"]:
-                raise RuntimeError(
-                    f"Plan A support digest mismatch in {case['id']} {path_name}")
+            support_digest_match = support_digest == case["support_digest_sha256"]
             median_hip = sorted(timings)[len(timings) // 2]
-            hip_rows.append({"path": path_name, "exact_output_match": True,
+            hip_rows.append({"path": path_name,
+                "status": "candidate_pass" if not mismatches and support_digest_match
+                          else "candidate_mismatch",
+                "exact_output_match": not mismatches,
+                "mismatched_output_fields": mismatches,
                 "compared_output_fields": output_comparisons,
-                "support_digest_match": True,
+                "support_digest_match": support_digest_match,
                 "route_output_sha256": _route_hash(device_host),
                 "route_output_field_sha256": _output_field_hashes(device_host),
                 "support_digest_sha256": support_digest,
+                "expected_support_digest_sha256": case["support_digest_sha256"],
                 "warmups": warmups, "repeats": repeats,
                 "first_use_elapsed_ms": first_use_ms,
                 "hip_elapsed_ms": timings,
@@ -603,9 +603,12 @@ def _run_device_under_lease(root: Path, device: str, fixture: dict, lease,
                 "peak_allocated_bytes": int(torch.cuda.max_memory_allocated(selected)),
                 "peak_reserved_bytes": int(torch.cuda.max_memory_reserved(selected))})
             del invoke_mapping, invoke, device_result
-        output.append({"id": case["id"], "status": "candidate_pass",
-            "route_kind": kind, "exact_output_match": True,
-            "support_digest_match": True, "graph_sha256": case["graph_sha256"],
+        case_passed = all(row.get("exact_output_match") and
+                          row.get("support_digest_match") for row in hip_rows)
+        output.append({"id": case["id"],
+            "status": "candidate_pass" if case_passed else "candidate_mismatch",
+            "route_kind": kind, "exact_output_match": case_passed,
+            "support_digest_match": case_passed, "graph_sha256": case["graph_sha256"],
             "tensor_sha256": case["tensor_sha256"],
             "expected_route_output_sha256": case["route_output_sha256"],
             "expected_route_output_field_sha256": case["route_output_field_sha256"],
