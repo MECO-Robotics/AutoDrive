@@ -30,7 +30,8 @@ from .curriculum_scenarios import make_curriculum_env, teacher_actions
 from .meco_candidates import (CANDIDATE_BOUNDARY,
     ROUTE_COST_POINTS_PER_SECOND, build_route_feasible_candidates)
 from .meco_plan_a_policy import (SUPPORT_ORDER, build_plan_a_support,
-    plan_a_support_digest, plan_a_support_digest_cpu_reference)
+    plan_a_support_digest_cpu_reference)
+from .meco_plan_a_support_tree import support_digest_v1_compatible as plan_a_support_digest
 from .meco_pose_graph import build_legal_pose_graph
 from .meco_tracks import (PREDICTION_MODES, candidate_digest,
     prediction_contract)

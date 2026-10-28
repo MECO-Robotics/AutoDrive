@@ -51,7 +51,7 @@ from .meco_tracks import (MECO_TRACKS, MECO_CANDIDATE_RAW_FEATURE_COUNT,
     MULTIMODEL_TURN_RATE_MIN_RAD_S, MULTIMODEL_TURN_RATE_MAX_RAD_S,
     MULTIMODEL_DAMPING_PER_S)
 from .meco_plan_a_policy import (PlanAActionSupport, build_plan_a_support,
-    gather_pose_behavior_logits, graph_path_integral, plan_a_support_digest,
+    gather_pose_behavior_logits, graph_path_integral,
     plan_a_support_order_digest, PlanAEmptySupportError, SUPPORT_ORDER)
 from .meco_metric_ledger import MecoEpisodeMetricLedger
 from .learning_inputs import build_observation_snapshot
@@ -1528,7 +1528,8 @@ def _prepare_plan_a_decision(track, model, env, graph, episode_id, hidden, *,
                              route_cost_points_per_second, action_ticks,
                              candidate_k, deterministic, value_head,
                              p_mode, p_cost_scale, p_points_per_grid_edge,
-                             prediction_mode="cv", tracking_was_available=None):
+                             prediction_mode="cv", tracking_was_available=None,
+                             support_digest_scheme="sha256-v1"):
     """Build stable full-pose support and sample from its exact masked softmax."""
     # Plan A needs the canonical observation provenance, but has no candidate
     # table, teacher action, or candidate feature rows. Capture only that
@@ -1765,8 +1766,12 @@ def _prepare_plan_a_decision(track, model, env, graph, episode_id, hidden, *,
         (~has_legal_support).to(torch.long))).to(torch.float64)
     # Content digests and readable prediction summaries are report artifacts;
     # materialize them only after the compact selected-action payload exists.
-    support = replace(support,
-        support_digest=plan_a_support_digest(support, graph))
+    from .meco_plan_a_support_tree import support_digest_v1_compatible, support_tree_digest
+    if support_digest_scheme not in ("sha256-v1", "tree-sha256-v2"):
+        raise ValueError("unknown Plan A support digest scheme")
+    support = replace(support, support_digest=(support_tree_digest(support, graph)
+        if support_digest_scheme == "tree-sha256-v2" else
+        support_digest_v1_compatible(support, graph)))
     prediction_metadata = _materialize_plan_a_prediction_metadata(
         prediction_metadata)
     fallback_used = production_inference_failed
@@ -1774,7 +1779,8 @@ def _prepare_plan_a_decision(track, model, env, graph, episode_id, hidden, *,
     value = (_value(value_head, globals_, seed_decision["hidden"])
              if value_head is not None else None)
     return {"snapshot": observation, "candidate_set": None,
-        "support": support, "raster": raster, "globals": globals_,
+        "support": support, "support_digest_scheme": support_digest_scheme,
+        "raster": raster, "globals": globals_,
         "hidden_before": hidden_before,
         "tracking_available": tracking_available,
         "tracking_reset": tracking_reset,
@@ -1819,7 +1825,8 @@ def _prepare_decision(track, model, env, graph, episode_id, hidden,
                       p_mode="learned", p_cost_scale=1., p_points_per_grid_edge=.05,
                       prediction_mode="cv",
                       commitment: CandidateCommitment | None = None,
-                      tracking_was_available=None):
+                      tracking_was_available=None,
+                      support_digest_scheme="sha256-v1"):
     observation = env._last_obs
     if track in ("A1", "A2", "A3"):
         return _prepare_plan_a_decision(track, model, env, graph, episode_id,
@@ -1829,7 +1836,8 @@ def _prepare_decision(track, model, env, graph, episode_id, hidden,
             p_mode=p_mode, p_cost_scale=p_cost_scale,
             p_points_per_grid_edge=p_points_per_grid_edge,
             prediction_mode=prediction_mode,
-            tracking_was_available=tracking_was_available)
+            tracking_was_available=tracking_was_available,
+            support_digest_scheme=support_digest_scheme)
     candidate_set = build_route_feasible_candidates(env, observation, graph,
         episode_id=episode_id, action_ticks=action_ticks, candidate_k=candidate_k,
         prediction_mode=prediction_mode,
@@ -2193,7 +2201,10 @@ def _ppo_update(track, model, value_head, optimizer, rows, config, bootstrap_val
                 raise RuntimeError(
                     "Plan A route batch/source evidence changed before PPO replay")
             expected_digest = row.get("support_digest")
-            actual_digest = plan_a_support_digest(support, row["graph_object"])
+            if row.get("support_digest_scheme") != "tree-sha256-v2":
+                raise RuntimeError("Plan A GPU-only PPO requires v2 support evidence")
+            from .meco_plan_a_support_tree import support_tree_digest
+            actual_digest = support_tree_digest(support, row["graph_object"])
             if (not expected_digest or expected_digest != support.support_digest or
                     actual_digest != expected_digest):
                 raise RuntimeError("Plan A frozen support changed between rollout and PPO update")
@@ -2649,7 +2660,7 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                             prediction_mode=config.prediction_mode,
                             commitment=commitment,
                             tracking_was_available=tracking_was_available,
-                            value_head=value_head)
+                            value_head=value_head, support_digest_scheme="tree-sha256-v2")
                 except PlanAEmptySupportError as exc:
                     abort_empty_support(exc, rows, update, update_empty_support_events)
                     continue
@@ -2787,6 +2798,7 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                                               else asdict(candidate.commitment)),
                     **({"support": prepared["support"],
                         "support_digest": prepared["support"].support_digest,
+                        "support_digest_scheme": prepared["support_digest_scheme"],
                         "route_batch": prepared["route_batch"],
                         "route_evidence_sha256": route_evidence,
                         "route_evidence_scheme": "tree-sha256-v2",
@@ -2874,7 +2886,7 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                             commitment=commitment,
                             tracking_was_available=tracking_was_available,
                             deterministic=True,
-                            value_head=value_head)
+                            value_head=value_head, support_digest_scheme="tree-sha256-v2")
                     bootstrap_payload = bootstrap.get("selected_action_payload")
                     if bootstrap_payload is not None:
                         status = bootstrap_payload.detach().to(
@@ -2912,6 +2924,7 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                 stats["plan_a_empty_support_aborts"] = update_empty_support_events
             if config.track in ("A1", "A2", "A3"):
                 stats.update(policy_support_order=SUPPORT_ORDER,
+                    policy_support_digest_scheme="tree-sha256-v2",
                     policy_support_pair_count=rows[0]["support"].pair_count,
                     policy_support_digests=[row["support"].support_digest for row in rows],
                     execution_failure_count=sum(bool(row["execution_failure"]) for row in rows),
@@ -4352,6 +4365,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                 routes_seen.append({"candidate_id": f"node:{node}:behavior:{behavior_index}:descriptor:{descriptor}",
                                     "support_order": SUPPORT_ORDER,
                                     "support_digest": support.support_digest,
+                                    "support_digest_scheme": prepared["support_digest_scheme"],
                                     "inference_provenance": prepared.get("inference_provenance"),
                                     "policy_fallback": prepared.get("fallback_used", False),
                                     "behavior": ("drive", "intake", "score", "ferry", "defense")[behavior_index],
