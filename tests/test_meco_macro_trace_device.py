@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 import torch
+import pytest
 
 from frc_defense.meco_track_training import _run_macro_step, _training_fuel_physics_config
 
@@ -37,3 +38,37 @@ def test_macro_trace_snapshots_actions_and_excludes_inactive_ticks():
     assert result[1] is True
     assert result[3] == [1, 2]
     assert result[8] is True
+
+
+@pytest.mark.parametrize("action,event_field", [(4, "fuel_scored_event"),
+                                               (6, "fuel_passed_event")])
+@pytest.mark.parametrize("finish_near", [False, True])
+def test_macro_preemption_and_alignment_are_accumulated(action, event_field, finish_near):
+    class Env:
+        n = 1
+        device = torch.device("cpu")
+
+        def __init__(self):
+            self.last_actions = torch.zeros((1, 6), dtype=torch.long)
+            self.sim = SimpleNamespace(pose=torch.zeros((1, 6, 3)))
+            self.fuel_scored_event = torch.zeros((1, 6), dtype=torch.long)
+            self.fuel_passed_event = torch.zeros((1, 6), dtype=torch.long)
+            self.curriculum_metrics = SimpleNamespace(reward_delta=lambda: torch.ones(1))
+            self.steps = 0
+
+        def step(self, actions, **kwargs):
+            self.steps += 1
+            self.last_actions.fill_(action)
+            getattr(self, event_field)[0, 3] = int(self.steps == 1)
+            if self.steps == 2 and finish_near:
+                self.sim.pose[0, 3, 0] = 1.
+            return None, None, torch.tensor([self.steps == 2]), torch.tensor([False]), None
+
+        def observe(self):
+            return torch.zeros(1)
+
+    result = _run_macro_step(Env(), action, 4, goal_xy=(1., 0.))
+    assert result[1] is True
+    assert result[3] == [action, action]
+    assert result[6] is finish_near
+    assert result[7] is not finish_near

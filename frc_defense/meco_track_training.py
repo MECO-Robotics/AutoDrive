@@ -1948,8 +1948,8 @@ def _run_macro_step(env, action_index: int, action_ticks: int, goal_xy=None, *,
     ended = timeout = False
     executed_actions = []
     executed_tick_mask = []
-    heading_alignment_opportunity = False
-    native_goal_preempted = False
+    heading_alignment_opportunity = torch.zeros((), device=env.device, dtype=torch.bool)
+    native_goal_preempted = torch.zeros((), device=env.device, dtype=torch.bool)
     selected_target_lost = torch.zeros((),device=env.device,dtype=torch.bool)
     selected_target_action_remasked = torch.zeros((),device=env.device,dtype=torch.bool)
     macro_active = torch.ones((env.n,),device=env.device,dtype=torch.bool)
@@ -2026,18 +2026,17 @@ def _run_macro_step(env, action_index: int, action_ticks: int, goal_xy=None, *,
                 safety_counts["_last_snapshot"] = current
         if goal_xy is not None:
             current_xy = env.sim.pose[0, 3, :2]
-            goal_distance = float((current_xy - torch.as_tensor(
-                goal_xy, device=env.device, dtype=current_xy.dtype)).norm())
+            goal_distance = (current_xy - torch.as_tensor(
+                goal_xy, device=env.device, dtype=current_xy.dtype)).norm()
             heading_alignment_opportunity |= goal_distance <= .04
             if action_index == 4:
                 native_goal_preempted |= (
-                    int(env.fuel_scored_event[0, 3].item()) > 0 and goal_distance > .04)
+                    (env.fuel_scored_event[0, 3] > 0) & (goal_distance > .04))
             if action_index == 6:
                 native_goal_preempted |= (
-                    int(env.fuel_passed_event[0, 3].item()) > 0 and goal_distance > .04)
+                    (env.fuel_passed_event[0, 3] > 0) & (goal_distance > .04))
         total += env.curriculum_metrics.reward_delta()[0]
-        ended = bool(done[0].item())
-        timeout = bool(truncated[0].item())
+        ended, timeout = torch.stack((done[0], truncated[0])).detach().cpu().tolist()
         if ended or timeout:
             break
     if executed_tick_mask:
@@ -2060,7 +2059,9 @@ def _run_macro_step(env, action_index: int, action_ticks: int, goal_xy=None, *,
     if goal_xy is not None:
         final_goal_distance = float((env.sim.pose[0, 3, :2] - torch.as_tensor(
             goal_xy, device=env.device, dtype=env.sim.pose.dtype)).norm())
-    native_goal_preempted &= final_goal_distance is not None and final_goal_distance > .04
+    heading_alignment_opportunity = bool(heading_alignment_opportunity.item())
+    native_goal_preempted = (bool(native_goal_preempted.item()) and
+                             final_goal_distance is not None and final_goal_distance > .04)
     result = (total, ended, timeout, executed_actions, final_heading_error,
             final_goal_distance, heading_alignment_opportunity, native_goal_preempted,
             selected_target_lost_report)
