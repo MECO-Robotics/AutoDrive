@@ -112,6 +112,21 @@ __device__ void heap_pop(double* distances, int64_t* nodes, int64_t* size,
   nodes[index] = tail_node;
 }
 
+__device__ void sorted_traversal(const double* route, int64_t* traversal,
+    int64_t n, double* heap_distance, int64_t* heap_node) {
+  int64_t size = 0;
+  for (int64_t node = 0; node < n; ++node)
+    if (isfinite(route[node]))
+      heap_push(heap_distance, heap_node, &size, route[node], node);
+  int64_t count = 0;
+  while (size > 0) {
+    double distance;
+    int64_t node;
+    heap_pop(heap_distance, heap_node, &size, &distance, &node);
+    traversal[count++] = node;
+  }
+}
+
 __global__ void plan_a_dijkstra_kernel(const int64_t* edge_dst,
     const double* edge_cost, const double* edge_length, const bool* edge_allowed,
     double* route, double* physical, int64_t* parent, double* parent_length,
@@ -129,14 +144,12 @@ __global__ void plan_a_dijkstra_kernel(const int64_t* edge_dst,
   route[root] = root_start_cost;
   physical[root] = root_connector_m;
   int64_t heap_size = 0;
-  int64_t settled_count = 0;
   heap_push(heap_distance, heap_node, &heap_size, root_start_cost, root);
   while (heap_size > 0) {
     double distance;
     int64_t src;
     heap_pop(heap_distance, heap_node, &heap_size, &distance, &src);
     if (distance != route[src]) continue;
-    traversal[settled_count++] = src;
     for (int64_t slot = 0; slot < slots; ++slot) {
       const int64_t offset = src * slots + slot;
       if (!edge_allowed[offset]) continue;
@@ -170,6 +183,7 @@ __global__ void plan_a_dijkstra_kernel(const int64_t* edge_dst,
       }
     }
   }
+  sorted_traversal(route, traversal, n, heap_distance, heap_node);
 }
 
 __global__ void plan_a_dijkstra_graph_kernel(const double* xy,
@@ -200,14 +214,12 @@ __global__ void plan_a_dijkstra_graph_kernel(const double* xy,
   route[root] = root_start_cost;
   physical[root] = root_connector_m;
   int64_t heap_size = 0;
-  int64_t settled_count = 0;
   heap_push(heap_distance, heap_node, &heap_size, root_start_cost, root);
   while (heap_size > 0) {
     double distance;
     int64_t src;
     heap_pop(heap_distance, heap_node, &heap_size, &distance, &src);
     if (distance != route[src]) continue;
-    traversal[settled_count++] = src;
     for (int64_t slot = 0; slot < slots; ++slot) {
       const int64_t offset = src * slots + slot;
       if (!edge_allowed[offset]) continue;
@@ -254,6 +266,7 @@ __global__ void plan_a_dijkstra_graph_kernel(const double* xy,
       }
     }
   }
+  sorted_traversal(route, traversal, n, heap_distance, heap_node);
 }
 
 // Exact ordered connectivity partition used by the Python oracle. A single
