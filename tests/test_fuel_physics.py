@@ -301,10 +301,15 @@ def test_adaptive_substeps_ignore_inactive_and_held_fuel_but_include_robot_rotat
     physics.vel[0, 2, 0] = 1000.
     piece_active[0, 2] = False
     count = physics.required_substeps(active_mask=active, piece_active=piece_active, piece_owner=owner)
-    assert count == physics.config.substeps
+    assert count == physics.config.max_adaptive_substeps
+    # A tight capacity makes the device-side stability predicate observable:
+    # inactive/held fuel and inactive robots must not cause an overflow.
+    physics.config.max_adaptive_substeps = physics.config.substeps
+    assert physics.required_substeps(active_mask=active, piece_active=piece_active,
+                                     piece_owner=owner) == physics.config.substeps
     sim.velocity[0, 0, 2] = 20.
-    count = physics.required_substeps(active_mask=active, piece_active=piece_active, piece_owner=owner)
-    assert count > physics.config.substeps
+    with pytest.raises(RuntimeError, match="adaptive fuel substep capacity exceeded"):
+        physics.required_substeps(active_mask=active, piece_active=piece_active, piece_owner=owner)
 
 
 def test_compressed_fuel_contacts_conserve_total_angular_momentum():
