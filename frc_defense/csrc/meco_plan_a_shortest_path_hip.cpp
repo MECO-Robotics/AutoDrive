@@ -19,7 +19,7 @@ void plan_a_dijkstra_frontier_launch(const double*, const double*, const int64_t
     const bool*, const bool*, const double*, const double*, int64_t, const int64_t*,
     const double*, const double*, double*, double*, int64_t*, double*, int64_t*,
     int64_t, int64_t, int64_t, double*, int64_t*, int64_t*, double*, double*,
-    uint8_t*, int64_t*, int64_t*, int64_t*, bool*, bool*, hipStream_t);
+    uint8_t*, int64_t*, int64_t*, int64_t*, bool*, bool*, int, hipStream_t);
 void plan_a_dijkstra_batch_launch(const int64_t*, const double*, const double*,
     const bool*, const int64_t*, const double*, const double*, double*, double*,
     int64_t*, double*, int64_t*, int64_t, int64_t, int64_t, int64_t, double*,
@@ -280,6 +280,13 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
   auto fallback = torch::zeros({}, edge_dst.options());
   auto visited = torch::empty({n}, edge_dst.options().dtype(at::kBool));
   auto frontier = torch::empty({n}, edge_dst.options().dtype(at::kBool));
+  hipDeviceProp_t properties;
+  TORCH_CHECK(hipGetDeviceProperties(&properties, xy.get_device()) == hipSuccess,
+      "failed to query HIP block limit");
+  TORCH_CHECK(properties.maxThreadsPerBlock > 0, "invalid HIP block limit");
+  int block_size = 1;
+  while (block_size < 1024 && block_size * 2 <= properties.maxThreadsPerBlock)
+    block_size *= 2;
   plan_a_dijkstra_frontier_launch(xy64.data_ptr<double>(), heading64.data_ptr<double>(),
       edge_dst.data_ptr<int64_t>(), edge_allowed.data_ptr<bool>(),
       node_valid.data_ptr<bool>(), heading_values.data_ptr<double>(),
@@ -293,7 +300,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
       status.data_ptr<int64_t>(), edge_cost.data_ptr<double>(), edge_length.data_ptr<double>(),
       edge_error.data_ptr<uint8_t>(), counts.data_ptr<int64_t>(), incoming.data_ptr<int64_t>(),
       fallback.data_ptr<int64_t>(), visited.data_ptr<bool>(), frontier.data_ptr<bool>(),
-      c10::cuda::getCurrentCUDAStream(xy.get_device()));
+      block_size, c10::cuda::getCurrentCUDAStream(xy.get_device()));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   // Stable sorting preserves ascending node IDs for equal route costs.
   // Leave unreachable rows and all rows from a failed search as -1.

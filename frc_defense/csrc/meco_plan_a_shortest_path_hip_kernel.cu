@@ -400,16 +400,16 @@ __global__ void plan_a_frontier_kernel(const double* xy, const double* heading,
     double* heap_distance, int64_t* heap_node, int64_t* status,
     const int64_t* counts, const int64_t* incoming, const int64_t* fallback,
     bool* visited, bool* frontier) {
-  __shared__ double mins[512];
+  __shared__ double mins[1024];
   __shared__ int use_serial;
   __shared__ double edge_min;
   const int t = threadIdx.x;
   double min_cost = INFINITY;
-  for (int64_t e = t; e < n * slots; e += 512)
+  for (int64_t e = t; e < n * slots; e += blockDim.x)
     if (allowed[e] && !errors[e]) min_cost = fmin(min_cost, costs[e]);
   mins[t] = min_cost;
   __syncthreads();
-  for (int step = 256; step; step >>= 1) {
+  for (int step = blockDim.x / 2; step; step >>= 1) {
     if (t < step) mins[t] = fmin(mins[t], mins[t + step]);
     __syncthreads();
   }
@@ -425,7 +425,7 @@ __global__ void plan_a_frontier_kernel(const double* xy, const double* heading,
         heap_node, status);
     return;
   }
-  for (int64_t i = t; i < n; i += 512) {
+  for (int64_t i = t; i < n; i += blockDim.x) {
     route[i] = INFINITY; physical[i] = INFINITY; parent[i] = -1;
     parent_length[i] = 0.0; traversal[i] = -1; visited[i] = false;
     frontier[i] = false;
@@ -440,11 +440,11 @@ __global__ void plan_a_frontier_kernel(const double* xy, const double* heading,
   if (*status != 0) return;
   while (true) {
     double local = INFINITY;
-    for (int64_t i = t; i < n; i += 512)
+    for (int64_t i = t; i < n; i += blockDim.x)
       if (!visited[i]) local = fmin(local, route[i]);
     mins[t] = local;
     __syncthreads();
-    for (int step = 256; step; step >>= 1) {
+    for (int step = blockDim.x / 2; step; step >>= 1) {
       if (t < step) mins[t] = fmin(mins[t], mins[t + step]);
       __syncthreads();
     }
@@ -457,12 +457,12 @@ __global__ void plan_a_frontier_kernel(const double* xy, const double* heading,
           heap_node, status);
       return;
     }
-    for (int64_t i = t; i < n; i += 512) {
+    for (int64_t i = t; i < n; i += blockDim.x) {
       frontier[i] = !visited[i] && route[i] < cutoff;
       if (frontier[i]) visited[i] = true;
     }
     __syncthreads();
-    for (int64_t v = t; v < n; v += 512) {
+    for (int64_t v = t; v < n; v += blockDim.x) {
       double last_d = -INFINITY;
       int64_t last_src = -1, last_slot = -1;
       while (true) {
@@ -686,14 +686,14 @@ void plan_a_dijkstra_frontier_launch(const double* xy, const double* heading,
     int64_t* traversal, int64_t n, int64_t slots, int64_t capacity,
     double* heap_distance, int64_t* heap_node, int64_t* status, double* costs,
     double* lengths, uint8_t* errors, int64_t* counts, int64_t* incoming,
-    int64_t* fallback, bool* visited, bool* frontier, hipStream_t stream) {
+    int64_t* fallback, bool* visited, bool* frontier, int block_size, hipStream_t stream) {
   hipLaunchKernelGGL(plan_a_precompute_graph_edges, dim3((n * slots + 255) / 256),
       dim3(256), 0, stream, xy, heading, edge_dst, edge_allowed, node_valid,
       heading_values, turns, heading_count, n, slots, costs, lengths, errors);
   hipLaunchKernelGGL(plan_a_reverse_edges, dim3((n * slots + 255) / 256),
       dim3(256), 0, stream, edge_dst, edge_allowed, errors, n, slots, counts,
       incoming, fallback);
-  hipLaunchKernelGGL(plan_a_frontier_kernel, dim3(1), dim3(512), 0, stream,
+  hipLaunchKernelGGL(plan_a_frontier_kernel, dim3(1), dim3(block_size), 0, stream,
       xy, heading, edge_dst, edge_allowed, node_valid, costs, lengths, errors,
       root, start, connector, route, physical, parent, parent_length, traversal,
       n, slots, capacity, heap_distance, heap_node, status, counts, incoming,
