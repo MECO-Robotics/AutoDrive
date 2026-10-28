@@ -120,3 +120,17 @@ def test_tree_route_training_contract_rejects_cpu():
     with pytest.raises(RuntimeError, match='requires tensors on one HIP device'):
         _plan_a_route_evidence_digest(batch, 'a' * 64, cost, risk,
             scheme='tree-sha256-v2', require_hip=True)
+
+
+@pytest.mark.parametrize('scheme', [None, 'sha256-v1'])
+def test_plan_a_ppo_rejects_legacy_evidence_before_update(scheme, tmp_path):
+    from frc_defense.meco_track_training import _ppo_update
+    row = {'reward': torch.tensor(0.), 'done': False, 'logprob': torch.tensor(0.),
+           'value': torch.tensor(0.), 'support': object(),
+           'route_evidence_sha256': 'c' * 64,
+           'route_evidence_source_identity_sha256': 'a' * 64}
+    if scheme is not None:
+        row['route_evidence_scheme'] = scheme
+    with pytest.raises(RuntimeError, match='GPU-only PPO requires v2'):
+        _ppo_update('A1', None, None, None, [row], None, None, update_number=1,
+                    diagnostic_output=tmp_path, source_identity_sha256='a' * 64)
