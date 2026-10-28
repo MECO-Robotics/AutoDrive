@@ -475,8 +475,15 @@ def _run_device_under_lease(root: Path, device: str, fixture: dict, lease,
             for path_name, prepare in path_invocations.items():
                 invoke = prepare()
                 try:
-                    invoke()
+                    outputs = invoke()
                     torch.cuda.synchronize(selected)
+                    if len(outputs) > len(OUTPUT_KEYS):
+                        status_code = int(outputs[len(OUTPUT_KEYS)].item())
+                        if status_code != 0:
+                            rejection_rows.append({"path": path_name,
+                                "status": "candidate_rejected_input",
+                                "device_status_code": status_code})
+                            continue
                 except Exception as exc:
                     rejection_rows.append({"path": path_name,
                         "status": "candidate_rejected_input",
@@ -525,18 +532,33 @@ def _run_device_under_lease(root: Path, device: str, fixture: dict, lease,
                 cpu_path_invoke()
                 cpu_repeat_ms.append((time.perf_counter_ns() - cpu_start) / 1.e6)
             median_cpu = sorted(cpu_repeat_ms)[len(cpu_repeat_ms) // 2]
+            last_status = None
             def invoke_mapping():
-                route, physical, parent, parent_length, traversal = invoke()
+                nonlocal last_status
+                outputs = invoke()
+                last_status = (outputs[len(OUTPUT_KEYS)]
+                               if len(outputs) > len(OUTPUT_KEYS) else None)
+                route, physical, parent, parent_length, traversal = outputs[:5]
                 return {"route_cost": route, "physical_distance": physical,
                     "parent_ids": parent, "parent_edge_m": parent_length,
                     "traversal_order": traversal}
+
+            def check_device_status():
+                if last_status is not None:
+                    status_code = int(last_status.item())
+                    if status_code != 0:
+                        raise RuntimeError(
+                            f"HIP route returned nonzero device status {status_code}")
+
             first_use_start = time.perf_counter_ns()
             invoke_mapping()
             torch.cuda.synchronize(selected)
+            check_device_status()
             first_use_ms = (time.perf_counter_ns() - first_use_start) / 1.e6
             for _ in range(warmups - 1):
                 invoke_mapping()
             torch.cuda.synchronize(selected)
+            check_device_status()
             torch.cuda.reset_peak_memory_stats(selected)
             timings = []
             device_result = None
@@ -546,6 +568,7 @@ def _run_device_under_lease(root: Path, device: str, fixture: dict, lease,
                 device_result = invoke_mapping()
                 torch.cuda.synchronize(selected)
                 timings.append((time.perf_counter_ns() - start) / 1.e6)
+                check_device_status()
             device_host = {}
             for key, value in device_result.items():
                 host = value.detach().cpu().tolist()
