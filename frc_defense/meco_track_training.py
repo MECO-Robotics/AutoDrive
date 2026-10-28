@@ -247,24 +247,40 @@ def _plan_a_route_evidence_digest(route_batch, source_identity_sha256,
         "cost_provenance": route_batch.cost_provenance}
     digest = hashlib.sha256(json.dumps(header, sort_keys=True,
         separators=(",", ":"), allow_nan=False).encode())
-    for name in ("status_code", "feasible", "path_xy", "path_length",
-                 "distance_m", "endpoint_error_m",
-                 "weighted_cost_grid_edges", "candidate_index",
-                 "bump_cost_grid_edges", "learned_cost_grid_edges"):
-        tensor = getattr(route_batch, name)
-        if tensor is None:
-            digest.update(f"{name}=none\n".encode())
-            continue
-        value = tensor.detach().to(device="cpu").contiguous()
-        digest.update(f"{name}:{value.dtype}:{tuple(value.shape)}\n".encode())
-        digest.update(value.reshape(-1).view(torch.uint8).numpy().tobytes())
+    fields = [(name, getattr(route_batch, name)) for name in
+              ("status_code", "feasible", "path_xy", "path_length",
+               "distance_m", "endpoint_error_m", "weighted_cost_grid_edges",
+               "candidate_index", "bump_cost_grid_edges", "learned_cost_grid_edges")]
     for name, tensor in (("route_cost_nodes", route_cost_nodes),
                          ("risk_cost_nodes", risk_cost_nodes)):
         if not isinstance(tensor, torch.Tensor):
             raise ValueError(f"Plan A route evidence is missing {name}")
-        value = tensor.detach().to(device="cpu").contiguous()
-        digest.update(f"{name}:{value.dtype}:{tuple(value.shape)}\n".encode())
-        digest.update(value.reshape(-1).view(torch.uint8).numpy().tobytes())
+        fields.append((name, tensor))
+    present = [tensor for _, tensor in fields if tensor is not None]
+    device = present[0].device
+    if device.type == "cuda" and all(tensor.device == device for tensor in present):
+        # One transfer retains the existing interleaved headers and byte order.
+        chunks = [tensor.detach().contiguous().reshape(-1).view(torch.uint8)
+                  for tensor in present]
+        packed = torch.cat(chunks).cpu().numpy()
+        byte_view = memoryview(packed)
+        offset = 0
+        for name, tensor in fields:
+            if tensor is None:
+                digest.update(f"{name}=none\n".encode())
+                continue
+            size = tensor.numel() * tensor.element_size()
+            digest.update(f"{name}:{tensor.dtype}:{tuple(tensor.shape)}\n".encode())
+            digest.update(byte_view[offset:offset + size])
+            offset += size
+    else:
+        for name, tensor in fields:
+            if tensor is None:
+                digest.update(f"{name}=none\n".encode())
+                continue
+            value = tensor.detach().to(device="cpu").contiguous()
+            digest.update(f"{name}:{value.dtype}:{tuple(value.shape)}\n".encode())
+            digest.update(value.reshape(-1).view(torch.uint8).numpy().tobytes())
     return digest.hexdigest()
 
 
