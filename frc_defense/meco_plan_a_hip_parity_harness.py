@@ -363,9 +363,15 @@ def _device_inputs(graph: dict, kind: str, selected, torch, ext):
                                    dtype=torch.float64).contiguous()
             node_valid = torch.ones((xy.shape[0],), device=selected,
                                     dtype=torch.bool)
+            root = torch.tensor(graph["root"], device=selected,
+                                dtype=torch.long)
+            root_start_cost = torch.tensor(graph["root_start_cost"], device=selected,
+                                           dtype=torch.float64)
+            root_connector_m = torch.tensor(graph["root_connector_m"], device=selected,
+                                            dtype=torch.float64)
             def invoke():
                 return ext.dijkstra_graph(xy, heading, edge_dst, edge_allowed, node_valid,
-                    graph["root"], graph["root_start_cost"], graph["root_connector_m"])
+                    root, root_start_cost, root_connector_m)
             return invoke
         paths["graph_geometry"] = prepare_graph_geometry
     return paths
