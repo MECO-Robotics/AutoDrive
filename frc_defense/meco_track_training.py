@@ -1505,13 +1505,14 @@ def _endpoint_risk(goals, endpoints, valid_nodes, observed_valid):
                        torch.zeros_like(penalty))
 
 
-def _materialize_plan_a_prediction_metadata(metadata):
+def _materialize_plan_a_prediction_metadata(metadata, *, host_values=None):
     """Copy the small forecast summary once, after action selection."""
     values = metadata.pop("_device_report", None)
     if values is None:
         return metadata
     minimum, maximum, has_endpoint, used_cv, used_multi, fallback_code, age = (
-        values.detach().to(device="cpu").tolist())
+        values.detach().to(device="cpu").tolist() if host_values is None
+        else host_values)
     metadata.update(horizon_min_s=minimum if has_endpoint else None,
         horizon_max_s=maximum if has_endpoint else None,
         horizon_s=maximum if has_endpoint else None,
@@ -1764,16 +1765,16 @@ def _prepare_plan_a_decision(track, model, env, graph, episode_id, hidden, *,
         selected_node, selected_behavior, selected_descriptor,
         (~decision_valid).to(torch.long),
         (~has_legal_support).to(torch.long))).to(torch.float64)
-    # Content digests and readable prediction summaries are report artifacts;
-    # materialize them only after the compact selected-action payload exists.
-    from .meco_plan_a_support_tree import support_digest_v1_compatible, support_tree_digest
-    if support_digest_scheme not in ("sha256-v1", "tree-sha256-v2"):
+    from .meco_plan_a_support_tree import support_digest_v1_compatible, support_tree_digest_device
+    if support_digest_scheme == "tree-sha256-v2":
+        selected_action_payload = _pack_plan_a_decision_evidence(
+            selected_action_payload, support_tree_digest_device(support, graph),
+            prediction_metadata["_device_report"])
+    elif support_digest_scheme == "sha256-v1":
+        support = replace(support, support_digest=support_digest_v1_compatible(support, graph))
+        prediction_metadata = _materialize_plan_a_prediction_metadata(prediction_metadata)
+    else:
         raise ValueError("unknown Plan A support digest scheme")
-    support = replace(support, support_digest=(support_tree_digest(support, graph)
-        if support_digest_scheme == "tree-sha256-v2" else
-        support_digest_v1_compatible(support, graph)))
-    prediction_metadata = _materialize_plan_a_prediction_metadata(
-        prediction_metadata)
     fallback_used = production_inference_failed
     fallback_reason = "policy_inference_fallback" if production_inference_failed else None
     value = (_value(value_head, globals_, seed_decision["hidden"])
@@ -1816,6 +1817,28 @@ def _graph_inputs(track: str, graph: LegalPoseGraph, env, raster):
         data.update(coarse_edges=graph.coarse_edges,
                     coarse_edge_mask=graph.coarse_edge_mask)
     return data
+
+
+def _pack_plan_a_decision_evidence(action, digest, prediction):
+    """Keep selected action, support digest and forecast in one device payload."""
+    if (action.numel() != 13 or digest.numel() != 32 or prediction.numel() != 7 or
+            action.device != digest.device or action.device != prediction.device or
+            digest.dtype != torch.uint8):
+        raise ValueError("invalid Plan A compact evidence payload")
+    return torch.cat((action.reshape(-1), digest.reshape(-1).to(action.dtype),
+                      prediction.reshape(-1).to(action.dtype)))
+
+
+def _materialize_plan_a_decision_evidence(prepared, host_payload):
+    """Decode the already transferred v2 evidence without another GPU read."""
+    if prepared.get("support_digest_scheme") != "tree-sha256-v2":
+        return
+    if host_payload is None or len(host_payload) != 52:
+        raise ValueError("invalid Plan A compact evidence payload length")
+    digest = bytes(int(value) for value in host_payload[13:45]).hex()
+    prepared["support"] = replace(prepared["support"], support_digest=digest)
+    prepared["prediction"] = _materialize_plan_a_prediction_metadata(
+        prepared["prediction"], host_values=host_payload[45:52])
 
 
 def _prepare_decision(track, model, env, graph, episode_id, hidden,
@@ -2683,6 +2706,7 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                         if prepared["fallback_used"]:
                             prepared["fallback_reason"] = (prepared.get("fallback_reason")
                                 or "device_selection_fallback")
+                _materialize_plan_a_decision_evidence(prepared, dispatch_payload)
                 hidden_before = (None if prepared["hidden_before"] is None else
                                  prepared["hidden_before"].detach().clone())
                 tracking_was_available = prepared["tracking_available"]
@@ -2893,6 +2917,8 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                             device="cpu").reshape(-1).tolist()
                         if len(status) >= 13 and int(status[12]):
                             raise PlanAEmptySupportError(None)
+                    _materialize_plan_a_decision_evidence(
+                        bootstrap, status if bootstrap_payload is not None else None)
                     bootstrap_value = bootstrap["value"].detach().reshape(())
                 except PlanAEmptySupportError as exc:
                     abort_empty_support(exc, rows, update, update_empty_support_events)
