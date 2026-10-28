@@ -12,7 +12,9 @@ import weakref
 
 _EDGE_WEIGHT_CACHE = {}
 _EDGE_WEIGHT_CACHE_LOCK = threading.RLock()
-PLAN_A_HIP_PARITY_PROFILE_GATE_PASSED = False
+# Independent qualification is required for each entry point.
+PLAN_A_HIP_PARITY_PROFILE_GATE_PASSED = False  # preweighted entry
+PLAN_A_HIP_GRAPH_PARITY_PROFILE_GATE_PASSED = False
 
 
 def plan_a_cpu_turn_table(headings, *, device):
@@ -206,7 +208,7 @@ def plan_a_dijkstra_hip_for_graph(graph, *, device, root, root_start_cost,
     """
     import torch
 
-    if not PLAN_A_HIP_PARITY_PROFILE_GATE_PASSED:
+    if not PLAN_A_HIP_GRAPH_PARITY_PROFILE_GATE_PASSED:
         raise RuntimeError("Plan A HIP dispatch is disabled pending WX9100 parity and profiling")
     device = torch.device(device)
     selected = _require_wx9100_device(device)

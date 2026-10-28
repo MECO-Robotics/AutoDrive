@@ -457,7 +457,8 @@ def _run_device_under_lease(root: Path, device: str, fixture: dict, lease,
             model != attested[device]["model"] or not uuid or
             uuid.casefold() != str(attested[device]["hip_uuid"]).casefold()):
         raise RuntimeError("selected WX9100 identity does not match post-lease physical attestation")
-    if shortest.PLAN_A_HIP_PARITY_PROFILE_GATE_PASSED is not False:
+    if (shortest.PLAN_A_HIP_PARITY_PROFILE_GATE_PASSED is not False or
+            shortest.PLAN_A_HIP_GRAPH_PARITY_PROFILE_GATE_PASSED is not False):
         raise RuntimeError("candidate harness must not run with production gate changed")
     # Import/compile is reached only after explicit device and lease checks.
     from .meco_plan_a_shortest_path_hip import extension

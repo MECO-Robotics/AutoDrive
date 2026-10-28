@@ -159,7 +159,7 @@ def test_hip_prototype_is_fail_closed():
 
 
 def test_graph_hip_entry_is_gated_before_any_graph_materialization(monkeypatch):
-    assert shortest_path.PLAN_A_HIP_PARITY_PROFILE_GATE_PASSED is False
+    assert shortest_path.PLAN_A_HIP_GRAPH_PARITY_PROFILE_GATE_PASSED is False
     def forbidden(_graph):
         raise AssertionError("gated graph path must not materialize graph on CPU")
     monkeypatch.setattr(shortest_path, "cached_plan_a_edge_weights", forbidden)
@@ -210,3 +210,34 @@ def test_hip_kernel_has_device_side_edge_and_heap_guards():
     assert "status.item<int64_t>()" in binding
     assert "dst < 0 || dst >= n" in kernel
     assert "heap_size >= heap_capacity" in kernel
+
+
+def test_graph_and_preweighted_gates_are_independent(monkeypatch):
+    import pytest
+    from types import SimpleNamespace
+
+    class ReachedDeviceCheck(Exception):
+        pass
+
+    def reached(_device):
+        raise ReachedDeviceCheck
+
+    monkeypatch.setattr(shortest_path, "_require_wx9100_device", reached)
+    graph = lambda: shortest_path.plan_a_dijkstra_hip_for_graph(
+        object(), device="cuda:0", root=0, root_start_cost=0., root_connector_m=0.)
+    preweighted = lambda: shortest_path.plan_a_dijkstra_hip(
+        None, SimpleNamespace(device="cuda:0"), None, None,
+        root=0, root_start_cost=0., root_connector_m=0.)
+
+    monkeypatch.setattr(shortest_path, "PLAN_A_HIP_GRAPH_PARITY_PROFILE_GATE_PASSED", True)
+    with pytest.raises(ReachedDeviceCheck):
+        graph()
+    with pytest.raises(RuntimeError, match="disabled pending WX9100"):
+        preweighted()
+
+    monkeypatch.setattr(shortest_path, "PLAN_A_HIP_GRAPH_PARITY_PROFILE_GATE_PASSED", False)
+    monkeypatch.setattr(shortest_path, "PLAN_A_HIP_PARITY_PROFILE_GATE_PASSED", True)
+    with pytest.raises(RuntimeError, match="disabled pending WX9100"):
+        graph()
+    with pytest.raises(ReachedDeviceCheck):
+        preweighted()
