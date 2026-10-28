@@ -90,7 +90,9 @@ def test_device_raster_snapshot_matches_legacy_and_keeps_frozen_copy():
     assert device_tensor.device == env.device
     assert torch.equal(device_tensor, torch.tensor(legacy.raster))
     device_tensor.zero_()
+    device._device_raster.zero_()
     before = device.raster
+    assert before == legacy.raster
     env.track_pos[0, 3, 0] = torch.tensor([6., 3.])
     assert device.raster == before
 
@@ -102,3 +104,12 @@ def test_device_raster_rejects_nonfinite_values():
         DeviceRasterObservationSnapshot(snapshot_id="x:0", episode_id="x",
             sequence=0, timestamp=0., capture_monotonic=0., raster_shape=(1, 1, 1),
             _device_raster=torch.tensor([float("nan")]), globals=(0.,) * 7)
+
+
+def test_device_raster_rejects_complex_values():
+    import pytest
+    from frc_defense.learning_inputs import DeviceRasterObservationSnapshot
+    with pytest.raises(ValueError, match="raster values must be real"):
+        DeviceRasterObservationSnapshot(snapshot_id="x:0", episode_id="x",
+            sequence=0, timestamp=0., capture_monotonic=0., raster_shape=(1, 1, 1),
+            _device_raster=torch.tensor([1.+2.j]), globals=(0.,) * 7)

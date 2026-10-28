@@ -32,24 +32,33 @@ class DeviceRasterObservationSnapshot:
             raise ValueError("sequence and timestamp must be nonnegative/finite")
         if len(self.raster_shape) != 3 or any(size <= 0 for size in self.raster_shape):
             raise ValueError("raster_shape must contain three positive dimensions")
-        if not isinstance(self._device_raster, torch.Tensor) or self._device_raster.numel() != math.prod(self.raster_shape):
+        raster = object.__getattribute__(self, "_device_raster")
+        if not isinstance(raster, torch.Tensor) or raster.numel() != math.prod(self.raster_shape):
             raise ValueError("raster has incorrect size")
-        if not bool(torch.isfinite(self._device_raster).all()):
+        if raster.is_complex():
+            raise ValueError("raster values must be real")
+        if not bool(torch.isfinite(raster).all()):
             raise ValueError("raster values must be finite")
         globals_ = _finite_tuple(self.globals, "globals")
         if len(globals_) != 7:
             raise ValueError("globals must contain exactly seven values")
-        object.__setattr__(self, "_device_raster", self._device_raster.detach().reshape(-1).clone())
+        object.__setattr__(self, "_device_raster", raster.detach().reshape(-1).clone())
         object.__setattr__(self, "globals", globals_)
         object.__setattr__(self, "raster_shape", tuple(self.raster_shape))
         object.__setattr__(self, "capture_monotonic", capture)
 
+    def __getattribute__(self, name):
+        if name == "_device_raster":
+            return object.__getattribute__(self, name).clone()
+        return object.__getattribute__(self, name)
+
     @property
     def raster(self):
-        return tuple(self._device_raster.cpu().tolist())
+        return tuple(object.__getattribute__(self, "_device_raster").cpu().tolist())
 
     def raster_tensor(self, *, device):
-        return self._device_raster.to(device=device, dtype=torch.float32).clone()
+        return object.__getattribute__(self, "_device_raster").to(
+            device=device, dtype=torch.float32).clone()
 
 
 RASTER_CELL_METERS = 0.3302
