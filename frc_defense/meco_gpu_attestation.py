@@ -226,8 +226,22 @@ def verify_post_lease_wx9100(lease, devices) -> dict:
     rocm_products = _rocm_product_names(product_payload)
     expected_product_keys = {_model_key(row["name"]) for row in
                              (expected_rows[device] for device in requested)}
-    if not expected_product_keys <= {_model_key(name) for name in rocm_products}:
-        raise RuntimeError("rocm-smi product name does not match the leased WX9100 inventory")
+    observed_product_keys = {_model_key(name) for name in rocm_products}
+    if not expected_product_keys <= observed_product_keys:
+        # Some ROCm builds expose only the PCI device ID in Card Model and
+        # report Card Series as N/A. Accept that limited response only when
+        # lspci independently confirms every requested pinned PCI identity;
+        # runtime model and UUID are still checked below.
+        unavailable_product_identity = all(
+            key in {"na", f"0x{expected_rows[device]['pci_vendor_device'].split(':')[1]}"}
+            for key in observed_product_keys
+            for device in requested)
+        if not unavailable_product_identity or any(
+                pci_devices.get(expected_rows[device]["pci_address"]) !=
+                expected_rows[device]["pci_vendor_device"]
+                for device in requested):
+            raise RuntimeError(
+                "rocm-smi product name does not match the leased WX9100 inventory")
 
     observed = []
     for device in requested:
