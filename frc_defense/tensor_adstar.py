@@ -662,6 +662,7 @@ class TensorADStar:
         sample_count=max(2,int(math.ceil(math.hypot(self.length,self.width)/
                                          (self.resolution*.5)))+1)
         sample_index=torch.arange(1,sample_count+1,device=path.device)
+        sample_index_float=sample_index[None].to(path.dtype)
         blocked_flat=blocked.reshape(batch_n,-1)
 
         # PathPlanner appends a grid point only when the last retained point
@@ -673,7 +674,7 @@ class TensorADStar:
             delta=endpoint-anchor
             steps=torch.ceil(torch.maximum(delta[:,0].abs(),delta[:,1].abs())/
                              (self.resolution*.5)).long().clamp(1,sample_count)
-            fraction=(sample_index[None].to(path.dtype)/steps[:,None].to(path.dtype))
+            fraction=sample_index_float/steps[:,None].to(path.dtype)
             points=anchor[:,None,:]+delta[:,None,:]*fraction[:,:,None]
             ix=(points[...,0]/self.resolution).floor().long().clamp(0,self.nx-1)
             iy=(points[...,1]/self.resolution).floor().long().clamp(0,self.ny-1)

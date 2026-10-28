@@ -128,8 +128,6 @@ class TensorPhysicsCollisionMixin:
         pose[...,:2].add_(position_delta)
 
         # Contact points are midway between the oriented bumper support points.
-        ui=torch.stack((ci,si),-1); vi=torch.stack((-si,ci),-1)
-        uj=torch.stack((cj,sj),-1); vj=torch.stack((-sj,cj),-1)
         support_i=(pos_i+torch.sign((normal*ui).sum(-1))[...,None]*ui*hi_l[...,None]+
                    torch.sign((normal*vi).sum(-1))[...,None]*vi*hi_w[...,None])
         support_j=(pos_j-torch.sign((normal*uj).sum(-1))[...,None]*uj*hj_l[...,None]-
@@ -145,9 +143,7 @@ class TensorPhysicsCollisionMixin:
         eff=total+rn_i.square()/ii+rn_j.square()/ij
         jn=torch.where(valid&(vn<0),-(1.05*vn)/eff.clamp_min(1e-8),0.)
         imp_n=jn[...,None]*normal
-        vi_c=velocity[:,pair_i,:2]+velocity[:,pair_i,2,None]*torch.stack((-r_i[...,1],r_i[...,0]),-1)
-        vj_c=velocity[:,pair_j,:2]+velocity[:,pair_j,2,None]*torch.stack((-r_j[...,1],r_j[...,0]),-1)
-        rel=vj_c-vi_c; tangent=torch.stack((-normal[...,1],normal[...,0]),-1)
+        tangent=torch.stack((-normal[...,1],normal[...,0]),-1)
         vt=(rel*tangent).sum(-1); rt_i=cross(r_i,tangent); rt_j=cross(r_j,tangent)
         eff_t=total+rt_i.square()/ii+rt_j.square()/ij
         mu=torch.sqrt(self.mu[:,None].clamp_min(0))

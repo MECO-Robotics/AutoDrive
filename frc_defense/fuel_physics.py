@@ -469,11 +469,11 @@ class FuelPhysics:
         delta = local-closest
         distance = delta.norm(dim=-1)
         gap = half-local.abs()
-        axis = gap.argmin(-1)
+        min_gap, axis = gap.min(-1)
         inside_normal = torch.zeros_like(local)
         inside_normal.scatter_(-1,axis[...,None],torch.where(local.gather(-1,axis[...,None])>=0,1.,-1.))
         normal = torch.where((distance>1e-12)[...,None],delta/distance.clamp_min(1e-12)[...,None],inside_normal)
-        signed = torch.where(distance>1e-12,distance,-gap.min(-1).values)
+        signed = torch.where(distance>1e-12,distance,-min_gap)
         return normal,signed
 
     def _robot_contacts(self, free, dt):
