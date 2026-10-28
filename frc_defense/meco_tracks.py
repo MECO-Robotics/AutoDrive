@@ -1371,9 +1371,9 @@ def score_candidates(track: str, model: nn.Module, *, raster: torch.Tensor,
     if track in ("A2", "A3"):
         if graph is None:
             raise ValueError(f"{track} requires a deterministic legal SE(2) graph")
-        expected = ({"node_features", "edges", "edge_mask", "region_ids",
+        expected = ({"node_features", "edges", "edge_mask", "node_valid", "region_ids",
                      "coarse_edges", "coarse_edge_mask"} if track == "A2" else
-                    {"node_features", "edges", "edge_mask", "region_ids"})
+                    {"node_features", "edges", "edge_mask", "node_valid", "region_ids"})
         if set(graph) != expected:
             raise ValueError(f"{track} graph tensors must be exactly {sorted(expected)}")
         if "globals_" in graph or "hidden" in graph:

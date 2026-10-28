@@ -83,6 +83,22 @@ def test_five_architecture_outputs_and_candidate_logits():
             assert torch.isfinite(result["raw"]["region_tokens"]).all()
 
 
+@pytest.mark.parametrize("track", ("A2", "A3"))
+def test_graph_candidate_adapter_requires_node_valid(track):
+    candidates = table(graph=True)
+    graph = {"node_features": torch.zeros(1, 2, 9),
+             "edges": torch.zeros(1, 2, 1, dtype=torch.long),
+             "edge_mask": torch.ones(1, 2, 1, dtype=torch.bool),
+             "region_ids": torch.zeros(1, 2, dtype=torch.long)}
+    if track == "A2":
+        graph.update(coarse_edges=torch.zeros(1, 64, 1, dtype=torch.long),
+                     coarse_edge_mask=torch.zeros(1, 64, 1, dtype=torch.bool))
+    with pytest.raises(ValueError, match="node_valid"):
+        score_candidates(track, make_meco_track(track),
+                         raster=torch.zeros(1, 6, 25, 51), globals_=torch.zeros(1, 7),
+                         table=candidates, graph=graph)
+
+
 @pytest.mark.parametrize("track", ("C1", "C2"))
 @pytest.mark.parametrize("malformation", ("name", "order", "width"))
 def test_c_tracks_reject_malformed_candidate_schema(track, malformation):
