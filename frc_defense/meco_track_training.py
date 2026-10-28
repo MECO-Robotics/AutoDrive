@@ -1835,7 +1835,11 @@ def _materialize_plan_a_decision_evidence(prepared, host_payload):
         return
     if host_payload is None or len(host_payload) != 52:
         raise ValueError("invalid Plan A compact evidence payload length")
-    digest = bytes(int(value) for value in host_payload[13:45]).hex()
+    digest_values = host_payload[13:45]
+    if any(not math.isfinite(value) or value != int(value) or not 0 <= value <= 255
+           for value in digest_values):
+        raise ValueError("invalid Plan A compact digest bytes")
+    digest = bytes(int(value) for value in digest_values).hex()
     prepared["support"] = replace(prepared["support"], support_digest=digest)
     prepared["prediction"] = _materialize_plan_a_prediction_metadata(
         prepared["prediction"], host_values=host_payload[45:52])

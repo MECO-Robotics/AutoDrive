@@ -39,3 +39,14 @@ def test_prepare_does_not_materialize_evidence_before_handoff():
     assert 'plan_a_support_digest(' not in source
     assert 'support_tree_digest_device(' in source
     assert 'support_tree_digest_device(' in source
+
+
+@pytest.mark.parametrize("bad", [1.5, -1., 256., float("nan"), float("inf")])
+def test_compact_digest_rejects_malformed_bytes(bad):
+    values = [0.] * 52
+    values[13] = bad
+    prepared = {'support': Support(''), 'support_digest_scheme': 'tree-sha256-v2',
+                'prediction': {'_device_report': torch.zeros(7)}}
+    with pytest.raises(ValueError, match='invalid Plan A compact digest bytes'):
+        training._materialize_plan_a_decision_evidence(prepared, values)
+    assert prepared['support'].support_digest == ''
