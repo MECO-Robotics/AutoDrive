@@ -77,3 +77,46 @@ def test_route_evidence_bytes_match_original_and_detect_mutation(device):
     finally:
         if lease is not None:
             lease.release()
+
+
+def test_tree_route_evidence_detects_tensor_and_source_mutation():
+    batch, route_cost, risk_cost = _case('cpu')
+    first = _plan_a_route_evidence_digest(batch, 'a' * 64, route_cost, risk_cost,
+                                           scheme='tree-sha256-v2')
+    assert first != _plan_a_route_evidence_digest(batch, 'a' * 64, route_cost, risk_cost)
+    assert first != _plan_a_route_evidence_digest(batch, 'b' * 64, route_cost, risk_cost,
+                                                  scheme='tree-sha256-v2')
+    batch.path_xy[0, 0, 0] += 1
+    assert first != _plan_a_route_evidence_digest(batch, 'a' * 64, route_cost, risk_cost,
+                                                  scheme='tree-sha256-v2')
+    with pytest.raises(ValueError, match='unknown'):
+        _plan_a_route_evidence_digest(batch, 'a' * 64, route_cost, risk_cost,
+                                      scheme='unknown')
+
+
+@pytest.mark.skipif(not torch.cuda.is_available() or torch.version.hip is None,
+                    reason='requires HIP device')
+def test_tree_route_evidence_matches_cpu_oracle():
+    try:
+        lease = DeviceLease(['cuda:1'], owner='plan-a-route-tree-evidence-test').acquire()
+    except RuntimeError:
+        pytest.skip('device leased')
+    try:
+        cpu_batch, cpu_cost, cpu_risk = _case('cpu')
+        gpu_batch, gpu_cost, gpu_risk = _case('cuda:1')
+        expected = _plan_a_route_evidence_digest(cpu_batch, 'a' * 64, cpu_cost, cpu_risk,
+                                                scheme='tree-sha256-v2')
+        assert _plan_a_route_evidence_digest(gpu_batch, 'a' * 64, gpu_cost, gpu_risk,
+                                             scheme='tree-sha256-v2') == expected
+        gpu_batch.path_xy[0, 0, 0] += 1
+        assert _plan_a_route_evidence_digest(gpu_batch, 'a' * 64, gpu_cost, gpu_risk,
+                                             scheme='tree-sha256-v2') != expected
+    finally:
+        lease.release()
+
+
+def test_tree_route_training_contract_rejects_cpu():
+    batch, cost, risk = _case('cpu')
+    with pytest.raises(RuntimeError, match='requires tensors on one HIP device'):
+        _plan_a_route_evidence_digest(batch, 'a' * 64, cost, risk,
+            scheme='tree-sha256-v2', require_hip=True)

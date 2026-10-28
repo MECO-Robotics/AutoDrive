@@ -223,7 +223,8 @@ def _candidate_replay_digest(table, route_cost, risk_cost):
 
 
 def _plan_a_route_evidence_digest(route_batch, source_identity_sha256,
-                                  route_cost_nodes, risk_cost_nodes):
+                                  route_cost_nodes, risk_cost_nodes, *,
+                                  scheme="sha256-v1", require_hip=False):
     """Bind the selected decision's route rows and scoring costs to source.
 
     This evidence is materialized only after Plan A has selected its action.
@@ -245,8 +246,11 @@ def _plan_a_route_evidence_digest(route_batch, source_identity_sha256,
         "route_source": "shared-device-xy-route-evaluation-v1",
         "query_order": queries, "cost_units": route_batch.cost_units,
         "cost_provenance": route_batch.cost_provenance}
-    digest = hashlib.sha256(json.dumps(header, sort_keys=True,
-        separators=(",", ":"), allow_nan=False).encode())
+    header_bytes = json.dumps(header, sort_keys=True,
+        separators=(",", ":"), allow_nan=False).encode()
+    if scheme not in ("sha256-v1", "tree-sha256-v2"):
+        raise ValueError("unknown Plan A route evidence scheme")
+    digest = hashlib.sha256(header_bytes)
     fields = [(name, getattr(route_batch, name)) for name in
               ("status_code", "feasible", "path_xy", "path_length",
                "distance_m", "endpoint_error_m", "weighted_cost_grid_edges",
@@ -258,6 +262,31 @@ def _plan_a_route_evidence_digest(route_batch, source_identity_sha256,
         fields.append((name, tensor))
     present = [tensor for _, tensor in fields if tensor is not None]
     device = present[0].device
+    if scheme == "tree-sha256-v2":
+        from .meco_tree_digest import tree_digest_cpu, tree_digest_hip
+        on_hip = (device.type == "cuda" and torch.version.hip is not None and
+                  all(tensor.device == device for tensor in present))
+        if (require_hip and not on_hip) or (
+                any(tensor.device.type != "cpu" for tensor in present) and not on_hip):
+            raise RuntimeError("tree route evidence requires tensors on one HIP device")
+        chunks = []
+        def append_header(value):
+            if on_hip:
+                chunks.append(torch.frombuffer(bytearray(value), dtype=torch.uint8).to(device))
+            else:
+                chunks.append(value)
+        append_header(header_bytes)
+        for name, tensor in fields:
+            if tensor is None:
+                append_header(f"{name}=none\n".encode())
+                continue
+            append_header(f"{name}:{tensor.dtype}:{tuple(tensor.shape)}\n".encode())
+            if on_hip:
+                chunks.append(tensor.detach().contiguous().reshape(-1).view(torch.uint8))
+            else:
+                chunks.append(tensor.detach().to(device="cpu").contiguous().reshape(-1)
+                              .view(torch.uint8).numpy().tobytes())
+        return tree_digest_hip(torch.cat(chunks)) if on_hip else tree_digest_cpu(b"".join(chunks))
     if device.type == "cuda" and all(tensor.device == device for tensor in present):
         # One transfer retains the existing interleaved headers and byte order.
         chunks = [tensor.detach().contiguous().reshape(-1).view(torch.uint8)
@@ -2154,7 +2183,9 @@ def _ppo_update(track, model, value_head, optimizer, rows, config, bootstrap_val
                     "Plan A route evidence is bound to a different training source")
             actual_route_evidence = _plan_a_route_evidence_digest(
                 row.get("route_batch"), source_route_evidence,
-                row.get("route_cost_nodes"), row.get("risk_cost_nodes"))
+                row.get("route_cost_nodes"), row.get("risk_cost_nodes"),
+                scheme=row.get("route_evidence_scheme", "sha256-v1"),
+                require_hip=row.get("route_evidence_scheme") == "tree-sha256-v2")
             if (not expected_route_evidence or
                     expected_route_evidence != actual_route_evidence):
                 raise RuntimeError(
@@ -2715,7 +2746,8 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                     route_evidence = _plan_a_route_evidence_digest(
                         prepared["route_batch"], source_sha256,
                         prepared["route_cost_nodes"],
-                        prepared["risk_cost_nodes"])
+                        prepared["risk_cost_nodes"], scheme="tree-sha256-v2",
+                        require_hip=True)
                 row = {"episode_id": episode_generation,
                     "raster": prepared["raster"].detach(),
                     "globals": prepared["globals"].detach(),
@@ -2755,6 +2787,7 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                         "support_digest": prepared["support"].support_digest,
                         "route_batch": prepared["route_batch"],
                         "route_evidence_sha256": route_evidence,
+                        "route_evidence_scheme": "tree-sha256-v2",
                         "route_evidence_source_identity_sha256": source_sha256,
                         "route_cost_nodes": prepared["route_cost_nodes"].detach(),
                         "risk_cost_nodes": prepared["risk_cost_nodes"].detach(),
