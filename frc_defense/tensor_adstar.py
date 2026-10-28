@@ -1187,8 +1187,9 @@ class TensorADStar:
             out_value = (self.potential if full_batch else
                          torch.empty((batch_n,self.nx,self.ny),
                                      device=self.device,dtype=self.dtype))
-            out_path = torch.empty((batch_n, 72, 2), device=self.device, dtype=self.dtype)
-            out_lengths = torch.empty((batch_n,), device=self.device, dtype=torch.long)
+            # Inactive fused-route rows are read by the shared shortcutter.
+            out_path = torch.zeros((batch_n, 72, 2), device=self.device, dtype=self.dtype)
+            out_lengths = torch.zeros((batch_n,), device=self.device, dtype=torch.long)
             out_profile = torch.empty((batch_n, 72), device=self.device, dtype=self.dtype)
             out_goal = torch.empty((batch_n, 2), device=self.device, dtype=self.dtype)
             checkpoints = torch.empty((batch_n,), device=self.device, dtype=torch.int32)

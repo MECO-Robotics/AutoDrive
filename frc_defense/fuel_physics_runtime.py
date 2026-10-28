@@ -66,7 +66,7 @@ def advance_with_fuel(env, commands, active_mask, *, active_nonempty=True):
     from .gamepiece_actions import _flush_fuel_score_awards
     physics = env.fuel_physics
     if physics is None:
-        state = env.sim.step(commands, active_mask, _active_nonempty=active_nonempty)
+        state = env.sim.step(commands, active_mask)
         _flush_fuel_score_awards(env)
         return state
     physics._validate_qualifying_backend()
@@ -119,8 +119,7 @@ def advance_with_fuel(env, commands, active_mask, *, active_nonempty=True):
                 env.sim.dt = substep_dt
                 try:
                     with torch.cuda.graph(graph):
-                        env.sim.step(graph_command, graph_active,
-                                     _active_nonempty=active_nonempty)
+                        env.sim.step(graph_command, graph_active)
                         physics._step_graph_capture_substep(
                             graph_active, env.piece_active, env.piece_owner,
                             dt=substep_dt)
@@ -150,7 +149,7 @@ def advance_with_fuel(env, commands, active_mask, *, active_nonempty=True):
     try:
         env.sim.dt = substep_dt
         for _ in range(substeps):
-            env.sim.step(commands, active, _active_nonempty=active_nonempty)
+            env.sim.step(commands, active)
             if physics._gpu_qualifying:
                 physics._step_graph_capture_substep(
                     active, env.piece_active, env.piece_owner, dt=substep_dt)

@@ -179,3 +179,42 @@ def test_fused_full_batch_accepts_strided_simulator_start(monkeypatch):
     with pytest.raises(RuntimeError, match="fused route dispatch reached"):
         planner.plan(start, goal, heading, size, size, active_mask=None)
     assert calls == [True]
+
+
+@pytest.mark.skipif(not (torch.cuda.is_available() and torch.version.hip),
+                    reason="requires the optional ROCm fused AD* kernel")
+def test_fused_static_mask_ignores_unwritten_inactive_rows(monkeypatch):
+    extension = _hip_adstar_extension()
+    if extension is None:
+        pytest.skip("optional AD* HIP extension could not be built")
+    device = torch.device("cuda", torch.cuda.current_device())
+    fused = _planner_on_device(2, False, device)
+    reference = _planner_on_device(2, False, device)
+    start = torch.tensor([[1.2, 2.0], [1.3, 6.0]], device=device)
+    goal = torch.tensor([[14.8, 2.0], [14.7, 6.0]], device=device)
+    heading = torch.zeros(2, device=device)
+    size = torch.full((2,), .8, device=device)
+    active = torch.tensor([True, False], device=device)
+    for planner in (fused, reference):
+        planner.last_path.fill_(37.)
+        planner.last_lengths.fill_(19)
+        planner.potential.fill_(53.)
+
+    original_empty = torch.empty
+    def poison_empty(*args, **kwargs):
+        result = original_empty(*args, **kwargs)
+        if result.device.type == "cuda" and result.dtype == torch.long and result.shape == (2,):
+            result.fill_(1000)
+        return result
+    monkeypatch.setattr(torch, "empty", poison_empty)
+    fused.plan(start, goal, heading, size, size, active_mask=active,
+               static_active_mask=True)
+    monkeypatch.setattr(adstar_module, "_HIP_ADSTAR_EXTENSION", None)
+    reference.plan(start, goal, heading, size, size, active_mask=active,
+                   static_active_mask=True)
+    torch.cuda.synchronize(device)
+    for name, sentinel in (("last_path", 37.), ("last_lengths", 19),
+                           ("potential", 53.)):
+        actual, expected = getattr(fused, name), getattr(reference, name)
+        assert torch.equal(actual[active], expected[active]), name
+        assert torch.equal(actual[~active], torch.full_like(actual[~active], sentinel)), name
