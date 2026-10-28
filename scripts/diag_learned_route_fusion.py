@@ -80,7 +80,11 @@ with lease_devices(('cuda:0',), owner='plan-a-xy-dedup-full') as lease:
         compare['support_mask']=bool(torch.equal(a.valid_mask,b.valid_mask))
         compare['fallback']=bool(torch.equal(a.fallback_pair_tensor,b.fallback_pair_tensor))
         compare['support_order_digest']=a.order_digest==b.order_digest
-        compare['route_evidence']=training._plan_a_route_evidence_digest(ar,'a'*64,ar.distance_m,ar.distance_m)==training._plan_a_route_evidence_digest(br,'a'*64,br.distance_m,br.distance_m)
+        speed=env.sim.speed[0,3].to(ar.distance_m.dtype).clamp_min(.1)
+        ar_risk,_=training._plan_a_prediction_risk(env,a,ar.distance_m / speed,'cv')
+        br_risk,_=training._plan_a_prediction_risk(env,b,br.distance_m / speed,'cv')
+        compare['prediction_risk']=bool(torch.equal(ar_risk,br_risk))
+        compare['route_evidence']=training._plan_a_route_evidence_digest(ar,'a'*64,ar.distance_m,ar_risk)==training._plan_a_route_evidence_digest(br,'a'*64,br.distance_m,br_risk)
         out.append({'mode':mode,'nodes':n,'grid':env.planner.nx*env.planner.ny,'times':timings,'equal':compare,'status_counts':torch.bincount(ar.status_code,minlength=4).cpu().tolist(), 'valid_pairs':int(a.valid_mask.sum().cpu())})
         print(json.dumps(out[-1]),flush=True)
 print(json.dumps(out,indent=2))
