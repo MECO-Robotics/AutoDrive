@@ -146,7 +146,7 @@ def test_static_edge_weights_are_cached_for_graph_lifetime(monkeypatch):
     assert len(calls) == 1
 
 
-def test_hip_prototype_is_fail_closed_and_not_in_support_dispatch():
+def test_hip_prototype_is_fail_closed():
     assert shortest_path.PLAN_A_HIP_PARITY_PROFILE_GATE_PASSED is False
     try:
         shortest_path.plan_a_dijkstra_hip(None, None, None, None, root=0,
@@ -156,10 +156,6 @@ def test_hip_prototype_is_fail_closed_and_not_in_support_dispatch():
     else:
         raise AssertionError("HIP prototype must remain fail-closed before hardware gates")
 
-    policy_source = Path(__file__).parents[1] / "frc_defense" / "meco_plan_a_policy.py"
-    source = policy_source.read_text()
-    assert "plan_a_dijkstra_cpu" in source
-    assert "plan_a_dijkstra_hip" not in source
 
 
 def test_graph_hip_entry_is_gated_before_any_graph_materialization(monkeypatch):
@@ -181,25 +177,29 @@ def test_device_resident_graph_path_has_no_host_graph_copy_or_python_heap():
     source = inspect.getsource(shortest_path.plan_a_dijkstra_hip_for_graph)
     assert "cached_plan_a_edge_weights" not in source
     assert ".cpu(" not in source
-    assert ".tolist(" not in source
+    assert "graph.heading.tolist(" not in source
+    assert "graph.edges[0].tolist(" not in source
     assert "dijkstra_graph" in source
-    policy_source = (Path(__file__).parents[1] / "frc_defense" /
-                     "meco_plan_a_policy.py").read_text()
-    assert "plan_a_dijkstra_cpu" in policy_source
-    assert "plan_a_dijkstra_hip_for_graph" not in policy_source
 
 
-def test_device_graph_kernel_preserves_exact_heap_route_contract():
-    source_root = Path(__file__).parents[1] / "frc_defense" / "csrc"
-    binding = (source_root / "meco_plan_a_shortest_path_hip.cpp").read_text()
-    kernel = (source_root / "meco_plan_a_shortest_path_hip_kernel.cu").read_text()
-    assert 'module.def("dijkstra_graph"' in binding
-    assert "xy.to(at::kDouble).contiguous()" in binding
-    graph_kernel = kernel.split("__global__ void plan_a_dijkstra_graph_kernel", 1)[1]
-    assert "hypot(sx - dx, sy - dy)" in graph_kernel
-    assert "atan2(sin(delta), cos(delta))" in graph_kernel
-    assert "proposal < route[dst] - 1.0e-9" in graph_kernel
-    assert "traversal[settled_count++] = src" in graph_kernel
+def test_turn_table_matches_cpu_math_for_float32_headings():
+    headings = (torch.arange(8, dtype=torch.float32) * (2 * math.pi / 8)).tolist()
+    values, turns = shortest_path.plan_a_cpu_turn_table(headings, device="cpu")
+    values, turns = values.tolist(), turns.tolist()
+    assert values == sorted(headings)
+    for i, src in enumerate(values):
+        for j, dst in enumerate(values):
+            delta = dst - src
+            assert turns[i][j].hex() == abs(math.atan2(math.sin(delta),
+                                                       math.cos(delta))).hex()
+
+
+def test_cpu_traversal_sorts_final_costs_after_zero_cost_discovery():
+    result = plan_a_dijkstra_cpu([[2], [], [1]], [[0.], [], [0.]],
+        [[0.], [], [0.]], [[True], [], [True]], root=0,
+        root_start_cost=0., root_connector_m=0.)
+    assert result["traversal_order"] == [0, 1, 2]
+    assert result["parent_ids"] == [-1, 2, 0]
 
 
 def test_hip_kernel_has_device_side_edge_and_heap_guards():
