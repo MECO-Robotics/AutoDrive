@@ -127,13 +127,12 @@ __device__ void sorted_traversal(const double* route, int64_t* traversal,
   }
 }
 
-__global__ void plan_a_dijkstra_kernel(const int64_t* edge_dst,
+__device__ void plan_a_dijkstra_search(const int64_t* edge_dst,
     const double* edge_cost, const double* edge_length, const bool* edge_allowed,
     double* route, double* physical, int64_t* parent, double* parent_length,
     int64_t* traversal, int64_t n, int64_t slots, int64_t heap_capacity,
     int64_t root, double root_start_cost, double root_connector_m,
     double* heap_distance, int64_t* heap_node, int64_t* status) {
-  if (blockIdx.x != 0 || threadIdx.x != 0) return;
   for (int64_t node = 0; node < n; ++node) {
     route[node] = INFINITY;
     physical[node] = INFINITY;
@@ -184,6 +183,40 @@ __global__ void plan_a_dijkstra_kernel(const int64_t* edge_dst,
     }
   }
   sorted_traversal(route, traversal, n, heap_distance, heap_node);
+}
+
+__global__ void plan_a_dijkstra_kernel(const int64_t* edge_dst,
+    const double* edge_cost, const double* edge_length, const bool* edge_allowed,
+    double* route, double* physical, int64_t* parent, double* parent_length,
+    int64_t* traversal, int64_t n, int64_t slots, int64_t heap_capacity,
+    int64_t root, double root_start_cost, double root_connector_m,
+    double* heap_distance, int64_t* heap_node, int64_t* status) {
+  if (blockIdx.x != 0 || threadIdx.x != 0) return;
+  plan_a_dijkstra_search(edge_dst, edge_cost, edge_length, edge_allowed,
+      route, physical, parent, parent_length, traversal, n, slots, heap_capacity,
+      root, root_start_cost, root_connector_m, heap_distance, heap_node, status);
+}
+
+// Experimental shared-graph batch: each block owns all mutable search state.
+__global__ void plan_a_dijkstra_batch_kernel(const int64_t* edge_dst,
+    const double* edge_cost, const double* edge_length, const bool* edge_allowed,
+    const int64_t* roots, const double* start_costs, const double* connectors,
+    double* route, double* physical, int64_t* parent, double* parent_length,
+    int64_t* traversal, int64_t n, int64_t slots, int64_t heap_capacity,
+    double* heap_distance, int64_t* heap_node, int64_t* status) {
+  if (threadIdx.x != 0) return;
+  const int64_t b = blockIdx.x;
+  status[b] = 0;
+  if (roots[b] < 0 || roots[b] >= n || !isfinite(start_costs[b]) ||
+      !isfinite(connectors[b]) || start_costs[b] < 0 || connectors[b] < 0) {
+    status[b] = 3;
+    return;
+  }
+  plan_a_dijkstra_search(edge_dst, edge_cost, edge_length, edge_allowed,
+      route + b*n, physical + b*n, parent + b*n, parent_length + b*n,
+      traversal + b*n, n, slots, heap_capacity, roots[b], start_costs[b],
+      connectors[b], heap_distance + b*heap_capacity, heap_node + b*heap_capacity,
+      status + b);
 }
 
 __global__ void plan_a_dijkstra_graph_kernel(const double* xy,
@@ -419,6 +452,18 @@ void plan_a_dijkstra_launch(const int64_t* edge_dst, const double* edge_cost,
       edge_dst, edge_cost, edge_length, edge_allowed, route, physical, parent,
       parent_length, traversal, n, slots, heap_capacity, root, root_start_cost,
       root_connector_m, heap_distance, heap_node, status);
+}
+
+void plan_a_dijkstra_batch_launch(const int64_t* edge_dst, const double* edge_cost,
+    const double* edge_length, const bool* edge_allowed, const int64_t* roots,
+    const double* starts, const double* connectors, double* route, double* physical,
+    int64_t* parent, double* parent_length, int64_t* traversal, int64_t n,
+    int64_t slots, int64_t heap_capacity, int64_t batch, double* heap_distance,
+    int64_t* heap_node, int64_t* status, hipStream_t stream) {
+  hipLaunchKernelGGL(plan_a_dijkstra_batch_kernel, dim3(batch), dim3(1), 0, stream,
+      edge_dst, edge_cost, edge_length, edge_allowed, roots, starts, connectors,
+      route, physical, parent, parent_length, traversal, n, slots, heap_capacity,
+      heap_distance, heap_node, status);
 }
 
 void plan_a_dijkstra_graph_launch(const double* xy, const double* heading,

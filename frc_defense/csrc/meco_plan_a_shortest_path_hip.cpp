@@ -14,9 +14,55 @@ void plan_a_dijkstra_graph_launch(const double*, const double*, const int64_t*,
     const bool*, const bool*, const int64_t*, const double*, const double*, double*, double*,
     int64_t*, double*, int64_t*, int64_t, int64_t, int64_t, double*, int64_t*,
     int64_t*, hipStream_t);
+void plan_a_dijkstra_batch_launch(const int64_t*, const double*, const double*,
+    const bool*, const int64_t*, const double*, const double*, double*, double*,
+    int64_t*, double*, int64_t*, int64_t, int64_t, int64_t, int64_t, double*,
+    int64_t*, int64_t*, hipStream_t);
 void plan_a_pose_regions_launch(const int64_t*, const bool*, const bool*, int64_t*, int64_t*,
     bool*, int64_t*, int64_t, int64_t, int64_t, hipStream_t);
 void plan_a_sha256_bytes_launch(const uint8_t*, int64_t, uint8_t*, hipStream_t);
+
+// Experimental preallocated shared-graph batch. Status is per search and must
+// be checked by the caller before using any result.
+void dijkstra_batch_into(torch::Tensor dst, torch::Tensor cost, torch::Tensor length,
+    torch::Tensor allowed, torch::Tensor roots, torch::Tensor starts,
+    torch::Tensor connectors, std::vector<torch::Tensor> out) {
+  TORCH_CHECK(dst.is_cuda() && dst.scalar_type() == at::kLong && dst.dim() == 2 &&
+      dst.is_contiguous(), "dst must be contiguous HIP int64 [N,S]");
+  const auto n = dst.size(0), slots = dst.size(1);
+  TORCH_CHECK(n > 0 && slots > 0 && n <= (std::numeric_limits<int64_t>::max()-1)/slots,
+      "invalid graph shape");
+  auto check = [&](const torch::Tensor& t, at::ScalarType type) {
+    TORCH_CHECK(t.is_cuda() && t.device() == dst.device() && t.scalar_type() == type &&
+        t.is_contiguous(), "batch tensor has invalid device, dtype, or layout");
+  };
+  check(cost, at::kDouble); check(length, at::kDouble); check(allowed, at::kBool);
+  TORCH_CHECK(cost.sizes() == dst.sizes() && length.sizes() == dst.sizes() &&
+      allowed.sizes() == dst.sizes(), "graph tensors must match");
+  check(roots, at::kLong); check(starts, at::kDouble); check(connectors, at::kDouble);
+  TORCH_CHECK(roots.dim() == 1 && roots.numel() > 0 && roots.numel() <= 65535 &&
+      starts.sizes() == roots.sizes() && connectors.sizes() == roots.sizes(),
+      "batch roots and costs must be equal nonempty vectors");
+  const auto b = roots.numel(), cap = n*slots+1;
+  TORCH_CHECK(out.size() == 8, "batch requires five outputs, two heaps, and status");
+  for (int i = 0; i < 8; ++i) {
+    check(out[i], (i == 2 || i == 4 || i == 6 || i == 7) ? at::kLong : at::kDouble);
+    if (i < 5) TORCH_CHECK(out[i].dim() == 2 && out[i].size(0) == b && out[i].size(1) == n,
+        "invalid batch output shape");
+    else if (i < 7) TORCH_CHECK(out[i].dim() == 2 && out[i].size(0) == b && out[i].size(1) == cap,
+        "invalid batch heap shape");
+    else TORCH_CHECK(out[i].dim() == 1 && out[i].size(0) == b, "invalid batch status shape");
+  }
+  c10::cuda::CUDAGuard guard(dst.device());
+  plan_a_dijkstra_batch_launch(dst.data_ptr<int64_t>(), cost.data_ptr<double>(),
+      length.data_ptr<double>(), allowed.data_ptr<bool>(), roots.data_ptr<int64_t>(),
+      starts.data_ptr<double>(), connectors.data_ptr<double>(), out[0].data_ptr<double>(),
+      out[1].data_ptr<double>(), out[2].data_ptr<int64_t>(), out[3].data_ptr<double>(),
+      out[4].data_ptr<int64_t>(), n, slots, cap, b, out[5].data_ptr<double>(),
+      out[6].data_ptr<int64_t>(), out[7].data_ptr<int64_t>(),
+      c10::cuda::getCurrentCUDAStream(dst.get_device()));
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
            torch::Tensor> dijkstra(torch::Tensor edge_dst,
@@ -181,6 +227,7 @@ torch::Tensor sha256_bytes(torch::Tensor bytes) {
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
+  module.def("dijkstra_batch_into", &dijkstra_batch_into, "Experimental preallocated shared-graph batch");
   module.def("dijkstra", &dijkstra, "Plan A deterministic float64 heap Dijkstra prototype");
   module.def("dijkstra_graph", &dijkstra_graph,
       "Plan A device-resident graph geometry and deterministic Dijkstra prototype");
