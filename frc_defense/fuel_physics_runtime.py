@@ -61,10 +61,38 @@ def reset_fuel_physics(env, mask=None):
         bind_fuel_state(env).reset(mask)
 
 
+def _whole_tick_graph_signature(env, physics, substeps, outer_dt):
+    """Bind the experimental capture to its input buffers and static settings."""
+    def value_signature(value):
+        if isinstance(value, torch.Tensor):
+            return ("tensor", id(value), value.data_ptr(), tuple(value.shape),
+                    tuple(value.stride()), value.dtype, value.device)
+        if isinstance(value, (bool, int, float, str, type(None))):
+            return value
+        if isinstance(value, (tuple, list)):
+            return tuple(value_signature(item) for item in value)
+        if isinstance(value, dict):
+            return tuple((str(key), value_signature(item))
+                         for key, item in sorted(value.items(), key=lambda pair: str(pair[0])))
+        return ("object", id(value))
+
+    def fingerprint(obj):
+        return tuple((name, value_signature(value))
+                     for name, value in sorted(vars(obj).items()))
+    return (substeps, outer_dt, tuple(sorted(vars(physics.config).items())),
+            fingerprint(env.sim), fingerprint(env.sim.swerve),
+            fingerprint(physics), fingerprint(physics._hip),
+            value_signature(env.piece_active), value_signature(env.piece_owner),
+            value_signature(env._physics_graph_command),
+            value_signature(env._physics_graph_active))
+
+
 def advance_with_fuel(env, commands, active_mask, *, active_nonempty=True):
     """Advance robot and fuel together; controller cadence stays unchanged."""
     from .gamepiece_actions import _flush_fuel_score_awards
     physics = env.fuel_physics
+    if getattr(env, "_whole_tick_capture_failed", False):
+        raise RuntimeError("FUEL graph capture failed; reconstruct the simulator before advancing")
     if physics is None:
         state = env.sim.step(commands, active_mask)
         _flush_fuel_score_awards(env)
@@ -107,39 +135,69 @@ def advance_with_fuel(env, commands, active_mask, *, active_nonempty=True):
                 else physics.config.substeps)
     substep_dt = outer_dt / substeps
     if env._physics_graph_enabled:
-        graph = env._physics_graphs.get(substeps)
+        entry = env._physics_graphs.get(substeps)
+        if entry is not None and len(entry) == 3:
+            signature = (_whole_tick_graph_signature(env, physics, substeps, outer_dt)
+                         if physics._hip is not None else None)
+            if signature != entry[2]:
+                env._physics_graphs.clear()
+                if physics._gpu_qualifying:
+                    raise RuntimeError("qualifying whole-tick FUEL graph inputs changed")
+                env._physics_graph_enabled = False
+                entry = None
         graph_command = env._physics_graph_command
         graph_active = env._physics_graph_active
         graph_command.copy_(commands)
         graph_active.copy_(active)
-        if graph is None:
+        if entry is None and env._physics_graph_enabled:
+            capture_whole = (os.environ.get("AUTODRIVE_EXPERIMENTAL_FUEL_WHOLE_TICK_GRAPH") == "1"
+                             and physics._hip is not None and not physics.config.sleep_islands)
             try:
                 outer_sim_dt = env.sim.dt
                 graph = torch.cuda.CUDAGraph()
                 env.sim.dt = substep_dt
                 try:
                     with torch.cuda.graph(graph):
-                        env.sim.step(graph_command, graph_active)
-                        physics._step_graph_capture_substep(
-                            graph_active, env.piece_active, env.piece_owner,
-                            dt=substep_dt)
+                        for _ in range(substeps if capture_whole else 1):
+                            env.sim.step(graph_command, graph_active)
+                            if physics._gpu_qualifying or not capture_whole:
+                                physics._step_graph_capture_substep(
+                                    graph_active, env.piece_active, env.piece_owner,
+                                    dt=substep_dt)
+                            else:
+                                physics.step(graph_active, env.piece_active, env.piece_owner,
+                                             dt=substep_dt, substeps=1, adaptive=False)
                 finally:
                     env.sim.dt = outer_sim_dt
             except Exception as exc:
-                # Graph capture is an optimization only; retain the established
-                # eager path for diagnostic execution when capture is unsupported.
                 env._physics_graphs.clear()
+                if capture_whole:
+                    env._whole_tick_capture_failed = True
+                    raise RuntimeError(
+                        "experimental whole-tick FUEL graph capture failed; "
+                        "refusing to advance potentially modified state") from exc
                 if physics._gpu_qualifying:
                     raise RuntimeError(
                         "GPU-qualifying fuel physics requires a supported "
                         "HIP graph-capture path; refusing eager fallback") from exc
                 env._physics_graph_enabled = False
             else:
-                env._physics_graphs[substeps] = graph
+                entry = (graph, 1 if capture_whole else substeps)
+                if capture_whole:
+                    entry += (_whole_tick_graph_signature(env, physics, substeps, outer_dt),)
+                env._physics_graphs[substeps] = entry
         if env._physics_graph_enabled:
             try:
-                for _ in range(substeps):
+                graph, replay_count = entry[:2]
+                for _ in range(replay_count):
                     graph.replay()
+            except Exception as exc:
+                if len(entry) == 3:
+                    env._whole_tick_capture_failed = True
+                    raise RuntimeError(
+                        "experimental whole-tick FUEL graph replay failed; "
+                        "reconstruct the simulator before advancing") from exc
+                raise
             finally:
                 env.sim.dt = outer_dt
             _flush_fuel_score_awards(env)
