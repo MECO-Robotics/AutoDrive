@@ -218,3 +218,37 @@ def test_fused_static_mask_ignores_unwritten_inactive_rows(monkeypatch):
         actual, expected = getattr(fused, name), getattr(reference, name)
         assert torch.equal(actual[active], expected[active]), name
         assert torch.equal(actual[~active], torch.full_like(actual[~active], sentinel)), name
+
+
+@pytest.mark.skipif(not (torch.cuda.is_available() and torch.version.hip),
+                    reason="requires ROCm")
+@pytest.mark.parametrize("map_kind", ("zero", "gradient", "barrier", "near_ties"))
+def test_learned_fused_path_matches_bellman_reference(map_kind, monkeypatch):
+    device = torch.device("cuda", torch.cuda.current_device())
+    baseline = _planner_on_device(8, False, device)
+    candidate = _planner_on_device(8, False, device)
+    starts = torch.tensor([[1.2, 2.], [2., 6.], [8.25, 4.1], [4., 3.],
+                           [10., 4.], [.1, .1], [7., 6.], [14., 2.]], device=device)
+    goals = torch.tensor([[14.8, 2.], [14., 6.], [8.25, 4.1], [4., 3.],
+                          [10.9, 4.], [15., 7.], [8., 4.1], [2., 6.]], device=device)
+    headings = torch.tensor([0., .4, .8, 0., -.7, 0., .2, -.2], device=device)
+    lengths = torch.tensor([.9, .9, .9, .8, 1.1, .8, .9, 1.1], device=device)
+    widths = torch.tensor([.75, .75, .75, .8, .6, .8, .75, .6], device=device)
+    active = torch.tensor([True, True, True, True, True, False, True, True], device=device)
+    obstacles = torch.zeros((8, 2, 3), device=device)
+    obstacles[:, 0] = torch.tensor([8.1, 3.6, .4], device=device)
+    xx, yy = baseline.xx, baseline.yy
+    if map_kind == 'zero': cost = torch.zeros_like(xx)
+    elif map_kind == 'gradient': cost = .01 * xx + .02 * yy
+    elif map_kind == 'barrier': cost = ((xx > 7.) & (xx < 9.) & (yy < 6.)).to(xx.dtype) * 20.
+    else: cost = torch.remainder(torch.arange(xx.numel(), device=device).reshape_as(xx), 2).to(xx.dtype) * 1e-6
+    monkeypatch.setattr(adstar_module, '_LEARNED_FUSION_DIAGNOSTIC', False)
+    baseline.plan(starts, goals, headings, lengths, widths, active_mask=active,
+                  robot_obstacles=obstacles, learned_traversal_cost=cost)
+    monkeypatch.setattr(adstar_module, '_LEARNED_FUSION_DIAGNOSTIC', True)
+    candidate.plan(starts, goals, headings, lengths, widths, active_mask=active,
+                   robot_obstacles=obstacles, learned_traversal_cost=cost)
+    torch.cuda.synchronize(device)
+    for name in ('last_path', 'last_lengths', 'last_start', 'last_goal',
+                 'last_heading', 'last_speed_profile', 'potential'):
+        assert torch.equal(getattr(baseline, name), getattr(candidate, name)), name

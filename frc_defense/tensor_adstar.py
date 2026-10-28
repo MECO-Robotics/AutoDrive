@@ -13,6 +13,8 @@ import math
 import os
 import warnings
 
+_LEARNED_FUSION_DIAGNOSTIC = (os.environ.get("AUTODRIVE_EXPERIMENTAL_LEARNED_ROUTE_FUSION") == "1")
+
 import torch
 
 
@@ -1122,7 +1124,7 @@ class TensorADStar:
             shared_memory_limit = 0
         fused_route_supported = (
             hip_extension is not None and self.dtype == torch.float32 and
-            learned_cost is None and
+            (learned_cost is None or _LEARNED_FUSION_DIAGNOSTIC) and
             self.max_points == 72 and self.nx * self.ny <= 4096 and
             shared_memory_limit >= route_shared_bytes and blocked.is_contiguous()
         )
@@ -1216,8 +1218,9 @@ class TensorADStar:
             endpoint=out_path.gather(
                 1,(out_lengths-1).clamp_min(0)[:,None,None].expand(-1,1,2))
             out_path=torch.where(tail[:,:,None],endpoint,out_path)
-            out_path,out_lengths=self._shortcut_path(
-                out_path,out_lengths,blocked,start_heading,length,width,speed,acceleration)
+            if learned_cost is None:
+                out_path,out_lengths=self._shortcut_path(
+                    out_path,out_lengths,blocked,start_heading,length,width,speed,acceleration)
             out_profile=self._speed_profile(
                 out_path,out_lengths,speed,lateral_friction,acceleration)
             if out_value is not self.potential:
