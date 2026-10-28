@@ -15,6 +15,18 @@ _EDGE_WEIGHT_CACHE_LOCK = threading.RLock()
 PLAN_A_HIP_PARITY_PROFILE_GATE_PASSED = False
 
 
+def plan_a_cpu_turn_table(headings, *, device):
+    """Build the CPU-oracle turn values for an explicitly known heading set."""
+    import torch
+    values = sorted({float(h) for h in headings if math.isfinite(float(h))})
+    if not values:
+        values = [0.0]  # Invalid active geometry is rejected by the kernel.
+    turns = [[abs(math.atan2(math.sin(dst - src), math.cos(dst - src)))
+              for dst in values] for src in values]
+    return (torch.tensor(values, dtype=torch.float64, device=device),
+            torch.tensor(turns, dtype=torch.float64, device=device))
+
+
 def _require_wx9100_device(device):
     """Reject non-WX9100 devices before loading the experimental extension."""
     import torch
@@ -186,7 +198,7 @@ def plan_a_dijkstra_hip(edge_dst, edge_costs, edge_lengths, edge_allowed, *, roo
 
 def plan_a_dijkstra_hip_for_graph(graph, *, device, root, root_start_cost,
                                   root_connector_m):
-    """Run exact graph geometry and Dijkstra on device without host graph copies.
+    """Run graph geometry and Dijkstra with a CPU-defined heading turn table.
 
     This is an explicit prototype entry point. Runtime support construction
     remains on the CPU oracle until WX9100 parity and profile evidence opens
@@ -221,11 +233,17 @@ def plan_a_dijkstra_hip_for_graph(graph, *, device, root, root_start_cost,
             root_connector_m.device != selected):
         raise ValueError("HIP graph route requires valid same-device graph tensors and root costs")
     from .meco_plan_a_shortest_path_hip import extension
+    from .meco_pose_graph import HEADING_BINS
+    # Legal pose graphs use this fixed heading construction. The kernel rejects
+    # any reachable edge whose headings are absent from the canonical table.
+    headings = (torch.arange(HEADING_BINS, dtype=heading.dtype) *
+                (2 * math.pi / HEADING_BINS)).tolist()
+    heading_values, turns = plan_a_cpu_turn_table(headings, device=selected)
     route, physical, parent, parent_length, settled, status = extension().dijkstra_graph(
         xy.contiguous(), heading.contiguous(), edge_dst.contiguous(),
         edge_allowed.contiguous(), graph.node_valid[0].contiguous(),
         root.contiguous(), root_start_cost.contiguous(),
-        root_connector_m.contiguous())
+        root_connector_m.contiguous(), heading_values, turns)
     return {"route_cost": route, "physical_distance": physical,
         "parent_ids": parent, "parent_edge_m": parent_length,
         "traversal_order": settled, "status": status}

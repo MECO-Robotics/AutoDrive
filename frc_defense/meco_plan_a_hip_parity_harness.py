@@ -353,6 +353,7 @@ def _device_inputs(graph: dict, kind: str, selected, torch, ext):
     paths = {"preweighted": prepare_preweighted}
     if kind == "geometry":
         def prepare_graph_geometry():
+            from .meco_plan_a_shortest_path import plan_a_cpu_turn_table
             edge_dst = torch.tensor(edge_dst_host, device=selected,
                                     dtype=torch.long).contiguous()
             edge_allowed = torch.tensor(edge_allowed_host, device=selected,
@@ -368,10 +369,11 @@ def _device_inputs(graph: dict, kind: str, selected, torch, ext):
             root_start_cost = torch.tensor(graph["root_start_cost"], device=selected,
                                            dtype=torch.float64)
             root_connector_m = torch.tensor(graph["root_connector_m"], device=selected,
-                                            dtype=torch.float64)
+                                           dtype=torch.float64)
+            heading_values, turns = plan_a_cpu_turn_table(graph["heading"], device=selected)
             def invoke():
                 return ext.dijkstra_graph(xy, heading, edge_dst, edge_allowed, node_valid,
-                    root, root_start_cost, root_connector_m)
+                    root, root_start_cost, root_connector_m, heading_values, turns)
             return invoke
         paths["graph_geometry"] = prepare_graph_geometry
     return paths

@@ -11,7 +11,8 @@ void plan_a_dijkstra_launch(const int64_t*, const double*, const double*,
     int64_t, int64_t, int64_t, double, double, double*, int64_t*, int64_t*,
     hipStream_t);
 void plan_a_dijkstra_graph_launch(const double*, const double*, const int64_t*,
-    const bool*, const bool*, const int64_t*, const double*, const double*, double*, double*,
+    const bool*, const bool*, const double*, const double*, int64_t,
+    const int64_t*, const double*, const double*, double*, double*,
     int64_t*, double*, int64_t*, int64_t, int64_t, int64_t, double*, int64_t*,
     int64_t*, hipStream_t);
 void plan_a_dijkstra_batch_launch(const int64_t*, const double*, const double*,
@@ -123,7 +124,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
            torch::Tensor, torch::Tensor> dijkstra_graph(torch::Tensor xy,
     torch::Tensor heading, torch::Tensor edge_dst, torch::Tensor edge_allowed,
     torch::Tensor node_valid, torch::Tensor root, torch::Tensor root_start_cost,
-    torch::Tensor root_connector_m) {
+    torch::Tensor root_connector_m, torch::Tensor heading_values, torch::Tensor turns) {
   TORCH_CHECK(xy.is_cuda() && xy.dim() == 2 && xy.size(1) == 2 &&
       (xy.scalar_type() == at::kFloat || xy.scalar_type() == at::kDouble),
       "xy must be HIP float32/float64 [N,2]");
@@ -142,6 +143,14 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
       node_valid.dim() == 1 && node_valid.size(0) == xy.size(0) &&
       node_valid.is_contiguous() && node_valid.device() == xy.device(),
       "node_valid must be contiguous HIP bool [N]");
+  TORCH_CHECK(heading_values.is_cuda() && heading_values.device() == xy.device() &&
+      heading_values.scalar_type() == at::kDouble && heading_values.dim() == 1 &&
+      heading_values.numel() > 0 && heading_values.is_contiguous(),
+      "heading_values must be a nonempty contiguous HIP float64 vector");
+  TORCH_CHECK(turns.is_cuda() && turns.device() == xy.device() &&
+      turns.scalar_type() == at::kDouble && turns.dim() == 2 &&
+      turns.size(0) == heading_values.numel() && turns.size(1) == heading_values.numel() &&
+      turns.is_contiguous(), "turns must be a matching contiguous HIP float64 matrix");
   const auto n = edge_dst.size(0), slots = edge_dst.size(1);
   TORCH_CHECK(n > 0 && slots > 0, "invalid graph shape");
   TORCH_CHECK(n <= (std::numeric_limits<int64_t>::max() - 1) / slots,
@@ -174,7 +183,8 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
   auto status = torch::zeros({}, edge_dst.options());
   plan_a_dijkstra_graph_launch(xy64.data_ptr<double>(), heading64.data_ptr<double>(),
       edge_dst.data_ptr<int64_t>(), edge_allowed.data_ptr<bool>(),
-      node_valid.data_ptr<bool>(),
+      node_valid.data_ptr<bool>(), heading_values.data_ptr<double>(),
+      turns.data_ptr<double>(), heading_values.numel(),
       root.data_ptr<int64_t>(), root_start_cost.data_ptr<double>(),
       root_connector_m.data_ptr<double>(),
       route.data_ptr<double>(), physical.data_ptr<double>(), parent.data_ptr<int64_t>(),

@@ -248,7 +248,8 @@ __global__ void plan_a_dijkstra_batch_kernel(const int64_t* edge_dst,
 
 __global__ void plan_a_dijkstra_graph_kernel(const double* xy,
     const double* heading, const int64_t* edge_dst, const bool* edge_allowed,
-    const bool* node_valid,
+    const bool* node_valid, const double* heading_values, const double* turns,
+    int64_t heading_count,
     const int64_t* root_index, const double* root_start_cost_ptr,
     const double* root_connector_m_ptr,
     double* route, double* physical, int64_t* parent, double* parent_length,
@@ -297,10 +298,19 @@ __global__ void plan_a_dijkstra_graph_kernel(const double* xy,
         return;
       }
       const double length = plan_a_python_hypot(sx - dx, sy - dy);
-      const double delta = hd - hs;
-      const double turn = fabs(atan2(sin(delta), cos(delta)));
+      int64_t hi = -1, hj = -1;
+      for (int64_t i = 0; i < heading_count; ++i) {
+        if (heading_values[i] == hs) hi = i;
+        if (heading_values[i] == hd) hj = i;
+      }
+      if (hi < 0 || hj < 0) {
+        *status = 4;
+        return;
+      }
+      const double turn = turns[hi * heading_count + hj];
       const double cost = length + 0.25 * turn;
-      if (!isfinite(length) || !isfinite(cost) || length < 0.0 || cost < 0.0) {
+      if (!isfinite(length) || !isfinite(turn) || !isfinite(cost) ||
+          length < 0.0 || turn < 0.0 || cost < 0.0) {
         *status = 1;
         return;
       }
@@ -495,13 +505,15 @@ void plan_a_dijkstra_batch_launch(const int64_t* edge_dst, const double* edge_co
 
 void plan_a_dijkstra_graph_launch(const double* xy, const double* heading,
     const int64_t* edge_dst, const bool* edge_allowed, const bool* node_valid,
+    const double* heading_values, const double* turns, int64_t heading_count,
     const int64_t* root_index, const double* root_start_cost,
     const double* root_connector_m, double* route, double* physical,
     int64_t* parent, double* parent_length, int64_t* traversal, int64_t n,
     int64_t slots, int64_t heap_capacity, double* heap_distance,
     int64_t* heap_node, int64_t* status, hipStream_t stream) {
   hipLaunchKernelGGL(plan_a_dijkstra_graph_kernel, dim3(1), dim3(1), 0, stream,
-      xy, heading, edge_dst, edge_allowed, node_valid, root_index, root_start_cost,
+      xy, heading, edge_dst, edge_allowed, node_valid, heading_values, turns,
+      heading_count, root_index, root_start_cost,
       root_connector_m, route, physical, parent, parent_length, traversal, n,
       slots, heap_capacity, heap_distance, heap_node, status);
 }
