@@ -69,6 +69,33 @@ void plan_a_sha256_bytes_launch(const uint8_t* input, int64_t length,
       input, length, output);
 }
 
+// Adaptation of CPython 3.12 vector_norm (PSF License 2.0):
+// https://github.com/python/cpython/blob/v3.12.14/Modules/mathmodule.c
+__device__ double plan_a_python_hypot(double a,double b) {
+  a=fabs(a); b=fabs(b);
+  double max=fmax(a,b);
+  if (max==0.0 || isinf(max)) return max;
+  int exponent; frexp(max,&exponent);
+  if (exponent < -1023) {
+    // Graph coordinates are normally far from this range; use explicit
+    // rescaling to avoid recursive device calls for subnormals.
+    a /= 0x1p-1022; b /= 0x1p-1022;
+    max=fmax(a,b); frexp(max,&exponent);
+    double scale=ldexp(1.0,-exponent), csum=1.0, f1=0.0, f2=0.0;
+    double values[2]={a*scale,b*scale};
+    for(int i=0;i<2;++i) { double x=values[i], hi=x*x, lo=fma(x,x,-hi), sum=csum+hi; f1+=lo; f2+=(csum-sum)+hi; csum=sum; }
+    double h=sqrt(csum-1.0+(f1+f2)), hi=-h*h, lo=fma(-h,h,-hi), sum=csum+hi;
+    f1+=lo; f2+=(csum-sum)+hi; csum=sum; h+=(csum-1.0+(f1+f2))/(2.0*h);
+    return 0x1p-1022*(h/scale);
+  }
+  double scale=ldexp(1.0,-exponent), csum=1.0, f1=0.0, f2=0.0;
+  double values[2]={a*scale,b*scale};
+  for(int i=0;i<2;++i) { double x=values[i], hi=x*x, lo=fma(x,x,-hi), sum=csum+hi; f1+=lo; f2+=(csum-sum)+hi; csum=sum; }
+  double h=sqrt(csum-1.0+(f1+f2)), hi=-h*h, lo=fma(-h,h,-hi), sum=csum+hi;
+  f1+=lo; f2+=(csum-sum)+hi; csum=sum; h+=(csum-1.0+(f1+f2))/(2.0*h);
+  return h/scale;
+}
+
 __device__ bool less_pair(double da, int64_t na, double db, int64_t nb) {
   return da < db || (da == db && na < nb);
 }
@@ -269,7 +296,7 @@ __global__ void plan_a_dijkstra_graph_kernel(const double* xy,
         *status = 1;
         return;
       }
-      const double length = hypot(sx - dx, sy - dy);
+      const double length = plan_a_python_hypot(sx - dx, sy - dy);
       const double delta = hd - hs;
       const double turn = fabs(atan2(sin(delta), cos(delta)));
       const double cost = length + 0.25 * turn;
