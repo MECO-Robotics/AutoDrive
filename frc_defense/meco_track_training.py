@@ -2287,10 +2287,10 @@ def _ppo_update(track, model, value_head, optimizer, rows, config, bootstrap_val
                       else bootstrap_value.reshape(()))
     advantage, returns = _gae(rewards, dones, old_value, next_value,
                               config.gamma, config.gae_lambda)
-    actor_rows = torch.tensor([not row.get("execution_failure", False) for row in rows],
-                              device=advantage.device, dtype=torch.bool)
+    actor_row_flags = [not row.get("execution_failure", False) for row in rows]
+    actor_rows = torch.tensor(actor_row_flags, device=advantage.device, dtype=torch.bool)
     actor_advantage = torch.zeros_like(advantage)
-    if bool(actor_rows.any()):
+    if any(actor_row_flags):
         eligible_advantage = advantage[actor_rows]
         actor_advantage[actor_rows] = (eligible_advantage - eligible_advantage.mean()) / \
             eligible_advantage.std(unbiased=False).clamp_min(1e-8)
