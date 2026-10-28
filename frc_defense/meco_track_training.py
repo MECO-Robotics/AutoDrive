@@ -2002,7 +2002,7 @@ def _run_macro_step(env, action_index: int, action_ticks: int, goal_xy=None, *,
                             applied.get("map") is frozen_traversal_cost)})
         if metric_ledger is not None:
             metric_ledger.observe_outer_step(int(env.last_actions[0, 3].item()))
-        executed_actions.append(int(env.last_actions[0, 3].item()))
+        executed_actions.append(env.last_actions[0, 3].detach().clone())
         target_valid = getattr(env, "_last_planner_collection_target_valid", None)
         action_match = getattr(env, "_last_planner_collection_action_match", None)
         if isinstance(target_valid, torch.Tensor):
@@ -2039,9 +2039,10 @@ def _run_macro_step(env, action_index: int, action_ticks: int, goal_xy=None, *,
         if ended or timeout:
             break
     if executed_tick_mask:
-        executed_flags=torch.stack(executed_tick_mask).detach().cpu().tolist()
-        executed_actions=[action for action,was_active in zip(executed_actions,executed_flags)
-                          if was_active]
+        executed_trace = torch.stack((torch.stack(executed_actions),
+            torch.stack(executed_tick_mask).to(dtype=env.last_actions.dtype)), dim=-1)
+        executed_actions = [int(action) for action, was_active in
+                            executed_trace.detach().cpu().tolist() if was_active]
     env._last_obs = env.observe()
     final_heading_error = None
     final_goal_distance = None
@@ -2252,6 +2253,12 @@ def _ppo_update(track, model, value_head, optimizer, rows, config, bootstrap_val
             "rollout_steps": count}
 
 
+def _training_fuel_physics_config(track):
+    if track in ("A1", "A2", "A3"):
+        return {"backend": "hip", "gpu_qualifying": True}
+    return None
+
+
 def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                warm_start: str | None = None,
                qualification_protocol: str | None = None,
@@ -2399,7 +2406,8 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
         resume_rng_python = payload["rng_python"]
         resume_rng_device = payload["rng_device"]
     env = make_curriculum_env(task_scenario, task_category, 1,
-        config.device, task_seed, phase4_factor=phase4_factor)
+        config.device, task_seed, phase4_factor=phase4_factor,
+        fuel_physics=_training_fuel_physics_config(config.track))
     chunk_seed = task_seed
     _reset_episode(env, chunk_seed)
     if resume_rng_torch is not None:
