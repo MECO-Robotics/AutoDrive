@@ -67,6 +67,36 @@ def _normalize_bdf(value) -> str:
             f"{match.group('slot')}.{match.group('function')}").lower()
 
 
+def _runtime_bdf(properties, pci_devices: dict[str, str], expected: dict) -> str:
+    """Resolve the runtime PCI identity across CUDA and ROCm property shapes.
+
+    Some HIP builds expose numeric domain/bus/device fields instead of a BDF
+    string. In that case, use the numeric tuple only to select the lspci
+    function and require a unique function with the pinned vendor/device ID.
+    """
+    for name in ("pci_bus_id_string", "pciBusID", "pci_bus_id"):
+        value = getattr(properties, name, None)
+        if isinstance(value, str):
+            return _normalize_bdf(value)
+
+    fields = (getattr(properties, "pci_domain_id", None),
+              getattr(properties, "pci_bus_id", None),
+              getattr(properties, "pci_device_id", None))
+    if any(isinstance(value, bool) or not isinstance(value, int)
+           for value in fields):
+        raise RuntimeError("HIP runtime PCI BDF fields are unavailable")
+    domain, bus, slot = fields
+    if not (0 <= domain <= 0xffff and 0 <= bus <= 0xff and 0 <= slot <= 0x1f):
+        raise RuntimeError("HIP runtime PCI BDF fields are malformed")
+    prefix = f"{domain:04x}:{bus:02x}:{slot:02x}."
+    matching = [bdf for bdf, vendor_device in pci_devices.items()
+                if bdf.startswith(prefix) and
+                vendor_device == expected["pci_vendor_device"]]
+    if len(matching) != 1 or matching[0] != expected["pci_address"]:
+        raise RuntimeError("HIP runtime PCI fields do not resolve uniquely to the pinned device")
+    return matching[0]
+
+
 def _run_json_command(argv: list[str], label: str):
     try:
         result = subprocess.run(argv, check=True, capture_output=True, text=True,
@@ -209,8 +239,7 @@ def verify_post_lease_wx9100(lease, devices) -> dict:
             raise RuntimeError(f"HIP properties unavailable for {device}") from exc
         runtime_name = _runtime_property(properties, "name")
         runtime_uuid = _normalize_uuid(_runtime_property(properties, "uuid"))
-        runtime_bdf = _normalize_bdf(_runtime_property(properties,
-            "pci_bus_id", "pciBusID", "pci_bus_id_string"))
+        runtime_bdf = _runtime_bdf(properties, pci_devices, expected)
         vendor_device = pci_devices.get(runtime_bdf)
         if (runtime_bdf, vendor_device) == P600_IDENTITY:
             raise RuntimeError(f"refusing NVIDIA Quadro P600 at logical index {device}")
