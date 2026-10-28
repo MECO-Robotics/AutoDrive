@@ -10,7 +10,7 @@ import torch
 from .learning_contract import ObservationSnapshot, _finite_tuple
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, eq=False)
 class DeviceRasterObservationSnapshot:
     """Snapshot with lazy tuple serialization and private device raster storage."""
     snapshot_id: str
@@ -54,7 +54,23 @@ class DeviceRasterObservationSnapshot:
 
     @property
     def raster(self):
-        return tuple(object.__getattribute__(self, "_device_raster").cpu().tolist())
+        return tuple(float(value) for value in
+                     object.__getattribute__(self, "_device_raster").cpu().tolist())
+
+    def __eq__(self, other):
+        if type(other) is not type(self):
+            return NotImplemented
+        return (self.snapshot_id, self.episode_id, self.sequence, self.timestamp,
+                self.raster_shape, self.raster, self.globals, self.schema_version,
+                self.capture_monotonic) == (
+                other.snapshot_id, other.episode_id, other.sequence, other.timestamp,
+                other.raster_shape, other.raster, other.globals, other.schema_version,
+                other.capture_monotonic)
+
+    def __hash__(self):
+        return hash((self.snapshot_id, self.episode_id, self.sequence, self.timestamp,
+                     self.raster_shape, self.raster, self.globals, self.schema_version,
+                     self.capture_monotonic))
 
     def raster_tensor(self, *, device):
         return object.__getattribute__(self, "_device_raster").to(

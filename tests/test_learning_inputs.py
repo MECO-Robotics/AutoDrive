@@ -113,3 +113,24 @@ def test_device_raster_rejects_complex_values():
         DeviceRasterObservationSnapshot(snapshot_id="x:0", episode_id="x",
             sequence=0, timestamp=0., capture_monotonic=0., raster_shape=(1, 1, 1),
             _device_raster=torch.tensor([1.+2.j]), globals=(0.,) * 7)
+
+
+def test_device_raster_integer_bool_values_serialize_as_legacy_floats():
+    from frc_defense.learning_inputs import DeviceRasterObservationSnapshot
+    for values in (torch.tensor([0, 1]), torch.tensor([False, True])):
+        snapshot = DeviceRasterObservationSnapshot(snapshot_id="x:0", episode_id="x",
+            sequence=0, timestamp=0., capture_monotonic=0., raster_shape=(1, 1, 2),
+            _device_raster=values, globals=(0.,) * 7)
+        assert snapshot.raster == (0., 1.)
+        assert all(type(value) is float for value in snapshot.raster)
+
+
+def test_device_raster_snapshot_value_equality_and_hash():
+    from frc_defense.learning_inputs import DeviceRasterObservationSnapshot
+    def snapshot(raster):
+        return DeviceRasterObservationSnapshot(snapshot_id="x:0", episode_id="x",
+            sequence=0, timestamp=0., capture_monotonic=0., raster_shape=(1, 1, 2),
+            _device_raster=torch.tensor(raster), globals=(0.,) * 7)
+    assert snapshot([0, 1]) == snapshot([0., 1.])
+    assert hash(snapshot([0, 1])) == hash(snapshot([0., 1.]))
+    assert snapshot([0, 1]) != snapshot([0, 2])
