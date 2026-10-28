@@ -92,3 +92,17 @@ def test_canonical_check_stays_on_device(monkeypatch):
     with NoScalarRead():
         training._plan_a_route_support(env, graph, support, 's', None,
             SimpleNamespace(p_mode='none'))
+
+
+def test_different_capacity_uses_general_evaluator(monkeypatch):
+    env, graph, support, calls = _setup(monkeypatch)
+    support.goal_xy = support.goal_xy[:7]
+    support.valid_mask = support.valid_mask[:56]
+    support.distances_m = support.distances_m[:7]
+    graph.node_valid = graph.node_valid[:, :7]
+    _, routes = training._plan_a_route_support(env, graph, support, 's', None,
+        SimpleNamespace(p_mode='none'))
+    assert len(calls) == 1 and len(calls[0][0]) == 7
+    assert torch.equal(calls[0][1], support.goal_xy)
+    assert torch.equal(routes.path_xy[:, 0], support.goal_xy)
+    assert [query.candidate_id for query in routes.queries] == [f'plan-a-node:{i}' for i in range(7)]
