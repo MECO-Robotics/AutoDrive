@@ -134,3 +134,38 @@ def test_plan_a_ppo_rejects_legacy_evidence_before_update(scheme, tmp_path):
     with pytest.raises(RuntimeError, match='GPU-only PPO requires v2'):
         _ppo_update('A1', None, None, None, [row], None, None, update_number=1,
                     diagnostic_output=tmp_path, source_identity_sha256='a' * 64)
+
+
+@pytest.mark.parametrize('fault', ['none', 'digest', 'source', 'scheme'])
+@pytest.mark.parametrize('string_expected', [False, True])
+def test_route_evidence_batch_rejected_before_replay_or_optimizer(
+        fault, string_expected, tmp_path, monkeypatch):
+    import frc_defense.meco_track_training as trainer
+
+    digest = torch.arange(32, dtype=torch.uint8)
+    expected = bytes(digest.tolist()).hex() if string_expected else digest.clone()
+    def row():
+        return {'reward': torch.tensor(0.), 'done': False, 'logprob': torch.tensor(0.),
+                'value': torch.tensor(0.), 'support': object(),
+                'route_evidence_sha256': expected,
+                'route_evidence_scheme': 'tree-sha256-v2',
+                'route_evidence_source_identity_sha256': 'a' * 64}
+    rows = [row(), row()]
+    if fault == 'digest':
+        rows[1]['route_evidence_sha256'] = ('ff' * 32 if string_expected else
+                                             torch.full((32,), 255, dtype=torch.uint8))
+    elif fault == 'source':
+        rows[1]['route_evidence_source_identity_sha256'] = 'b' * 64
+    elif fault == 'scheme':
+        rows[1]['route_evidence_scheme'] = 'sha256-v1'
+    monkeypatch.setattr(trainer, '_plan_a_route_evidence_digest',
+                        lambda *args, **kwargs: digest.clone())
+    # Passing route validation reaches the support-scheme check; no replay or
+    # optimizer code should execute for any of these cases.
+    error = {'none': 'GPU-only PPO requires v2 support',
+             'digest': 'route batch/source evidence changed',
+             'source': 'different training source',
+             'scheme': 'GPU-only PPO requires v2 route evidence'}[fault]
+    with pytest.raises(RuntimeError, match=error):
+        trainer._ppo_update('A1', None, None, None, rows, None, None, update_number=1,
+                            diagnostic_output=tmp_path, source_identity_sha256='a' * 64)

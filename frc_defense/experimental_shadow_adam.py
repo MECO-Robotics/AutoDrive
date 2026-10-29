@@ -130,6 +130,20 @@ class ShadowAdam:
             raise ValueError("condition must be a scalar boolean on the optimizer device")
         self.valid.logical_and_(condition.detach())
 
+    def require_all(self, conditions):
+        """Combine scalar device predicates without synchronizing with the host."""
+        if self.finished:
+            raise RuntimeError("transaction is finished")
+        conditions = tuple(conditions)
+        if not conditions:
+            raise ValueError("requires at least one condition")
+        for condition in conditions:
+            if (not isinstance(condition, torch.Tensor) or
+                    condition.device != self.device or
+                    condition.dtype != torch.bool or condition.shape != ()):
+                raise ValueError("conditions must be scalar booleans on the optimizer device")
+        self.valid.logical_and_(torch.stack([condition.detach() for condition in conditions]).all())
+
     def clone_modules(self, *modules):
         """Bind independent module copies to this transaction's parameters.
 

@@ -224,7 +224,8 @@ def _candidate_replay_digest(table, route_cost, risk_cost):
 
 def _plan_a_route_evidence_digest(route_batch, source_identity_sha256,
                                   route_cost_nodes, risk_cost_nodes, *,
-                                  scheme="sha256-v1", require_hip=False):
+                                  scheme="sha256-v1", require_hip=False,
+                                  return_device_bytes=False):
     """Bind the selected decision's route rows and scoring costs to source.
 
     This evidence is materialized only after Plan A has selected its action.
@@ -250,6 +251,8 @@ def _plan_a_route_evidence_digest(route_batch, source_identity_sha256,
         separators=(",", ":"), allow_nan=False).encode()
     if scheme not in ("sha256-v1", "tree-sha256-v2"):
         raise ValueError("unknown Plan A route evidence scheme")
+    if return_device_bytes and scheme != "tree-sha256-v2":
+        raise ValueError("device route evidence requires tree-sha256-v2")
     digest = hashlib.sha256(header_bytes)
     fields = [(name, getattr(route_batch, name)) for name in
               ("status_code", "feasible", "path_xy", "path_length",
@@ -263,7 +266,7 @@ def _plan_a_route_evidence_digest(route_batch, source_identity_sha256,
     present = [tensor for _, tensor in fields if tensor is not None]
     device = present[0].device
     if scheme == "tree-sha256-v2":
-        from .meco_tree_digest import tree_digest_cpu, tree_digest_hip
+        from .meco_tree_digest import tree_digest_cpu, tree_digest_hip, tree_digest_hip_bytes
         on_hip = (device.type == "cuda" and torch.version.hip is not None and
                   all(tensor.device == device for tensor in present))
         if (require_hip and not on_hip) or (
@@ -286,6 +289,10 @@ def _plan_a_route_evidence_digest(route_batch, source_identity_sha256,
             else:
                 chunks.append(tensor.detach().to(device="cpu").contiguous().reshape(-1)
                               .view(torch.uint8).numpy().tobytes())
+        if return_device_bytes:
+            if not on_hip:
+                raise RuntimeError("device route evidence requires one HIP device")
+            return tree_digest_hip_bytes(torch.cat(chunks))
         return tree_digest_hip(torch.cat(chunks)) if on_hip else tree_digest_cpu(b"".join(chunks))
     if device.type == "cuda" and all(tensor.device == device for tensor in present):
         # One transfer retains the existing interleaved headers and byte order.
@@ -2219,27 +2226,39 @@ def _ppo_update(track, model, value_head, optimizer, rows, config, bootstrap_val
     with torch.no_grad():
         current_model_parameters_sha256 = (
             _model_id(model) if track in ("C1", "C2") else None)
+        route_checks = []
+        for row in rows:
+            if row.get("support") is None:
+                continue
+            expected = row.get("route_evidence_sha256")
+            source = row.get("route_evidence_source_identity_sha256")
+            if source != source_identity_sha256:
+                raise RuntimeError("Plan A route evidence is bound to a different training source")
+            scheme = row.get("route_evidence_scheme")
+            if scheme != "tree-sha256-v2":
+                raise RuntimeError("Plan A GPU-only PPO requires v2 route evidence")
+            actual = _plan_a_route_evidence_digest(
+                row.get("route_batch"), source, row.get("route_cost_nodes"),
+                row.get("risk_cost_nodes"), scheme=scheme, require_hip=True,
+                return_device_bytes=True)
+            if isinstance(expected, str):
+                try:
+                    expected_bytes = bytes.fromhex(expected)
+                except ValueError:
+                    expected_bytes = b""
+                if len(expected) != 64 or len(expected_bytes) != 32 or expected != expected.lower():
+                    raise RuntimeError("Plan A route batch/source evidence changed before PPO replay")
+                expected = torch.tensor(list(expected_bytes), dtype=torch.uint8, device=actual.device)
+            if (not isinstance(expected, torch.Tensor) or expected.dtype != torch.uint8 or
+                    expected.shape != actual.shape or expected.device != actual.device):
+                raise RuntimeError("Plan A route batch/source evidence changed before PPO replay")
+            route_checks.append(torch.all(expected == actual))
+        if route_checks and not bool(torch.stack(route_checks).all().item()):
+            raise RuntimeError("Plan A route batch/source evidence changed before PPO replay")
         for row_index, row in enumerate(rows):
             support = row.get("support")
             if support is None:
                 continue
-            expected_route_evidence = row.get("route_evidence_sha256")
-            source_route_evidence = row.get(
-                "route_evidence_source_identity_sha256")
-            if source_route_evidence != source_identity_sha256:
-                raise RuntimeError(
-                    "Plan A route evidence is bound to a different training source")
-            route_scheme = row.get("route_evidence_scheme")
-            if route_scheme != "tree-sha256-v2":
-                raise RuntimeError("Plan A GPU-only PPO requires v2 route evidence")
-            actual_route_evidence = _plan_a_route_evidence_digest(
-                row.get("route_batch"), source_route_evidence,
-                row.get("route_cost_nodes"), row.get("risk_cost_nodes"),
-                scheme=route_scheme, require_hip=True)
-            if (not expected_route_evidence or
-                    expected_route_evidence != actual_route_evidence):
-                raise RuntimeError(
-                    "Plan A route batch/source evidence changed before PPO replay")
             expected_digest = row.get("support_digest")
             if row.get("support_digest_scheme") != "tree-sha256-v2":
                 raise RuntimeError("Plan A GPU-only PPO requires v2 support evidence")
@@ -2302,25 +2321,48 @@ def _ppo_update(track, model, value_head, optimizer, rows, config, bootstrap_val
     advantage, returns = _gae(rewards, dones, old_value, next_value,
                               config.gamma, config.gae_lambda)
     actor_row_flags = [not row.get("execution_failure", False) for row in rows]
-    actor_rows = torch.tensor(actor_row_flags, device=advantage.device, dtype=torch.bool)
     actor_advantage = torch.zeros_like(advantage)
-    if any(actor_row_flags):
-        eligible_advantage = advantage[actor_rows]
-        actor_advantage[actor_rows] = (eligible_advantage - eligible_advantage.mean()) / \
+    actor_indices = [index for index, eligible in enumerate(actor_row_flags) if eligible]
+    if actor_indices:
+        actor_rows = torch.tensor(actor_indices, device=advantage.device, dtype=torch.long)
+        eligible_advantage = advantage.index_select(0, actor_rows)
+        normalized = (eligible_advantage - eligible_advantage.mean()) / \
             eligible_advantage.std(unbiased=False).clamp_min(1e-8)
+        actor_advantage.index_copy_(0, actor_rows, normalized)
     policy_losses = []; value_losses = []; entropies = []
     count = len(rows)
+    # Mixed failures retain the original per-row Adam participation rules.
+    row_bank = None
+    if (os.environ.get("AUTODRIVE_EXPERIMENTAL_PLAN_A_ROW_BANK") == "1" and
+            track in ("A1", "A2", "A3") and all(actor_row_flags)):
+        from .experimental_plan_a_row_bank import build_ppo_row_bank
+        try:
+            row_bank = build_ppo_row_bank(rows, device=rewards.device)
+        except (TypeError, ValueError):
+            # Heterogeneous rows cannot be stacked; preserve the original path.
+            row_bank = None
     for _ in range(config.epochs):
         order = torch.randperm(count, device=rewards.device,
                                generator=permutation_generator)
-        for idx in order.tolist():
-            row = rows[idx]
+        iteration = range(count) if row_bank is not None else order.tolist()
+        for position in iteration:
+            if row_bank is None:
+                idx = position
+                row = rows[idx]
+            else:
+                idx = order[position:position + 1]
+                row, valid = row_bank.select(idx)
+                # randperm guarantees the selected index is in bounds.
+                row["planner_object"] = rows[0]["planner_object"]
+                row["execution_failure"] = False
             current = _policy_inputs_for_row(track, model, row,
                                              row["hidden_before"], config,
                                              path_integral=path_integral)
             logits = current["logits"]
             value = _value(value_head, row["globals"], current["hidden"]).reshape(())
-            value_loss = .5 * (value - returns[idx]).square()
+            selected_return = (returns[idx] if row_bank is None else
+                               returns.index_select(0, idx).reshape(()))
+            value_loss = .5 * (value - selected_return).square()
             if row.get("execution_failure", False):
                 # Do not credit a safely remasked fallback as the sampled PPO
                 # action. Keep the transition for critic learning and audit.
@@ -2338,9 +2380,13 @@ def _ppo_update(track, model, value_head, optimizer, rows, config, bootstrap_val
             action = row["action"].reshape(1)
             logprob = dist.log_prob(action).reshape(())
             entropy = dist.entropy().mean()
-            ratio = (logprob - old_logprob[idx]).exp()
-            unclipped = ratio * actor_advantage[idx]
-            clipped = ratio.clamp(1. - config.clip_coef, 1. + config.clip_coef) * actor_advantage[idx]
+            selected_logprob = (old_logprob[idx] if row_bank is None else
+                                old_logprob.index_select(0, idx).reshape(()))
+            selected_advantage = (actor_advantage[idx] if row_bank is None else
+                                  actor_advantage.index_select(0, idx).reshape(()))
+            ratio = (logprob - selected_logprob).exp()
+            unclipped = ratio * selected_advantage
+            clipped = ratio.clamp(1. - config.clip_coef, 1. + config.clip_coef) * selected_advantage
             policy_loss = -torch.minimum(unclipped, clipped)
             loss = policy_loss + config.value_coef * value_loss - config.entropy_coef * entropy
             optimizer.zero_grad(set_to_none=True)
@@ -2812,7 +2858,7 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                         prepared["route_batch"], source_sha256,
                         prepared["route_cost_nodes"],
                         prepared["risk_cost_nodes"], scheme="tree-sha256-v2",
-                        require_hip=True)
+                        require_hip=True, return_device_bytes=True)
                 row = {"episode_id": episode_generation,
                     "raster": prepared["raster"].detach(),
                     "globals": prepared["globals"].detach(),

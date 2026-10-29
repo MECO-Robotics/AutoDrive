@@ -78,8 +78,7 @@ def transactional_ppo_update(track, model, value_head, optimizer, rows, config,
             raise RuntimeError("current GPU device changed during PPO")
         if not torch.equal(torch.cuda.get_rng_state(device), gpu_before):
             raise RuntimeError("unexpected default GPU RNG consumption during PPO")
-        for valid in flags:
-            transaction.require(valid)
+        transaction.require_all(flags)
         accepted = transaction.commit_after_validation()
         if not accepted:
             raise RuntimeError("invalid Plan A path metadata; PPO update discarded")

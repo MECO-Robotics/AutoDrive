@@ -105,7 +105,8 @@ def test_ppo_rejects_legacy_support_before_optimizer(scheme, tmp_path, monkeypat
            'route_evidence_source_identity_sha256': 'a' * 64, 'support_digest': 'b' * 64}
     if scheme is not None:
         row['support_digest_scheme'] = scheme
-    monkeypatch.setattr(trainer, '_plan_a_route_evidence_digest', lambda *a, **kw: 'c' * 64)
+    monkeypatch.setattr(trainer, '_plan_a_route_evidence_digest',
+                        lambda *a, **kw: torch.full((32,), 0xcc, dtype=torch.uint8))
     with pytest.raises(RuntimeError, match='GPU-only PPO requires v2 support'):
         trainer._ppo_update('A1', None, None, None, [row], None, None, update_number=1,
                             diagnostic_output=tmp_path, source_identity_sha256='a' * 64)
