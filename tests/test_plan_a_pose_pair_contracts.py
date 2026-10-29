@@ -299,3 +299,82 @@ def test_plan_a_models_have_finite_nonnegative_penalty_on_small_cpu_fixture(trac
     assert penalty.device.type == "cpu"
     assert torch.isfinite(penalty).all()
     assert (penalty >= 0).all()
+
+@pytest.mark.parametrize('mode', ('current', 'cv', 'multi_model_v1'))
+@pytest.mark.parametrize('response_case', ('accepted', 'invalid', 'expired'))
+def test_plan_a_reused_risk_production_response_and_forecast(monkeypatch, mode, response_case):
+    import frc_defense.meco_track_training as training
+    import frc_defense.meco_plan_a_support_tree as tree
+    from frc_defense.meco_tracks import MecoInferenceResponse
+    support = replace(_pair_support(), fallback_pair_tensor=torch.tensor(0), order_digest='b' * 64)
+    graph = SimpleNamespace(node_capacity=2, lookup=torch.zeros((8, 2, 4), dtype=torch.long),
+        nx=4, ny=4, resolution_m=1.0)
+    env = SimpleNamespace(device=torch.device('cpu'), _last_obs=torch.zeros(1),
+        sim=SimpleNamespace(speed=torch.tensor([[0., 0., 0., 2.]]), field_length=4., field_width=2.),
+        planner=SimpleNamespace(length=4., width=2.), track_pos=torch.zeros((1, 6, 4, 2)),
+        opponent_valid=torch.tensor([[False, False, False, True]]),
+        opponent_pose=torch.tensor([[[0.,0.],[0.,0.],[0.,0.],[1.,1.]]]),
+        opponent_velocity=torch.tensor([[[0.,0.,0.],[0.,0.,0.],[0.,0.,0.],[.2,.1,.3]]]),
+        opponent_age=torch.tensor([[0.,0.,0.,.1]]))
+    env._candidates = lambda: (torch.zeros((1, 6, 4), dtype=torch.long), torch.zeros((1, 6, 4), dtype=torch.bool), None)
+    obs = SimpleNamespace(snapshot_id='synthetic', capture_monotonic=100., timestamp=1., schema_version=1)
+    monkeypatch.setattr(training.time, 'monotonic', lambda: 100.)
+    monkeypatch.setattr(training, 'build_observation_snapshot', lambda *a, **k: obs)
+    monkeypatch.setattr(training, 'build_plan_a_support', lambda *a, **k: support)
+    monkeypatch.setattr(training, '_snapshot_tensors', lambda *a, **k: (torch.zeros(1,6,2,4), torch.zeros(1,7)))
+    monkeypatch.setattr(training, '_tracking_reset_hidden', lambda *a: (None, True, False))
+    monkeypatch.setattr(training, '_graph_inputs', lambda *a: {})
+    from frc_defense.meco_input_provenance import input_contract_digest
+    monkeypatch.setattr(training, 'validate_serialized_inputs', lambda *a: input_contract_digest())
+    monkeypatch.setattr(training, '_path_geometry', lambda *a: None)
+    monkeypatch.setattr(tree, 'support_digest_v1_compatible', lambda *a: 'digest')
+    monkeypatch.setattr(training, 'gather_pose_behavior_logits', lambda track, raw, *a, **k: raw['utility'].reshape(-1)[:1].expand(16))
+    calls = []
+    def routes(_env, _graph, incoming, *_args):
+        count = len(calls)
+        distances = torch.tensor([1., 2.]) if count == 0 else torch.tensor([2., 4.])
+        changed = replace(incoming, valid_mask=torch.ones_like(incoming.valid_mask), fallback_pair_tensor=torch.tensor(0))
+        calls.append(distances)
+        return changed, SimpleNamespace(distance_m=distances)
+    monkeypatch.setattr(training, '_plan_a_route_support', routes)
+    risk_original = training._plan_a_prediction_risk
+    risk_calls = []
+    def risk(*args):
+        result = risk_original(*args)
+        risk_calls.append((args[2].clone(), result[0].clone()))
+        return result
+    monkeypatch.setattr(training, '_plan_a_prediction_risk', risk)
+    class Adapter:
+        checkpoint_sha256 = 'c' * 64
+        protocol_id = 'synthetic'
+        inference_counters = {}
+        def next_request_identity(self): return (1, 'g')
+        def submit_inference(self, request, inputs): return True
+        def poll_inference(self, request, handle):
+            completed = request.expires_monotonic + 1 if response_case == 'expired' else 100.
+            return MecoInferenceResponse(schema=training.MECO_INFERENCE_SCHEMA, track='A1',
+                checkpoint_sha256=request.checkpoint_sha256, protocol_id=request.protocol_id,
+                model_id=request.model_id, observation_timestamp=request.observation_timestamp,
+                capture_monotonic=request.capture_monotonic, dispatch_monotonic=request.dispatch_monotonic,
+                completed_monotonic=completed, expires_monotonic=request.expires_monotonic,
+                request_sequence=request.request_sequence, generation_id=request.generation_id,
+                snapshot_id=request.snapshot_id, candidate_mask_digest=request.candidate_mask_digest,
+                legal_pose_order_digest=request.legal_pose_order_digest if response_case != 'invalid' else 'wrong',
+                input_contract_sha256=request.input_contract_sha256,
+                outputs={'utility': torch.ones(1,8,2,4), 'penalty': torch.zeros(1,8,2,4),
+                    'behavior_logits': torch.zeros(1,5), 'hidden': torch.zeros(1,64),
+                    '__inference_valid': torch.tensor(True)})
+    monkeypatch.setattr(training, 'ProductionMecoAdapter', Adapter)
+    prepared = _prepare_plan_a_decision('A1', Adapter(), env, graph, 'episode', None,
+        route_cost_points_per_second=1., action_ticks=1, candidate_k=8, deterministic=True,
+        value_head=None, p_mode='bump', p_cost_scale=1., p_points_per_grid_edge=1., prediction_mode=mode)
+    accepted = response_case == 'accepted'
+    assert prepared['inference_provenance']['status'] == ('accepted' if accepted else 'deterministic_fallback')
+    assert len(risk_calls) == (2 if accepted else 1)
+    expected_eta = calls[-1] / 2.
+    expected_risk, expected_metadata = risk_original(env, prepared['support'], expected_eta, mode)
+    torch.testing.assert_close(prepared['risk_cost_nodes'], expected_risk, rtol=0, atol=0)
+    torch.testing.assert_close(risk_calls[-1][0], expected_eta, rtol=0, atol=0)
+    assert prepared['prediction'] == expected_metadata
+    torch.testing.assert_close(prepared['decision']['logits'][0, 0],
+        ((1. if accepted else 0.) - expected_eta[0] - expected_risk[0]) if accepted else torch.tensor(0.))
