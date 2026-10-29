@@ -1618,16 +1618,19 @@ def _prepare_plan_a_decision(track, model, env, graph, episode_id, hidden, *,
         prediction_mode=prediction_mode)
     support, route_batch = _plan_a_route_support(env, graph, support,
         observation.snapshot_id, penalty_map, config)
+    reuse_risk = os.environ.get("AUTODRIVE_EXPERIMENTAL_PLAN_A_RISK_REUSE") == "1"
+    if not reuse_risk:
+        logits, path_cost = _plan_a_logits(track, seed_decision["raw"], support,
+            graph, raster, env, config, penalty_map=penalty_map, route_batch=route_batch)
     speed = env.sim.speed[0, 3].to(dtype=support.route_cost.dtype).clamp_min(.1)
     eta = route_batch.distance_m.to(support.route_cost.dtype) / speed
     route_nodes = eta * float(route_cost_points_per_second)
     risk_nodes, prediction_metadata = _plan_a_prediction_risk(
         env, support, eta, config.prediction_mode)
-    logits, path_cost = _plan_a_logits(track, seed_decision["raw"], support,
-                                       graph, raster, env, config,
-                                       route_nodes=route_nodes, risk_nodes=risk_nodes,
-                                       penalty_map=penalty_map,
-                                       route_batch=route_batch)
+    if reuse_risk:
+        logits, path_cost = _plan_a_logits(track, seed_decision["raw"], support,
+            graph, raster, env, config, route_nodes=route_nodes, risk_nodes=risk_nodes,
+            penalty_map=penalty_map, route_batch=route_batch)
     if isinstance(model, ProductionMecoAdapter):
         response = (model.poll_inference(request, inference_handle)
                     if request is not None and inference_handle is not None else None)
@@ -1669,12 +1672,16 @@ def _prepare_plan_a_decision(track, model, env, graph, episode_id, hidden, *,
                     mode="learned", node_valid=graph.node_valid)
             support, route_batch = _plan_a_route_support(env, graph, support,
                 observation.snapshot_id, penalty_map, config)
+            if not reuse_risk:
+                logits, path_cost = _plan_a_logits(track, raw, support, graph, raster,
+                    env, config, penalty_map=penalty_map, route_batch=route_batch)
             speed = env.sim.speed[0, 3].to(dtype=support.route_cost.dtype).clamp_min(.1)
             eta = route_batch.distance_m.to(support.route_cost.dtype) / speed
             route_nodes = eta * float(route_cost_points_per_second)
             risk_nodes, prediction_metadata = _plan_a_prediction_risk(
                 env, support, eta, config.prediction_mode)
-            logits, path_cost = _plan_a_logits(track, raw, support, graph, raster,
+            if reuse_risk:
+                logits, path_cost = _plan_a_logits(track, raw, support, graph, raster,
                 env, config, route_nodes=route_nodes, risk_nodes=risk_nodes,
                 penalty_map=penalty_map, route_batch=route_batch)
         else:
@@ -2776,7 +2783,8 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                         prepared.get("planner_traversal_cost")),
                     planner_traversal_cost_scale=prepared.get(
                         "planner_traversal_cost_scale", 1.),
-                    defer_observation=config.track in ("A1", "A2", "A3"))
+                    defer_observation=(config.track in ("A1", "A2", "A3") and
+                        os.environ.get("AUTODRIVE_EXPERIMENTAL_PLAN_A_DEFER_OBSERVATION") == "1"))
                 if candidate is not None and candidate.device_batch is not None:
                     # Route/candidate evidence and its hashes are report data.
                     # Materialize them only after the selected action has been

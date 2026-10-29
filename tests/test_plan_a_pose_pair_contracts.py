@@ -306,6 +306,7 @@ def test_plan_a_reused_risk_production_response_and_forecast(monkeypatch, mode, 
     import frc_defense.meco_track_training as training
     import frc_defense.meco_plan_a_support_tree as tree
     from frc_defense.meco_tracks import MecoInferenceResponse
+    monkeypatch.setenv('AUTODRIVE_EXPERIMENTAL_PLAN_A_RISK_REUSE', '1')
     support = replace(_pair_support(), fallback_pair_tensor=torch.tensor(0), order_digest='b' * 64)
     graph = SimpleNamespace(node_capacity=2, lookup=torch.zeros((8, 2, 4), dtype=torch.long),
         nx=4, ny=4, resolution_m=1.0)
