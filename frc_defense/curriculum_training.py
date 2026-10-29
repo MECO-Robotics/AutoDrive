@@ -34,6 +34,14 @@ from .training_curriculum import (SCENARIOS, CURRICULUM_VERSION, CategoryResult,
 
 ROOT = Path(__file__).resolve().parents[1]
 CHECKPOINT_VERSION = 2
+_LEASE_LOCAL_SOURCE_ENV_KEYS = frozenset({
+    # These identify the live guard/attestation session, not training semantics.
+    # A fresh exclusive GPU lease necessarily has a new parent PID and may
+    # issue a new profile-attestation token; both are validated by the launcher
+    # and are not stable inputs to a resumable optimizer trajectory.
+    'AUTODRIVE_PROFILE_ATTESTATION',
+    'AUTODRIVE_GUARD_PARENT_PID',
+})
 
 
 class D1HandWeightedPolicy:
@@ -325,7 +333,8 @@ def source_identity():
                    and p.relative_to(ROOT).as_posix() not in generated_sources)
     identity = {str(p.relative_to(ROOT)):hashlib.sha256(p.read_bytes()).hexdigest() for p in files}
     identity['_runtime_environment'] = {k:v for k,v in sorted(os.environ.items())
-        if k.startswith(('AUTODRIVE_', 'FRC_', 'PYTORCH_'))}
+        if k.startswith(('AUTODRIVE_', 'FRC_', 'PYTORCH_'))
+        and k not in _LEASE_LOCAL_SOURCE_ENV_KEYS}
     config_path=os.environ.get('FRC_DRIVETRAIN_CONFIG')
     if config_path: identity['_drivetrain_config_sha256']=hashlib.sha256(Path(config_path).read_bytes()).hexdigest()
     identity['_native_fuel_extension'] = _native_fuel_extension_source_identity()
