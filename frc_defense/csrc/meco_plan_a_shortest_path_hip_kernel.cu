@@ -375,10 +375,11 @@ __global__ void plan_a_dijkstra_graph_kernel(const double* xy,
       heap_distance, heap_node, status);
 }
 
-// Prototype reverse adjacency. Excess indegree sends the graph to the serial path.
+// Fixed per-node prefix plus a global overflow preserves all valid incoming edges.
 __global__ void plan_a_reverse_edges(const int64_t* dst, const bool* allowed,
-    const uint8_t* errors, int64_t n, int64_t slots, int64_t* counts,
-    int64_t* incoming, int64_t* fallback) {
+    const double* costs, const uint8_t* errors, int64_t n, int64_t slots, int64_t* counts,
+    int64_t* incoming, int64_t* fallback, int64_t* overflow_edges,
+    int64_t* overflow_count) {
   const int64_t e = int64_t(blockIdx.x) * blockDim.x + threadIdx.x;
   if (e >= n * slots || !allowed[e]) return;
   if (errors[e] || dst[e] < 0 || dst[e] >= n) {
@@ -386,9 +387,13 @@ __global__ void plan_a_reverse_edges(const int64_t* dst, const bool* allowed,
     return;
   }
   const int64_t v = dst[e];
+  // A zero-cost self-edge cannot improve or overflow a finite distance.
+  if (v == e / slots && costs[e] == 0.0) return;
   const auto pos = atomicAdd((unsigned long long*)&counts[v], 1ULL);
-  if (pos >= 64) atomicExch((unsigned long long*)fallback, 1ULL);
-  else incoming[v * 64 + pos] = e;
+  if (pos >= 64) {
+    const auto extra = atomicAdd((unsigned long long*)overflow_count, 1ULL);
+    if (extra < 4096) overflow_edges[extra] = e;
+  } else incoming[v * 64 + pos] = e;
 }
 
 __global__ void plan_a_frontier_kernel(const double* xy, const double* heading,
@@ -399,6 +404,7 @@ __global__ void plan_a_frontier_kernel(const double* xy, const double* heading,
     int64_t* traversal, int64_t n, int64_t slots, int64_t heap_capacity,
     double* heap_distance, int64_t* heap_node, int64_t* status,
     const int64_t* counts, const int64_t* incoming, const int64_t* fallback,
+    const int64_t* overflow_edges, const int64_t* overflow_count,
     bool* visited, bool* frontier) {
   __shared__ double mins[1024];
   __shared__ int use_serial;
@@ -406,7 +412,8 @@ __global__ void plan_a_frontier_kernel(const double* xy, const double* heading,
   const int t = threadIdx.x;
   double min_cost = INFINITY;
   for (int64_t e = t; e < n * slots; e += blockDim.x)
-    if (allowed[e] && !errors[e]) min_cost = fmin(min_cost, costs[e]);
+    if (allowed[e] && !errors[e] && !(dst[e] == e / slots && costs[e] == 0.0))
+      min_cost = fmin(min_cost, costs[e]);
   mins[t] = min_cost;
   __syncthreads();
   for (int step = blockDim.x / 2; step; step >>= 1) {
@@ -415,7 +422,8 @@ __global__ void plan_a_frontier_kernel(const double* xy, const double* heading,
   }
   if (t == 0) {
     edge_min = mins[0];
-    use_serial = (*fallback != 0 || !isfinite(edge_min) || edge_min <= 0.0);
+    use_serial = (*fallback != 0 || *overflow_count > 4096 ||
+                  !isfinite(edge_min) || edge_min <= 0.0);
   }
   __syncthreads();
   if (use_serial) {
@@ -468,8 +476,13 @@ __global__ void plan_a_frontier_kernel(const double* xy, const double* heading,
       while (true) {
         double best_d = INFINITY;
         int64_t best_src = -1, best_slot = -1, best_edge = -1;
-        for (int64_t j = 0; j < counts[v]; ++j) {
-          const int64_t e = incoming[v * 64 + j], u = e / slots, slot = e % slots;
+        const int64_t local_count = counts[v] < 64 ? counts[v] : 64;
+        const int64_t extra_count = counts[v] > 64 ? *overflow_count : 0;
+        for (int64_t j = 0; j < local_count + extra_count; ++j) {
+          const int64_t e = (j < local_count ? incoming[v * 64 + j] :
+                             overflow_edges[j - local_count]);
+          if (j >= local_count && dst[e] != v) continue;
+          const int64_t u = e / slots, slot = e % slots;
           if (!frontier[u]) continue;
           const double d = route[u];
           const bool after = d > last_d || (d == last_d &&
@@ -686,18 +699,19 @@ void plan_a_dijkstra_frontier_launch(const double* xy, const double* heading,
     int64_t* traversal, int64_t n, int64_t slots, int64_t capacity,
     double* heap_distance, int64_t* heap_node, int64_t* status, double* costs,
     double* lengths, uint8_t* errors, int64_t* counts, int64_t* incoming,
-    int64_t* fallback, bool* visited, bool* frontier, int block_size, hipStream_t stream) {
+    int64_t* fallback, int64_t* overflow_edges, int64_t* overflow_count,
+    bool* visited, bool* frontier, int block_size, hipStream_t stream) {
   hipLaunchKernelGGL(plan_a_precompute_graph_edges, dim3((n * slots + 255) / 256),
       dim3(256), 0, stream, xy, heading, edge_dst, edge_allowed, node_valid,
       heading_values, turns, heading_count, n, slots, costs, lengths, errors);
   hipLaunchKernelGGL(plan_a_reverse_edges, dim3((n * slots + 255) / 256),
-      dim3(256), 0, stream, edge_dst, edge_allowed, errors, n, slots, counts,
-      incoming, fallback);
+      dim3(256), 0, stream, edge_dst, edge_allowed, costs, errors, n, slots, counts,
+      incoming, fallback, overflow_edges, overflow_count);
   hipLaunchKernelGGL(plan_a_frontier_kernel, dim3(1), dim3(block_size), 0, stream,
       xy, heading, edge_dst, edge_allowed, node_valid, costs, lengths, errors,
       root, start, connector, route, physical, parent, parent_length, traversal,
       n, slots, capacity, heap_distance, heap_node, status, counts, incoming,
-      fallback, visited, frontier);
+      fallback, overflow_edges, overflow_count, visited, frontier);
 }
 
 void plan_a_pose_regions_launch(const int64_t* edge_dst,

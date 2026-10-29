@@ -19,7 +19,7 @@ void plan_a_dijkstra_frontier_launch(const double*, const double*, const int64_t
     const bool*, const bool*, const double*, const double*, int64_t, const int64_t*,
     const double*, const double*, double*, double*, int64_t*, double*, int64_t*,
     int64_t, int64_t, int64_t, double*, int64_t*, int64_t*, double*, double*,
-    uint8_t*, int64_t*, int64_t*, int64_t*, bool*, bool*, int, hipStream_t);
+    uint8_t*, int64_t*, int64_t*, int64_t*, int64_t*, int64_t*, bool*, bool*, int, hipStream_t);
 void plan_a_dijkstra_batch_launch(const int64_t*, const double*, const double*,
     const bool*, const int64_t*, const double*, const double*, double*, double*,
     int64_t*, double*, int64_t*, int64_t, int64_t, int64_t, int64_t, double*,
@@ -277,6 +277,8 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
   TORCH_CHECK(n <= std::numeric_limits<int64_t>::max() / 64, "reverse adjacency overflow");
   auto counts = torch::zeros({n}, edge_dst.options());
   auto incoming = torch::empty({n, 64}, edge_dst.options());
+  auto overflow_edges = torch::empty({4096}, edge_dst.options());
+  auto overflow_count = torch::zeros({}, edge_dst.options());
   auto fallback = torch::zeros({}, edge_dst.options());
   auto visited = torch::empty({n}, edge_dst.options().dtype(at::kBool));
   auto frontier = torch::empty({n}, edge_dst.options().dtype(at::kBool));
@@ -299,7 +301,8 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
       heap_distance.data_ptr<double>(), heap_node.data_ptr<int64_t>(),
       status.data_ptr<int64_t>(), edge_cost.data_ptr<double>(), edge_length.data_ptr<double>(),
       edge_error.data_ptr<uint8_t>(), counts.data_ptr<int64_t>(), incoming.data_ptr<int64_t>(),
-      fallback.data_ptr<int64_t>(), visited.data_ptr<bool>(), frontier.data_ptr<bool>(),
+      fallback.data_ptr<int64_t>(), overflow_edges.data_ptr<int64_t>(),
+      overflow_count.data_ptr<int64_t>(), visited.data_ptr<bool>(), frontier.data_ptr<bool>(),
       block_size, c10::cuda::getCurrentCUDAStream(xy.get_device()));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   // Stable sorting preserves ascending node IDs for equal route costs.
