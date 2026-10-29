@@ -1,4 +1,5 @@
 #include <torch/extension.h>
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <limits>
@@ -15,11 +16,15 @@ void plan_a_dijkstra_graph_launch(const double*, const double*, const int64_t*,
     const int64_t*, const double*, const double*, double*, double*,
     int64_t*, double*, int64_t*, int64_t, int64_t, int64_t, double*, int64_t*,
     int64_t*, double*, double*, uint8_t*, hipStream_t);
-void plan_a_dijkstra_frontier_launch(const double*, const double*, const int64_t*,
-    const bool*, const bool*, const double*, const double*, int64_t, const int64_t*,
-    const double*, const double*, double*, double*, int64_t*, double*, int64_t*,
-    int64_t, int64_t, int64_t, double*, int64_t*, int64_t*, double*, double*,
-    uint8_t*, int64_t*, int64_t*, int64_t*, int64_t*, int64_t*, bool*, bool*, int64_t*, int64_t*, int32_t*, int, hipStream_t);
+hipError_t plan_a_csr_prepare_launch(const double*, const double*, const int64_t*,
+    const bool*, const bool*, const double*, const double*, int64_t, int64_t,
+    int64_t, double*, double*, uint8_t*, int64_t*, int64_t*, int32_t*, hipStream_t);
+hipError_t plan_a_csr_finish_launch(const double*, const double*, const int64_t*,
+    const bool*, const bool*, const int64_t*, const double*, const double*,
+    double*, double*, int64_t*, double*, int64_t*, int64_t, int64_t, int64_t,
+    double*, int64_t*, int64_t*, const double*, const double*, const uint8_t*,
+    int64_t*, const int64_t*, int64_t*, int64_t*, const int64_t*, bool*, bool*,
+    int64_t*, int64_t*, const int32_t*, int64_t, int, hipStream_t);
 void plan_a_dijkstra_batch_launch(const int64_t*, const double*, const double*,
     const bool*, const int64_t*, const double*, const double*, double*, double*,
     int64_t*, double*, int64_t*, int64_t, int64_t, int64_t, int64_t, double*,
@@ -274,11 +279,13 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
   auto edge_cost = torch::empty({n, slots}, options);
   auto edge_length = torch::empty({n, slots}, options);
   auto edge_error = torch::empty({n, slots}, edge_dst.options().dtype(at::kByte));
-  TORCH_CHECK(n <= std::numeric_limits<int64_t>::max() / 64, "reverse adjacency overflow");
   auto counts = torch::zeros({n}, edge_dst.options());
-  auto incoming = torch::empty({n, 64}, edge_dst.options());
-  auto overflow_edges = torch::empty({4096}, edge_dst.options());
-  auto overflow_count = torch::zeros({}, edge_dst.options());
+  const int64_t edge_capacity = n * slots;
+  const int64_t prefix_capacity = n <= (std::numeric_limits<int64_t>::max() - 4096) / 64
+      ? n * 64 + 4096 : edge_capacity;
+  const int64_t incoming_capacity = std::min(edge_capacity, prefix_capacity);
+  auto incoming = torch::empty({incoming_capacity}, edge_dst.options());
+  auto cursor = torch::zeros({n}, edge_dst.options());
   auto fallback = torch::zeros({}, edge_dst.options());
   auto visited = torch::empty({n}, edge_dst.options().dtype(at::kBool));
   auto frontier = torch::empty({n}, edge_dst.options().dtype(at::kBool));
@@ -292,22 +299,25 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
   int block_size = 1;
   while (block_size < 1024 && block_size * 2 <= properties.maxThreadsPerBlock)
     block_size *= 2;
-  plan_a_dijkstra_frontier_launch(xy64.data_ptr<double>(), heading64.data_ptr<double>(),
+  const auto stream = c10::cuda::getCurrentCUDAStream(xy.get_device());
+  C10_CUDA_CHECK(plan_a_csr_prepare_launch(xy64.data_ptr<double>(), heading64.data_ptr<double>(),
       edge_dst.data_ptr<int64_t>(), edge_allowed.data_ptr<bool>(),
       node_valid.data_ptr<bool>(), heading_values.data_ptr<double>(),
-      turns.data_ptr<double>(), heading_values.numel(),
-      root.data_ptr<int64_t>(), root_start_cost.data_ptr<double>(),
-      root_connector_m.data_ptr<double>(),
+      turns.data_ptr<double>(), heading_values.numel(), n, slots,
+      edge_cost.data_ptr<double>(), edge_length.data_ptr<double>(), edge_error.data_ptr<uint8_t>(),
+      counts.data_ptr<int64_t>(), fallback.data_ptr<int64_t>(), zero_sources.data_ptr<int32_t>(), stream));
+  auto offsets = at::cumsum(counts, 0);
+  C10_CUDA_CHECK(plan_a_csr_finish_launch(xy64.data_ptr<double>(), heading64.data_ptr<double>(),
+      edge_dst.data_ptr<int64_t>(), edge_allowed.data_ptr<bool>(), node_valid.data_ptr<bool>(),
+      root.data_ptr<int64_t>(), root_start_cost.data_ptr<double>(), root_connector_m.data_ptr<double>(),
       route.data_ptr<double>(), physical.data_ptr<double>(), parent.data_ptr<int64_t>(),
-      parent_length.data_ptr<double>(), traversal.data_ptr<int64_t>(), n, slots,
-      heap_capacity,
-      heap_distance.data_ptr<double>(), heap_node.data_ptr<int64_t>(),
-      status.data_ptr<int64_t>(), edge_cost.data_ptr<double>(), edge_length.data_ptr<double>(),
-      edge_error.data_ptr<uint8_t>(), counts.data_ptr<int64_t>(), incoming.data_ptr<int64_t>(),
-      fallback.data_ptr<int64_t>(), overflow_edges.data_ptr<int64_t>(),
-      overflow_count.data_ptr<int64_t>(), visited.data_ptr<bool>(), frontier.data_ptr<bool>(),
-      active.data_ptr<int64_t>(), active_nodes.data_ptr<int64_t>(), zero_sources.data_ptr<int32_t>(),
-      block_size, c10::cuda::getCurrentCUDAStream(xy.get_device()));
+      parent_length.data_ptr<double>(), traversal.data_ptr<int64_t>(), n, slots, heap_capacity,
+      heap_distance.data_ptr<double>(), heap_node.data_ptr<int64_t>(), status.data_ptr<int64_t>(),
+      edge_cost.data_ptr<double>(), edge_length.data_ptr<double>(), edge_error.data_ptr<uint8_t>(),
+      counts.data_ptr<int64_t>(), offsets.data_ptr<int64_t>(), incoming.data_ptr<int64_t>(),
+      cursor.data_ptr<int64_t>(), fallback.data_ptr<int64_t>(), visited.data_ptr<bool>(),
+      frontier.data_ptr<bool>(), active.data_ptr<int64_t>(), active_nodes.data_ptr<int64_t>(),
+      zero_sources.data_ptr<int32_t>(), incoming_capacity, block_size, stream));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   // Stable sorting preserves ascending node IDs for equal route costs.
   // Leave unreachable rows and all rows from a failed search as -1.

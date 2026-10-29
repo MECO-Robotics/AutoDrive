@@ -141,3 +141,39 @@ def test_zero_edge_guard_boundaries():
             actual = {key: result[i].cpu().tolist() for i, key in enumerate(OUTPUT_KEYS)}
             actual["traversal_order"] = [v for v in actual["traversal_order"] if v >= 0]
             assert _output_field_hashes(actual) == _output_field_hashes(cpu), name
+
+
+def test_csr_capacity_boundary():
+    import pytest
+    import torch
+    from frc_defense.meco_device_lease import lease_devices
+    from frc_defense.meco_gpu_attestation import verify_post_lease_wx9100
+    from frc_defense.meco_plan_a_shortest_path import precompute_plan_a_edge_weights, plan_a_dijkstra_cpu, plan_a_cpu_turn_table
+    from frc_defense.meco_plan_a_shortest_path_hip import extension
+    from frc_defense.meco_plan_a_hip_parity_harness import _output_field_hashes, OUTPUT_KEYS
+
+    if not torch.cuda.is_available() or torch.version.hip is None:
+        pytest.skip("HIP device required")
+    n, slots, device = 128, 97, "cuda:0"
+    xy = [[float(i), 0.] for i in range(n)]
+    dst = [[(u + k + 1) % n for k in range(slots)] for u in range(n)]
+    with lease_devices((device,), owner="plan-a-csr-capacity-regression") as lease:
+        verify_post_lease_wx9100(lease, (device,))
+        ext = extension()
+        hv, turn = plan_a_cpu_turn_table([0.], device=device)
+        for extra in (0, 1):
+            mask = [[k < 96 or (extra and u == 0 and k == 96)
+                     for k in range(slots)] for u in range(n)]
+            values = ((xy, torch.float64), ([0.] * n, torch.float64),
+                      (dst, torch.long), (mask, torch.bool), ([True] * n, torch.bool),
+                      (0, torch.long), (0., torch.float64), (0., torch.float64))
+            args = [torch.tensor(value, dtype=dtype, device=device) for value, dtype in values]
+            result = ext.dijkstra_graph(*args, hv, turn)
+            assert int(result[-1].item()) == 0, extra
+            indices, costs, lengths, allowed = precompute_plan_a_edge_weights(
+                xy, [0.] * n, dst, mask)
+            cpu = plan_a_dijkstra_cpu(indices, costs, lengths, allowed, root=0,
+                                     root_start_cost=0., root_connector_m=0.)
+            actual = {key: result[i].cpu().tolist() for i, key in enumerate(OUTPUT_KEYS)}
+            actual["traversal_order"] = [v for v in actual["traversal_order"] if v >= 0]
+            assert _output_field_hashes(actual) == _output_field_hashes(cpu), extra
