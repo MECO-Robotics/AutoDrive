@@ -1187,7 +1187,7 @@ def _apply_plan_a_path_cost(track, decision, candidate_set, route_cost, risk_cos
 
 def _plan_a_logits(track, raw, support, graph, raster, env, config, *,
                    route_nodes=None, risk_nodes=None, planner=None,
-                   penalty_map=None, route_batch=None):
+                   penalty_map=None, route_batch=None, path_integral=None):
     """Score all frozen node × behavior pairs with current U, P and behavior heads."""
     planner = (env.planner if env is not None else planner)
     logits = gather_pose_behavior_logits(track, raw, graph, raster, support,
@@ -1220,7 +1220,8 @@ def _plan_a_logits(track, raw, support, graph, raster, env, config, *,
         ix = torch.floor(support.goal_xy[:, 0] / graph.resolution_m).long().clamp(0, graph.nx - 1)
         iy = torch.floor(support.goal_xy[:, 1] / graph.resolution_m).long().clamp(0, graph.ny - 1)
         per_node = penalty_map[ix, iy]
-        graph_integral = graph_path_integral(per_node, support) / graph.resolution_m
+        integral = graph_path_integral if path_integral is None else path_integral
+        graph_integral = integral(per_node, support) / graph.resolution_m
         path_cost = graph_integral * config.p_cost_scale * config.p_points_per_grid_edge
     pair_node = support.pair_node_ids
     logits = logits - route[pair_node] - risk[pair_node] - path_cost[pair_node]
@@ -2152,7 +2153,7 @@ def _gae(rewards, dones, values, next_value, gamma, lam):
     return advantages, advantages + values
 
 
-def _policy_inputs_for_row(track, model, row, hidden, config):
+def _policy_inputs_for_row(track, model, row, hidden, config, *, path_integral=None):
     if track in ("A1", "A2", "A3") and "support" in row:
         raw = model(raster=row["raster"], globals_=row["globals"],
                     hidden=hidden, **(row["graph"] or {}))
@@ -2160,7 +2161,7 @@ def _policy_inputs_for_row(track, model, row, hidden, config):
         logits, path_cost = _plan_a_logits(track, decision["raw"], row["support"],
             row["graph_object"], row["raster"], None, config,
             route_nodes=row["route_cost_nodes"], risk_nodes=row["risk_cost_nodes"],
-            planner=row["planner_object"])
+            planner=row["planner_object"], path_integral=path_integral)
         decision["logits"] = logits[None]
         decision["path_cost"] = path_cost
         return decision
@@ -2194,7 +2195,7 @@ def _ppo_metric_summary(policy_losses, value_losses, entropies, rewards, count):
 
 def _ppo_update(track, model, value_head, optimizer, rows, config, bootstrap_value,
                 *, update_number, diagnostic_output,
-                source_identity_sha256):
+                source_identity_sha256, path_integral=None, permutation_generator=None):
     rewards = torch.stack([row["reward"] for row in rows])
     dones = torch.tensor([row["done"] for row in rows], device=rewards.device,
                          dtype=rewards.dtype)
@@ -2238,7 +2239,8 @@ def _ppo_update(track, model, value_head, optimizer, rows, config, bootstrap_val
             if row.get("execution_failure", False):
                 continue
             replay = _policy_inputs_for_row(track, model, row,
-                                            row["hidden_before"], config)
+                                            row["hidden_before"], config,
+                                            path_integral=path_integral)
             replay_logprob = categorical_from_candidate_logits(
                 replay["logits"]).log_prob(row["action"].reshape(1)).reshape(())
             if not torch.allclose(replay_logprob, row["logprob"].reshape(()),
@@ -2297,11 +2299,13 @@ def _ppo_update(track, model, value_head, optimizer, rows, config, bootstrap_val
     policy_losses = []; value_losses = []; entropies = []
     count = len(rows)
     for _ in range(config.epochs):
-        order = torch.randperm(count, device=rewards.device)
+        order = torch.randperm(count, device=rewards.device,
+                               generator=permutation_generator)
         for idx in order.tolist():
             row = rows[idx]
             current = _policy_inputs_for_row(track, model, row,
-                                             row["hidden_before"], config)
+                                             row["hidden_before"], config,
+                                             path_integral=path_integral)
             logits = current["logits"]
             value = _value(value_head, row["globals"], current["hidden"]).reshape(())
             value_loss = .5 * (value - returns[idx]).square()
@@ -2355,6 +2359,9 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                expected_source_sha256: str | None = None,
                native_extension_attestation: dict | None = None):
     config.validate()
+    optimized_plan_a = config.track in ("A1", "A2", "A3") and config.p_mode == "learned"
+    if optimized_plan_a and (not config.device.startswith("cuda") or torch.version.hip is None):
+        raise ValueError("optimized learned-P Plan A training requires a HIP GPU")
     if (abort_file is None) != (invocation_id is None):
         raise ValueError("--abort-file and --invocation-id must be supplied together")
     if invocation_id is not None and (not isinstance(invocation_id, str)
@@ -2451,7 +2458,7 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
             "qualification_protocol_sha256": warm_start_provenance.get("qualification_protocol_sha256")}
     value_head = ValueHead().to(config.device)
     optimizer = torch.optim.Adam(list(model.parameters()) + list(value_head.parameters()),
-                                 lr=config.learning_rate)
+                                 lr=config.learning_rate, capturable=optimized_plan_a)
     update = 0
     episode = 0
     history = []
@@ -2477,6 +2484,8 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
         initialization_record = payload.get("initialization") or {"mode": "random_initialization"}
         value_head.load_state_dict(payload["value_head"])
         optimizer.load_state_dict(payload["optimizer"])
+        if optimized_plan_a and any(not group.get("capturable") for group in optimizer.param_groups):
+            raise ValueError("optimized Plan A resume requires capturable Adam state")
         update, episode, history = payload["update"], payload["episode"], payload["history"]
         prior_task = payload.get("task_assignment") or {}
         if (task_assignment.get("assignment_id") is not None
@@ -2934,7 +2943,12 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                         raise RuntimeError(
                             "empty-support bootstrap discarded the rollout to preserve episode boundaries") from exc
                     bootstrap_value = torch.zeros_like(rows[-1]["value"])
-            stats = _ppo_update(config.track, model, value_head, optimizer, rows,
+            if optimized_plan_a:
+                from .experimental_plan_a_transaction import transactional_ppo_update
+                update_fn = transactional_ppo_update
+            else:
+                update_fn = _ppo_update
+            stats = update_fn(config.track, model, value_head, optimizer, rows,
                                 config, bootstrap_value, update_number=update,
                                 diagnostic_output=output,
                                 source_identity_sha256=source_sha256)
