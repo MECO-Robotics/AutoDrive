@@ -438,6 +438,10 @@ class MecoSupervisor:
         self.manifest_validation = None
         self.manifest_digest = None
         self.device_identity_attestation = None
+        self.native_extension_attestation = None
+        self.sources = None
+        self.source_hash = None
+        self.protocol_id = None
         self.manifest_configs = None
         self.evaluation_schedule = None
         self.evaluation_schedule_sha256 = None
@@ -509,35 +513,17 @@ class MecoSupervisor:
                 or self.evaluation_output != expected_evaluation_root)):
             raise ValueError("supervisor roots must match the dashboard's pinned MECO roots")
         self.devices = devices
-        from .fuel_physics_hip import prepare_native_fuel_extension
-        from .fuel_physics_hip import native_extension_identity
-        loaded_native_identities = []
-        for device in sorted(set(devices) | {evaluation_device}):
-            prepare_native_fuel_extension(device)
-            identity = native_extension_identity()
-            self.native_extension_attestation = _native_extension_attestation(identity)
-            loaded_native_identities.append(identity)
-        if any(identity != loaded_native_identities[0]
-               for identity in loaded_native_identities[1:]):
-            raise RuntimeError("indexed devices loaded different native HIP binary identities")
-        self.native_extension_attestation = _native_extension_attestation(
-            loaded_native_identities[0])
-        self.sources = source_identity()
-        self.source_hash = _validate_runtime_source_binding(self.sources,
-            loaded_native_identities[0], self.native_extension_attestation,
-            expected_source_projection=(self.manifest["source"]["identity"]
-                if self.manifest is not None else None))
         self.warm_start_paths = {}
         self.warm_start_hashes = {}
+        self.warm_start_artifacts = dict(warm_start_artifacts or {})
         self.qualification_protocol_path = (Path(qualification_protocol).expanduser().resolve()
             if qualification_protocol else None)
         self.qualification_protocol_id = None
         self.qualification_protocol_sha256 = None
         self.qualification_protocol = None
-        warm_start_artifacts = dict(warm_start_artifacts or {})
-        if warm_start_artifacts and set(warm_start_artifacts) != set(MECO_TRACKS):
+        if self.warm_start_artifacts and set(self.warm_start_artifacts) != set(MECO_TRACKS):
             raise ValueError("provide one warm-start artifact for every MECO track")
-        if warm_start_artifacts and self.qualification_protocol_path is None:
+        if self.warm_start_artifacts and self.qualification_protocol_path is None:
             raise ValueError("per-track warm starts require --qualification-protocol")
         if self.qualification_protocol_path is not None:
             from .meco_supervised import _load_protocol
@@ -546,9 +532,6 @@ class MecoSupervisor:
                 self.qualification_protocol_path)
             if self.qualification_protocol.get("master_seed") != seed:
                 raise ValueError("supervisor seed must match the frozen qualification protocol master seed")
-            assert_training_not_released_after_final_test(
-                self.qualification_protocol_path, self.qualification_protocol_id,
-                self.qualification_protocol_sha256, _hash(source_identity()))
         self.scenario = scenario
         self.category = category
         self.seed = seed
@@ -624,23 +607,12 @@ class MecoSupervisor:
             self.configs[track] = config
         self.track_dirs = {track: Path(self.configs[track].output).expanduser().resolve()
             for track in MECO_TRACKS}
-        self.source_hash = _hash(self.sources)
-        if warm_start_artifacts:
-            for track in MECO_TRACKS:
-                artifact = Path(warm_start_artifacts[track]).expanduser().resolve()
-                _validate_runtime_warm_start(track, artifact,
-                    qualification_protocol=self.qualification_protocol_path,
-                    expected_sources=self.sources,
-                    expected_prediction_mode=self.prediction_mode,
-                    native_attestation=self.native_extension_attestation)
-                self.warm_start_paths[track] = artifact
-                self.warm_start_hashes[track] = hashlib.sha256(artifact.read_bytes()).hexdigest()
         self.hyperparameters = asdict(next(iter(self.configs.values())))
         self.hyperparameters.pop("track")
         self.hyperparameters.pop("device")
         self.hyperparameters.pop("output")
         self.hyperparameters.pop("updates")
-        self.protocol_id = _hash({"source_identity_sha256": self.source_hash,
+        self._protocol_binding_fields = {
             "training_hyperparameters": self.hyperparameters,
             "scenario": scenario, "category": category, "seed": seed,
             "updates_per_track_per_cycle": chunk_updates,
@@ -664,7 +636,47 @@ class MecoSupervisor:
                 "semantics": "DAG exposure progression; not promotion qualification"},
             "phase4_training_protocol_id": (phase4_train_protocol_id()
                 if self.phase4_train_exposure else None),
-            "D0_control": "production deterministic slot-3 controller; native 20 ms cadence; outside candidate table"})
+            "D0_control": "production deterministic slot-3 controller; native 20 ms cadence; outside candidate table"}
+
+    def _initialize_runtime_binding(self):
+        """Prepare and bind the loaded native runtime while device leases are held."""
+        from .fuel_physics_hip import (native_extension_identity,
+            prepare_native_fuel_extension)
+
+        loaded_native_identities = []
+        for device in sorted(set(self.devices) | {self.evaluation_device}):
+            prepare_native_fuel_extension(device)
+            identity = native_extension_identity()
+            loaded_native_identities.append(identity)
+        if any(identity != loaded_native_identities[0]
+               for identity in loaded_native_identities[1:]):
+            raise RuntimeError("indexed devices loaded different native HIP binary identities")
+        self.native_extension_attestation = _native_extension_attestation(
+            loaded_native_identities[0])
+        self.sources = source_identity()
+        self.source_hash = _validate_runtime_source_binding(self.sources,
+            loaded_native_identities[0], self.native_extension_attestation,
+            expected_source_projection=(self.manifest["source"]["identity"]
+                if self.manifest is not None else None))
+        if self.qualification_protocol_path is not None:
+            assert_training_not_released_after_final_test(
+                self.qualification_protocol_path, self.qualification_protocol_id,
+                self.qualification_protocol_sha256, _hash(source_identity()))
+        if self.warm_start_artifacts:
+            for track in MECO_TRACKS:
+                artifact = Path(self.warm_start_artifacts[track]).expanduser().resolve()
+                _validate_runtime_warm_start(track, artifact,
+                    qualification_protocol=self.qualification_protocol_path,
+                    expected_sources=self.sources,
+                    expected_prediction_mode=self.prediction_mode,
+                    native_attestation=self.native_extension_attestation)
+                self.warm_start_paths[track] = artifact
+                self.warm_start_hashes[track] = hashlib.sha256(artifact.read_bytes()).hexdigest()
+        protocol_binding_fields = dict(self._protocol_binding_fields)
+        protocol_binding_fields["warm_start_artifact_sha256"] = dict(
+            sorted(self.warm_start_hashes.items()))
+        self.protocol_id = _hash({"source_identity_sha256": self.source_hash,
+            **protocol_binding_fields})
 
     def _lane_payload(self, track, statuses):
         status = statuses.get(track, "queued")
@@ -2034,6 +2046,7 @@ class MecoSupervisor:
                 raise RuntimeError("fresh five-track supervisor requires both pinned WX9100 leases")
             self.device_identity_attestation = device_identity_verifier(
                 device_lease, leased_devices)
+            self._initialize_runtime_binding()
             self._claim_fresh_manifest_roots()
             lock_handle = (self.output / ".supervisor.lock").open("a+")
             try:
