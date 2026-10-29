@@ -124,3 +124,15 @@ def test_boolean_metrics_are_rejected(valid_graph_report, field):
     graph[field] = [True, 1.1, 1.2] if field == "hip_elapsed_ms" else True
     with pytest.raises(ValueError, match="parity/profile incomplete"):
         verify()
+
+
+@pytest.mark.parametrize("field,value", [
+    ("compared_output_fields", None), ("compared_output_fields", {}),
+    ("compared_output_fields", [None]), ("hip_elapsed_ms", None),
+    ("hip_elapsed_ms", 1), ("hip_elapsed_ms", "1.0"),
+])
+def test_malformed_comparisons_and_timings_are_rejected(valid_graph_report, field, value):
+    report, verify = valid_graph_report
+    report["cases"][0]["hip_paths"][0][field] = value
+    with pytest.raises(ValueError, match="parity/profile incomplete"):
+        verify()

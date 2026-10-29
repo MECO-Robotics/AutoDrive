@@ -116,6 +116,11 @@ def check_report(root: Path, report_path: Path, expected_report_sha256: str,
                 raise ValueError(f"{report_path}: invalid graph was not rejected")
             continue
         comparisons = graph.get("compared_output_fields", [])
+        elapsed = graph.get("hip_elapsed_ms")
+        if (not isinstance(comparisons, list) or
+                any(not isinstance(v, dict) for v in comparisons) or
+                not isinstance(elapsed, list)):
+            raise ValueError(f"{report_path}: graph parity/profile incomplete: {case['id']}")
         if (graph.get("status") != "candidate_pass" or graph.get("exact_output_match") is not True or
             graph.get("support_digest_match") is not True or
             graph.get("route_output_field_sha256") != case.get("route_output_field_sha256") or
@@ -124,8 +129,8 @@ def check_report(root: Path, report_path: Path, expected_report_sha256: str,
             len(comparisons) != len(OUTPUT_KEYS) or
             type(graph.get("warmups")) is not int or graph["warmups"] < 1 or
             type(graph.get("repeats")) is not int or graph["repeats"] < 3 or
-            len(graph.get("hip_elapsed_ms", [])) != graph.get("repeats") or
-            any(type(v) not in (int, float) or not 0 < v < float("inf") for v in graph.get("hip_elapsed_ms", []))):
+            len(elapsed) != graph.get("repeats") or
+            any(type(v) not in (int, float) or not 0 < v < float("inf") for v in elapsed)):
             raise ValueError(f"{report_path}: graph parity/profile incomplete: {case['id']}")
     identity = check_device(report, report_path)
     return {"report": str(report_path), "report_sha256": hashlib.sha256(raw).hexdigest(),
