@@ -2226,7 +2226,8 @@ def _ppo_update(track, model, value_head, optimizer, rows, config, bootstrap_val
     with torch.no_grad():
         current_model_parameters_sha256 = (
             _model_id(model) if track in ("C1", "C2") else None)
-        route_checks = []
+        integrity_checks = []
+        route_check_count = 0
         for row in rows:
             if row.get("support") is None:
                 continue
@@ -2252,9 +2253,10 @@ def _ppo_update(track, model, value_head, optimizer, rows, config, bootstrap_val
             if (not isinstance(expected, torch.Tensor) or expected.dtype != torch.uint8 or
                     expected.shape != actual.shape or expected.device != actual.device):
                 raise RuntimeError("Plan A route batch/source evidence changed before PPO replay")
-            route_checks.append(torch.all(expected == actual))
-        if route_checks and not bool(torch.stack(route_checks).all().item()):
-            raise RuntimeError("Plan A route batch/source evidence changed before PPO replay")
+            integrity_checks.append(torch.all(expected == actual))
+            route_check_count += 1
+        replay_checks = []
+        replay_context = []
         for row_index, row in enumerate(rows):
             support = row.get("support")
             if support is None:
@@ -2262,11 +2264,31 @@ def _ppo_update(track, model, value_head, optimizer, rows, config, bootstrap_val
             expected_digest = row.get("support_digest")
             if row.get("support_digest_scheme") != "tree-sha256-v2":
                 raise RuntimeError("Plan A GPU-only PPO requires v2 support evidence")
-            from .meco_plan_a_support_tree import support_tree_digest
-            actual_digest = support_tree_digest(support, row["graph_object"])
-            if (not expected_digest or expected_digest != support.support_digest or
-                    actual_digest != expected_digest):
+            if (not isinstance(expected_digest, str) or len(expected_digest) != 64 or
+                    expected_digest != expected_digest.lower() or
+                    expected_digest != support.support_digest):
                 raise RuntimeError("Plan A frozen support changed between rollout and PPO update")
+            try:
+                expected_bytes = bytes.fromhex(expected_digest)
+            except ValueError:
+                expected_bytes = b""
+            if len(expected_bytes) != 32:
+                raise RuntimeError("Plan A frozen support changed between rollout and PPO update")
+            from .meco_plan_a_support_tree import support_tree_digest_device
+            actual_digest = support_tree_digest_device(support, row["graph_object"])
+            expected_tensor = torch.tensor(list(expected_bytes), dtype=torch.uint8,
+                                           device=actual_digest.device)
+            integrity_checks.append(torch.all(expected_tensor == actual_digest))
+        if integrity_checks:
+            integrity_results = torch.stack(integrity_checks).detach().cpu().tolist()
+            if not all(integrity_results[:route_check_count]):
+                raise RuntimeError("Plan A route batch/source evidence changed before PPO replay")
+            if not all(integrity_results[route_check_count:]):
+                raise RuntimeError("Plan A frozen support changed between rollout and PPO update")
+        for row_index, row in enumerate(rows):
+            support = row.get("support")
+            if support is None:
+                continue
             if row.get("execution_failure", False):
                 continue
             replay = _policy_inputs_for_row(track, model, row,
@@ -2274,13 +2296,22 @@ def _ppo_update(track, model, value_head, optimizer, rows, config, bootstrap_val
                                             path_integral=path_integral)
             replay_logprob = categorical_from_candidate_logits(
                 replay["logits"]).log_prob(row["action"].reshape(1)).reshape(())
-            if not torch.allclose(replay_logprob, row["logprob"].reshape(()),
-                                  atol=5e-5, rtol=5e-5):
-                raise _logprob_replay_error(
-                    "Plan A rollout log-probability does not replay under frozen support",
-                    track, model, row, replay, replay_logprob,
-                    update_number=update_number, row_index=row_index,
-                    config=config, output=diagnostic_output)
+            replay_checks.append(torch.isclose(
+                replay_logprob, row["logprob"].reshape(()), atol=5e-5, rtol=5e-5))
+            replay_context.append((row_index, row, replay_logprob))
+        if replay_checks:
+            replay_results = torch.stack(replay_checks).detach().cpu().tolist()
+            for matches, (row_index, row, replay_logprob) in zip(
+                    replay_results, replay_context):
+                if not matches:
+                    replay = _policy_inputs_for_row(track, model, row,
+                                                    row["hidden_before"], config,
+                                                    path_integral=path_integral)
+                    raise _logprob_replay_error(
+                        "Plan A rollout log-probability does not replay under frozen support",
+                        track, model, row, replay, replay_logprob,
+                        update_number=update_number, row_index=row_index,
+                        config=config, output=diagnostic_output)
         for row_index, row in enumerate(rows):
             if track not in ("C1", "C2") or row.get("candidate_set") is None:
                 continue
