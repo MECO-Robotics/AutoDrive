@@ -116,6 +116,77 @@ def _hip_adstar_extension():
     return _HIP_ADSTAR_EXTENSION
 
 
+_HIP_SHORTCUT_EXTENSION = None
+_HIP_SHORTCUT_EXTENSION_ATTEMPTED = False
+
+def _hip_shortcut_extension():
+    """Load the isolated path-reference kernel with strict FP contraction off."""
+    global _HIP_SHORTCUT_EXTENSION, _HIP_SHORTCUT_EXTENSION_ATTEMPTED
+    if os.environ.get("AUTODRIVE_DISABLE_HIP_ADSTAR") == "1":
+        return None
+    if _HIP_SHORTCUT_EXTENSION_ATTEMPTED:
+        return _HIP_SHORTCUT_EXTENSION
+    _HIP_SHORTCUT_EXTENSION_ATTEMPTED = True
+    if not (torch.cuda.is_available() and torch.version.hip):
+        return None
+    try:
+        from pathlib import Path
+        from torch.utils import cpp_extension
+        bundled_sdk = (Path(torch.__file__).parent / ".." / "_rocm_sdk_core").resolve()
+        rocm_sdk = Path(os.environ.get("ROCM_HOME") or os.environ.get("ROCM_PATH") or
+                        (bundled_sdk if bundled_sdk.exists() else cpp_extension._find_rocm_home()))
+        rocm_sdk = rocm_sdk.resolve()
+        rocm_alias = rocm_sdk
+        if " " in str(rocm_sdk):
+            rocm_alias = Path("/tmp/autodrive-rocm-sdk")
+            if rocm_alias.is_symlink() and rocm_alias.resolve() != rocm_sdk:
+                rocm_alias.unlink()
+            if not rocm_alias.exists():
+                rocm_alias.symlink_to(rocm_sdk, target_is_directory=True)
+            os.environ.setdefault("ROCM_HOME", str(rocm_alias))
+            os.environ.setdefault("HIP_CLANG_PATH", str(rocm_alias / "lib/llvm/bin"))
+        torch_lib = Path(torch.__file__).parent / "lib"
+        torch_lib_alias = torch_lib.resolve()
+        if " " in str(torch_lib_alias):
+            torch_lib_alias = Path("/tmp/autodrive-torch-lib")
+            if torch_lib_alias.is_symlink() and torch_lib_alias.resolve() != torch_lib.resolve():
+                torch_lib_alias.unlink()
+            if not torch_lib_alias.exists():
+                torch_lib_alias.symlink_to(torch_lib.resolve(), target_is_directory=True)
+        original_torch_lib = cpp_extension.TORCH_LIB_PATH
+        original_rocm_home = cpp_extension.ROCM_HOME
+        original_hip_home = cpp_extension.HIP_HOME
+        cpp_extension.TORCH_LIB_PATH = str(torch_lib_alias)
+        cpp_extension.ROCM_HOME = str(rocm_alias)
+        cpp_extension.HIP_HOME = str(rocm_alias / "hip")
+        source_dir = Path(__file__).parent / "csrc"
+        device_lib = next((p for p in (
+            rocm_alias / "lib/llvm/amdgcn/bitcode",
+            rocm_alias / "amdgcn/bitcode",
+        ) if p.is_dir()), None)
+        cuda_flags = ["-O3", "-ffp-contract=off"]
+        if device_lib is not None:
+            cuda_flags.append(f"--rocm-device-lib-path={device_lib}")
+        try:
+            _HIP_SHORTCUT_EXTENSION = cpp_extension.load(
+                name="autodrive_tensor_adstar_shortcut_experimental_hip",
+                sources=[str(source_dir / "tensor_adstar_shortcut_hip.cpp"),
+                         str(source_dir / "tensor_adstar_shortcut_kernel.cu")],
+                with_cuda=True,
+                extra_cflags=["-O3"],
+                extra_cuda_cflags=cuda_flags,
+                verbose=False,
+            )
+        finally:
+            cpp_extension.TORCH_LIB_PATH = original_torch_lib
+            cpp_extension.ROCM_HOME = original_rocm_home
+            cpp_extension.HIP_HOME = original_hip_home
+    except Exception as exc:
+        warnings.warn(f"Experimental AD* shortcut HIP kernel unavailable; using Torch reference: {exc}",
+                      RuntimeWarning, stacklevel=2)
+    return _HIP_SHORTCUT_EXTENSION
+
+
 def _hip_path_reference_extension():
     """Load the isolated path-reference kernel with strict FP contraction off."""
     global _HIP_PATH_REFERENCE_EXTENSION, _HIP_PATH_REFERENCE_EXTENSION_ATTEMPTED
@@ -657,54 +728,72 @@ class TensorADStar:
         """
         batch_n, point_count = path.shape[:2]
         source=path.clone()
-        simplified=torch.zeros_like(path)
-        simplified[:,0]=source[:,0]
-        simple_length=(lengths>0).long()
-        anchor_index=torch.zeros_like(lengths)
         sample_count=max(2,int(math.ceil(math.hypot(self.length,self.width)/
                                          (self.resolution*.5)))+1)
-        sample_index=torch.arange(1,sample_count+1,device=path.device)
-        sample_index_float=sample_index[None].to(path.dtype)
         blocked_flat=blocked.reshape(batch_n,-1)
+        shortcut_enabled = (path.is_cuda and
+                            os.environ.get("AUTODRIVE_EXPERIMENTAL_HIP_SHORTCUT") == "1")
+        if shortcut_enabled and path.dtype != torch.float32:
+            raise RuntimeError("experimental HIP shortcut requires float32 paths")
+        shortcut_extension = _hip_shortcut_extension() if shortcut_enabled else None
+        if shortcut_enabled and shortcut_extension is None:
+            raise RuntimeError("experimental HIP shortcut is unavailable")
+        if shortcut_extension is not None:
+            simplified=torch.empty_like(path)
+            simple_length=torch.empty_like(lengths)
+            shortcut_extension.shortcut(source.contiguous(), lengths.contiguous(),
+                blocked.contiguous(), simplified, simple_length, sample_count, self.resolution)
+            _assert_device_condition(path.device, (simple_length >= 0).all(),
+                                     "experimental HIP shortcut received invalid path or length")
+            has_route=lengths>1
+            simple_last=simplified.gather(
+                1,(simple_length-1).clamp_min(0)[:,None,None].expand(-1,1,2)).squeeze(1)
+        else:
+            simplified=torch.zeros_like(path)
+            simplified[:,0]=source[:,0]
+            simple_length=(lengths>0).long()
+            anchor_index=torch.zeros_like(lengths)
+            sample_index=torch.arange(1,sample_count+1,device=path.device)
+            sample_index_float=sample_index[None].to(path.dtype)
 
-        # PathPlanner appends a grid point only when the last retained point
-        # cannot see the following point through free cells.
-        for index in range(1,point_count-1):
-            active=index < (lengths-1)
-            anchor=source.gather(1,anchor_index[:,None,None].expand(-1,1,2)).squeeze(1)
-            endpoint=source[:,index+1]
-            delta=endpoint-anchor
-            steps=torch.ceil(torch.maximum(delta[:,0].abs(),delta[:,1].abs())/
-                             (self.resolution*.5)).long().clamp(1,sample_count)
-            fraction=sample_index_float/steps[:,None].to(path.dtype)
-            points=anchor[:,None,:]+delta[:,None,:]*fraction[:,:,None]
-            ix=(points[...,0]/self.resolution).floor().long().clamp(0,self.nx-1)
-            iy=(points[...,1]/self.resolution).floor().long().clamp(0,self.ny-1)
-            cell=blocked_flat.gather(1,(ix*self.ny+iy).reshape(batch_n,-1)).view(
-                batch_n,sample_count)
-            line_blocked=(cell & (sample_index[None]<=steps[:,None])).any(-1)
-            append=active & line_blocked
-            slot=simple_length.clamp_max(point_count-1)
-            simplified.scatter_(1,slot[:,None,None].expand(-1,1,2),
-                                torch.where(append[:,None],source[:,index],
-                                            torch.zeros_like(source[:,index]))[:,None])
-            anchor_index=torch.where(append,torch.full_like(anchor_index,index),anchor_index)
-            simple_length+=append.long()
+            # PathPlanner appends a grid point only when the last retained point
+            # cannot see the following point through free cells.
+            for index in range(1,point_count-1):
+                active=index < (lengths-1)
+                anchor=source.gather(1,anchor_index[:,None,None].expand(-1,1,2)).squeeze(1)
+                endpoint=source[:,index+1]
+                delta=endpoint-anchor
+                steps=torch.ceil(torch.maximum(delta[:,0].abs(),delta[:,1].abs())/
+                                 (self.resolution*.5)).long().clamp(1,sample_count)
+                fraction=sample_index_float/steps[:,None].to(path.dtype)
+                points=anchor[:,None,:]+delta[:,None,:]*fraction[:,:,None]
+                ix=(points[...,0]/self.resolution).floor().long().clamp(0,self.nx-1)
+                iy=(points[...,1]/self.resolution).floor().long().clamp(0,self.ny-1)
+                cell=blocked_flat.gather(1,(ix*self.ny+iy).reshape(batch_n,-1)).view(
+                    batch_n,sample_count)
+                line_blocked=(cell & (sample_index[None]<=steps[:,None])).any(-1)
+                append=active & line_blocked
+                slot=simple_length.clamp_max(point_count-1)
+                simplified.scatter_(1,slot[:,None,None].expand(-1,1,2),
+                                    torch.where(append[:,None],source[:,index],
+                                                torch.zeros_like(source[:,index]))[:,None])
+                anchor_index=torch.where(append,torch.full_like(anchor_index,index),anchor_index)
+                simple_length+=append.long()
 
-        final_index=(lengths-1).clamp_min(0)
-        final=source.gather(1,final_index[:,None,None].expand(-1,1,2)).squeeze(1)
-        has_route=lengths>1
-        simplified.scatter_(1,simple_length.clamp_max(point_count-1)[:,None,None].expand(-1,1,2),
-                            torch.where(has_route[:,None],final,torch.zeros_like(final))[:,None])
-        simple_length+=has_route.long()
-        simple_length=torch.where(lengths>0,simple_length,lengths)
-        simple_length=torch.where(has_route,simple_length,torch.ones_like(simple_length))
-        simple_length=simple_length.clamp_max(point_count)
-        simple_last=simplified.gather(
-            1,(simple_length-1).clamp_min(0)[:,None,None].expand(-1,1,2)).squeeze(1)
-        pad_index=torch.arange(point_count,device=path.device)[None]
-        simplified=torch.where((pad_index>=simple_length[:,None])[:,:,None],
-                               simple_last[:,None,:],simplified)
+            final_index=(lengths-1).clamp_min(0)
+            final=source.gather(1,final_index[:,None,None].expand(-1,1,2)).squeeze(1)
+            has_route=lengths>1
+            simplified.scatter_(1,simple_length.clamp_max(point_count-1)[:,None,None].expand(-1,1,2),
+                                torch.where(has_route[:,None],final,torch.zeros_like(final))[:,None])
+            simple_length+=has_route.long()
+            simple_length=torch.where(lengths>0,simple_length,lengths)
+            simple_length=torch.where(has_route,simple_length,torch.ones_like(simple_length))
+            simple_length=simple_length.clamp_max(point_count)
+            simple_last=simplified.gather(
+                1,(simple_length-1).clamp_min(0)[:,None,None].expand(-1,1,2)).squeeze(1)
+            pad_index=torch.arange(point_count,device=path.device)[None]
+            simplified=torch.where((pad_index>=simple_length[:,None])[:,:,None],
+                                   simple_last[:,None,:],simplified)
 
         # PathPlanner converts each corner to an incoming/outgoing pose pair.
         pose_count=torch.where(has_route,2*simple_length-2,torch.ones_like(simple_length))

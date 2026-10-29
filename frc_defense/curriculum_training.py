@@ -318,6 +318,7 @@ def source_identity():
         'frc_defense/csrc/tensor_collision_multi_hip_kernel.hip',
         'frc_defense/csrc/meco_tree_digest_hip_kernel.hip',
         'frc_defense/csrc/meco_tree_digest_hip_hip.cpp',
+        'frc_defense/csrc/tensor_adstar_shortcut_hip_hip.cpp',
     }
     files = sorted(p for p in (ROOT/'frc_defense').rglob('*')
                    if p.suffix in ('.py','.cpp','.cu','.h','.cuh','.json','.hip','.hpp','.cc')
@@ -339,6 +340,7 @@ def source_tree_identity():
         'frc_defense/csrc/tensor_collision_multi_hip_kernel.hip',
         'frc_defense/csrc/meco_tree_digest_hip_kernel.hip',
         'frc_defense/csrc/meco_tree_digest_hip_hip.cpp',
+        'frc_defense/csrc/tensor_adstar_shortcut_hip_hip.cpp',
     }
     files = sorted(path for path in (ROOT/'frc_defense').rglob('*')
         if path.suffix in ('.py', '.cpp', '.cu', '.h', '.cuh', '.json',
