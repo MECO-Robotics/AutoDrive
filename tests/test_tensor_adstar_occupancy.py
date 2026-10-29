@@ -235,6 +235,39 @@ def test_experimental_hip_full_path_clearance_matches_torch(monkeypatch):
     assert torch.equal(actual, expected)
 
 
+def test_footprint_path_clear_active_rows_cpu():
+    planner = _planner(3, torch.device("cpu"), avoid_bumps=True, with_circles=False)
+    path = torch.tensor([[[2., 2.], [3., 2.], [4., 2.]]] * 3)
+    heading = torch.zeros(3)
+    size = torch.ones(3)
+    active = torch.tensor([True, False, True])
+    for boxes in (planner._boxes, torch.empty((0, 4))):
+        planner._boxes = boxes
+        for points in (2, 3):
+            expected = planner._footprint_path_clear(path[:, :points], heading, size, size)
+            actual = planner._footprint_path_clear(path[:, :points], heading, size, size, active=active)
+            assert torch.equal(actual, expected & active)
+
+
+def test_experimental_hip_full_path_clearance_active_rows(monkeypatch):
+    if not torch.cuda.is_available() or not torch.version.hip:
+        pytest.skip("full-path clearance requires a HIP device")
+    device = torch.device("cuda:0")
+    planner = _planner(8, device, avoid_bumps=True, with_circles=False)
+    planner._boxes = torch.tensor([[5., 3., .2, .2]], device=device)
+    path = torch.tensor([[[2., 2.], [3., 2.], [4., 2.]]] * 8, device=device)
+    path[1, :, :] = torch.tensor([5., 3.], device=device)
+    heading = torch.zeros(8, device=device)
+    size = torch.ones(8, device=device)
+    monkeypatch.setenv("AUTODRIVE_EXPERIMENTAL_HIP_PATH_CLEAR", "1")
+    expected = planner._footprint_path_clear(path, heading, size, size)
+    for active in (torch.zeros(8, device=device, dtype=torch.bool),
+                   torch.ones(8, device=device, dtype=torch.bool),
+                   torch.tensor([True, True, False, True, False, False, True, False], device=device)):
+        actual = planner._footprint_path_clear(path, heading, size, size, active=active)
+        assert torch.equal(actual, expected & active)
+
+
 def test_experimental_hip_full_path_clearance_box_contacts(monkeypatch):
     if not torch.cuda.is_available() or not torch.version.hip:
         pytest.skip("full-path clearance requires a HIP device")

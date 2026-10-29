@@ -781,10 +781,11 @@ void invalidate_tracks_launch(const float* pose, const float* length,
 
 __global__ void footprint_path_clear_kernel(const float* path,
     const float* heading, const float* length, const float* width,
-    const float* boxes, bool* clear, int rows, int points, int box_count,
+    const float* boxes, const bool* active, bool* clear, int rows, int points, int box_count,
     float field_length, float field_width, float clearance) {
   const int row = blockIdx.x * blockDim.x + threadIdx.x;
   if (row >= rows) return;
+  if (active && !active[row]) { clear[row] = false; return; }
   const float len = length[row], wid = width[row];
   const float outer = .5f * sqrtf(len * len + wid * wid);
   const float inner = .5f * fminf(len, wid);
@@ -847,12 +848,12 @@ __global__ void footprint_path_clear_kernel(const float* path,
 }
 
 void footprint_path_clear_launch(const float* path, const float* heading,
-    const float* length, const float* width, const float* boxes, bool* clear,
+    const float* length, const float* width, const float* boxes, const bool* active, bool* clear,
     int rows, int points, int box_count, float field_length,
     float field_width, float clearance, hipStream_t stream) {
   constexpr int threads = 128;
   const int blocks = (rows + threads - 1) / threads;
   footprint_path_clear_kernel<<<dim3(blocks), dim3(threads), 0, stream>>>(
-      path, heading, length, width, boxes, clear, rows, points, box_count,
+      path, heading, length, width, boxes, active, clear, rows, points, box_count,
       field_length, field_width, clearance);
 }

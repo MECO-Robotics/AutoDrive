@@ -195,7 +195,7 @@ def invalidate_tracks_in_robot_contact(sim, track_pos, track_mask, track_age,
 
 
 def footprint_path_clear(path, heading, length, width, boxes,
-                         field_length, field_width, clearance):
+                         field_length, field_width, clearance, *, active=None):
     """Check batched chassis paths against field boxes with one HIP kernel."""
     if (not ENABLED or path.device.type != "cuda" or not torch.version.hip or
             path.dtype != torch.float32 or path.ndim != 3 or
@@ -205,10 +205,15 @@ def footprint_path_clear(path, heading, length, width, boxes,
         tensor.contiguous() for tensor in (path, heading, length, width, boxes))
     if any(t.device != path.device for t in (heading, length, width, boxes)):
         return None
+    if active is None:
+        active = torch.empty(0, device=path.device, dtype=torch.bool)
+    elif active.shape != (path.shape[0],) or active.device != path.device or active.dtype != torch.bool:
+        raise ValueError("active must be a boolean tensor aligned with path rows")
+    active = active.contiguous()
     ext = _extension()
     if ext is None or not hasattr(ext, "footprint_path_clear"):
         return None
-    return ext.footprint_path_clear(path, heading, length, width, boxes,
+    return ext.footprint_path_clear(path, heading, length, width, boxes, active,
                                     float(field_length), float(field_width),
                                     float(clearance))
 

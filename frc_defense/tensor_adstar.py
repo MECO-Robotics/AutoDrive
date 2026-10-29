@@ -571,8 +571,16 @@ class TensorADStar:
                  (self._boxes[:, 2:] >= 0).all())
         return rows, boxes
 
-    def _footprint_path_clear(self, path, heading, length, width):
-        """Check the supplied robot footprint against field boxes."""
+    def _footprint_path_clear(self, path, heading, length, width, active=None):
+        """Check the supplied robot footprint against field boxes.
+
+        Inactive rows return false; their geometry need not be checked.
+        """
+        if active is not None and (active.shape != (path.shape[0],) or
+                active.device != path.device or active.dtype != torch.bool):
+            raise ValueError("active must be a boolean tensor aligned with path rows")
+        def mask(result):
+            return result if active is None else result & active
         if path.shape[0] == 0:
             return torch.empty(0, device=path.device, dtype=torch.bool)
         if not self._boxes.numel():
@@ -581,8 +589,8 @@ class TensorADStar:
                     os.environ.get("AUTODRIVE_EXPERIMENTAL_HIP_PATH_CLEAR") == "1"):
                 valid_rows, valid_boxes = self._full_path_geometry_valid(
                     path, heading, length, width)
-                return valid_rows & valid_boxes
-            return torch.ones(path.shape[0],device=path.device,dtype=torch.bool)
+                return mask(valid_rows & valid_boxes)
+            return mask(torch.ones(path.shape[0],device=path.device,dtype=torch.bool))
         if (self.device.type == "cuda" and torch.version.hip and
                 (path.shape[1] == 2 or
                  (path.shape[1] > 2 and
@@ -600,22 +608,22 @@ class TensorADStar:
                 safe_boxes = torch.where(valid_boxes, self._boxes, 0.)
                 fused = tensor_collision_multi_hip.footprint_path_clear(
                     safe_path, safe_heading, safe_length, safe_width, safe_boxes,
-                    self.length, self.width, self.footprint_clearance)
+                    self.length, self.width, self.footprint_clearance, active=active)
                 if fused is not None:
-                    return fused & valid_rows & valid_boxes
+                    return mask(fused & valid_rows & valid_boxes)
             else:
                 fused = tensor_collision_multi_hip.footprint_path_clear(
                     path, heading, length, width, self._boxes,
                     self.length, self.width, self.footprint_clearance)
                 if fused is not None:
-                    return fused
+                    return mask(fused)
             if path.shape[1] != 2:
                 raise RuntimeError("experimental HIP path clearance is unavailable")
-        return torch.cat([
+        return mask(torch.cat([
             self._footprint_path_clear_chunk(path[offset:offset+8],
                 heading[offset:offset+8],length[offset:offset+8],width[offset:offset+8],
                 self.footprint_clearance)
-            for offset in range(0,path.shape[0],8)])
+            for offset in range(0,path.shape[0],8)]))
 
     def _footprint_path_clear_chunk(self,path,heading,length,width,clearance):
         """Bound peak temporary memory while checking batched path segments."""
@@ -975,7 +983,9 @@ class TensorADStar:
             cells=blocked_flat.gather(1,(ix*self.ny+iy).reshape(batch_n,-1)).view(
                 batch_n,point_count)
             clear=curve_clear & ~cells.any(-1)
-            clear &= self._footprint_path_clear(sampled,heading,length,width)
+            clear &= self._footprint_path_clear(sampled,heading,length,width,
+                active=(has_route & ~resolved & clear if os.environ.get(
+                    "AUTODRIVE_EXPERIMENTAL_HIP_CLEAR_ACTIVE") == "1" else None))
             use=has_route & ~resolved & clear
             selected_curve=torch.where(use[:,None,None],sampled,selected_curve)
             resolved |= use

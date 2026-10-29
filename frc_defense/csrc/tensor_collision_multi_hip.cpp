@@ -22,11 +22,11 @@ void avoidance_launch(const float*, const float*, const float*, const float*,
 void invalidate_tracks_launch(const float*, const float*, const float*,
     const float*, bool*, float*, const bool*, int, int, float, hipStream_t);
 void footprint_path_clear_launch(const float*, const float*, const float*,
-    const float*, const float*, bool*, int, int, int, float, float, float,
+    const float*, const float*, const bool*, bool*, int, int, int, float, float, float,
     hipStream_t);
 
 torch::Tensor footprint_path_clear(torch::Tensor path, torch::Tensor heading,
-    torch::Tensor length, torch::Tensor width, torch::Tensor boxes,
+    torch::Tensor length, torch::Tensor width, torch::Tensor boxes, torch::Tensor active,
     double field_length, double field_width, double clearance) {
   const auto rows = path.size(0);
   const auto points = path.size(1);
@@ -37,15 +37,17 @@ torch::Tensor footprint_path_clear(torch::Tensor path, torch::Tensor heading,
               heading.scalar_type() == at::kFloat &&
               length.scalar_type() == at::kFloat && width.scalar_type() == at::kFloat &&
               boxes.dim() == 2 && boxes.size(1) == 4 && boxes.size(0) > 0 &&
-              boxes.scalar_type() == at::kFloat && field_length > 0. &&
+              boxes.scalar_type() == at::kFloat && active.scalar_type() == at::kBool &&
+              active.dim() == 1 && (active.numel() == 0 || active.numel() == rows) && field_length > 0. &&
               field_width > 0. && clearance >= 0.,
               "footprint path tensor shape or dtype mismatch");
-  for (const auto& t : {path, heading, length, width, boxes})
+  for (const auto& t : {path, heading, length, width, boxes, active})
     TORCH_CHECK(t.is_cuda() && t.is_contiguous() && t.device() == path.device(),
                 "footprint path tensors must be contiguous on one HIP device");
   auto clear = torch::empty({rows}, path.options().dtype(at::kBool));
   footprint_path_clear_launch(path.data_ptr<float>(), heading.data_ptr<float>(),
       length.data_ptr<float>(), width.data_ptr<float>(), boxes.data_ptr<float>(),
+      active.numel() ? active.data_ptr<bool>() : nullptr,
       clear.data_ptr<bool>(), static_cast<int>(rows), static_cast<int>(points),
       static_cast<int>(boxes.size(0)), static_cast<float>(field_length),
       static_cast<float>(field_width), static_cast<float>(clearance),
