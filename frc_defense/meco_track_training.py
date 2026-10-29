@@ -2484,8 +2484,9 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
         initialization_record = payload.get("initialization") or {"mode": "random_initialization"}
         value_head.load_state_dict(payload["value_head"])
         optimizer.load_state_dict(payload["optimizer"])
-        if optimized_plan_a and any(not group.get("capturable") for group in optimizer.param_groups):
-            raise ValueError("optimized Plan A resume requires capturable Adam state")
+        if optimized_plan_a:
+            from .experimental_shadow_adam import migrate_adam_to_capturable
+            migrate_adam_to_capturable(optimizer)
         update, episode, history = payload["update"], payload["episode"], payload["history"]
         prior_task = payload.get("task_assignment") or {}
         if (task_assignment.get("assignment_id") is not None

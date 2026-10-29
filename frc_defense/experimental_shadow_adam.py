@@ -9,6 +9,46 @@ import copy
 import torch
 
 
+def migrate_adam_to_capturable(optimizer):
+    """Preserve loaded Adam state while moving scalar steps to each GPU.
+
+    Validate all groups before changing any of them. Checkpoint source and
+    configuration compatibility are checked by the caller before migration.
+    """
+    if type(optimizer) is not torch.optim.Adam:
+        raise TypeError("requires torch.optim.Adam")
+    steps = []
+    for group in optimizer.param_groups:
+        if group.get("differentiable") or group.get("fused"):
+            raise ValueError("differentiable and fused Adam are unsupported")
+        for param in group["params"]:
+            if param.device.type != "cuda":
+                raise ValueError("capturable Plan A Adam requires GPU parameters")
+            state = optimizer.state.get(param, {})
+            if not state:
+                continue
+            expected = {"step", "exp_avg", "exp_avg_sq"}
+            if group.get("amsgrad"):
+                expected.add("max_exp_avg_sq")
+            if set(state) != expected:
+                raise ValueError("Adam checkpoint state is incomplete")
+            step = state["step"]
+            if (not isinstance(step, torch.Tensor) or step.numel() != 1 or
+                    not step.is_floating_point() or not bool(torch.isfinite(step).all()) or
+                    bool((step < 0).any())):
+                raise ValueError("Adam checkpoint step is invalid")
+            for key in expected - {"step"}:
+                value = state[key]
+                if (not isinstance(value, torch.Tensor) or value.device != param.device or
+                        value.shape != param.shape or value.dtype != param.dtype):
+                    raise ValueError("Adam checkpoint moment metadata is invalid")
+            steps.append((state, step.to(device=param.device, copy=True)))
+    for state, step in steps:
+        state["step"] = step
+    for group in optimizer.param_groups:
+        group["capturable"] = True
+
+
 class ShadowAdam:
     """Run Adam speculatively and publish state only after validation."""
 
