@@ -48,7 +48,8 @@ def test_hip_shortcut_grid_boundaries_and_invalid_rows():
         assert torch.equal(expected,actual) and torch.equal(elens,lens)
         lengths[0]=5;lengths[1]=-1;path[2,0,0]=float("nan")
         path[3,0,0]=3.4e38;path[3,2,0]=-3.4e38
+        path[4,0,0]=1e30
         ext.shortcut(path,lengths,grid,actual,lens,samples,res)
-        assert lens[:4].cpu().tolist()==[-1,-1,-1,-1]
+        assert lens[:5].cpu().tolist()==[-1,-1,-1,-1,-1]
         with pytest.raises(RuntimeError,match="invalid shortcut parameters"):
             ext.shortcut(path,lengths,grid[:,:0].contiguous(),actual,lens,samples,res)

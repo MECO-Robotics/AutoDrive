@@ -24,8 +24,8 @@ void shortcut(torch::Tensor path, torch::Tensor lengths, torch::Tensor blocked,
   TORCH_CHECK(simple_lengths.device() == path.device() && simple_lengths.sizes() == lengths.sizes() &&
               simple_lengths.scalar_type() == at::kLong && simple_lengths.is_contiguous(), "invalid output lengths");
   TORCH_CHECK(path.size(0) > 0 && path.size(1) >= 2 && blocked.size(1) > 0 && blocked.size(2) > 0 &&
-              path.size(0) <= std::numeric_limits<int>::max() &&
-              path.size(1) <= std::numeric_limits<int>::max() &&
+              path.size(0) <= std::numeric_limits<int>::max() - 63 &&
+              path.size(1) <= std::numeric_limits<int>::max() / 2 &&
               blocked.size(1) <= 16777216 &&
               blocked.size(2) <= 16777216 &&
               sample_count >= 2 && sample_count <= 16777216 &&

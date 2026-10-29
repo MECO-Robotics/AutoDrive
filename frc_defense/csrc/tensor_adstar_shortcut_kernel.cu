@@ -27,7 +27,7 @@ __global__ void shortcut_kernel(const float* path, const int64_t* lengths,
       float ax = src[anchor*2], ay = src[anchor*2+1];
       float dx = src[(i+1)*2] - ax, dy = src[(i+1)*2+1] - ay;
       float raw_steps = ceilf(fmaxf(fabsf(dx), fabsf(dy)) * inv_half_resolution);
-      if (!isfinite(dx) || !isfinite(dy) || !isfinite(raw_steps)) {
+      if (!isfinite(dx) || !isfinite(dy) || !isfinite(raw_steps) || raw_steps >= 0x1p63f) {
         out_length[b] = -1;
         return;
       }
@@ -36,13 +36,13 @@ __global__ void shortcut_kernel(const float* path, const int64_t* lengths,
         float fraction = static_cast<float>(j) / static_cast<float>(steps);
         float x = ax + dx * fraction, y = ay + dy * fraction;
         float scaled_x = x * inv_resolution, scaled_y = y * inv_resolution;
-        if (!isfinite(scaled_x) || !isfinite(scaled_y)) {
+        if (!isfinite(scaled_x) || !isfinite(scaled_y) || fabsf(scaled_x) >= 0x1p63f || fabsf(scaled_y) >= 0x1p63f) {
           out_length[b] = -1;
           return;
         }
         int ix = static_cast<int>(floorf(fminf(fmaxf(scaled_x, 0.0f), static_cast<float>(nx-1))));
         int iy = static_cast<int>(floorf(fminf(fmaxf(scaled_y, 0.0f), static_cast<float>(ny-1))));
-        if (grid[ix*ny+iy]) { hit = true; break; }
+        if (grid[static_cast<int64_t>(ix)*ny+iy]) { hit = true; break; }
       }
     }
     int slot = min(len, points-1);
