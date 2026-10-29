@@ -90,3 +90,54 @@ def test_frontier_random_graphs():
             actual = {key: result[i].cpu().tolist() for i, key in enumerate(OUTPUT_KEYS)}
             actual["traversal_order"] = [v for v in actual["traversal_order"] if v >= 0]
             assert _output_field_hashes(actual) == _output_field_hashes(cpu), case
+
+
+def test_zero_edge_guard_boundaries():
+    import pytest
+    import torch
+    from frc_defense.meco_device_lease import lease_devices
+    from frc_defense.meco_gpu_attestation import verify_post_lease_wx9100
+    from frc_defense.meco_plan_a_shortest_path import precompute_plan_a_edge_weights, plan_a_dijkstra_cpu, plan_a_cpu_turn_table
+    from frc_defense.meco_plan_a_shortest_path_hip import extension
+    from frc_defense.meco_plan_a_hip_parity_harness import _output_field_hashes, OUTPUT_KEYS
+
+    if not torch.cuda.is_available() or torch.version.hip is None:
+        pytest.skip("HIP device required")
+    cases = []
+    for count in (64, 65):
+        n = count + 2
+        links = [[] for _ in range(n)]
+        links[0] = [1]
+        for i in range(1, count + 1):
+            links[i] = [i + 1]
+        cases.append((f"zero_{count}", links))
+    for count in (128, 129):
+        n = count + 2
+        links = [[] for _ in range(n)]
+        links[0] = list(range(1, count + 1))
+        links[count] = [count + 1]
+        cases.append((f"rounds_{count}", links))
+    device = "cuda:0"
+    with lease_devices((device,), owner="plan-a-zero-guard-regression") as lease:
+        verify_post_lease_wx9100(lease, (device,))
+        ext = extension()
+        hv, turn = plan_a_cpu_turn_table([0.], device=device)
+        for name, links in cases:
+            n = len(links)
+            xy = [[0., 0.]] + [[1., 0.]] * (n - 1)
+            width = max(1, max(map(len, links)))
+            dst = [row + [0] * (width - len(row)) for row in links]
+            mask = [[True] * len(row) + [False] * (width - len(row)) for row in links]
+            values = ((xy, torch.float64), ([0.] * n, torch.float64),
+                      (dst, torch.long), (mask, torch.bool), ([True] * n, torch.bool),
+                      (0, torch.long), (0., torch.float64), (0., torch.float64))
+            args = [torch.tensor(value, dtype=dtype, device=device) for value, dtype in values]
+            result = ext.dijkstra_graph(*args, hv, turn)
+            assert int(result[-1].item()) == 0, name
+            indices, costs, lengths, allowed = precompute_plan_a_edge_weights(
+                xy, [0.] * n, dst, mask)
+            cpu = plan_a_dijkstra_cpu(indices, costs, lengths, allowed, root=0,
+                                     root_start_cost=0., root_connector_m=0.)
+            actual = {key: result[i].cpu().tolist() for i, key in enumerate(OUTPUT_KEYS)}
+            actual["traversal_order"] = [v for v in actual["traversal_order"] if v >= 0]
+            assert _output_field_hashes(actual) == _output_field_hashes(cpu), name
