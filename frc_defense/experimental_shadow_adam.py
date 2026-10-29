@@ -9,6 +9,27 @@ import copy
 import torch
 
 
+def _validate_adam_state(param, state, group):
+    expected = {"step", "exp_avg", "exp_avg_sq"}
+    if group.get("amsgrad"):
+        expected.add("max_exp_avg_sq")
+    if set(state) != expected:
+        raise ValueError("Adam checkpoint state is incomplete")
+    step = state["step"]
+    if (not isinstance(step, torch.Tensor) or step.numel() != 1 or
+            step.dtype not in (torch.float32, torch.float64) or
+            not bool(torch.isfinite(step).all()) or bool((step < 0).any()) or
+            not bool((step == torch.floor(step)).all())):
+        raise ValueError("Adam checkpoint step is invalid")
+    for key in expected - {"step"}:
+        value = state[key]
+        if (not isinstance(value, torch.Tensor) or value.device != param.device or
+                value.shape != param.shape or value.dtype != param.dtype or
+                not bool(torch.isfinite(value).all())):
+            raise ValueError("Adam checkpoint moment metadata or values are invalid")
+    return step
+
+
 def migrate_adam_to_capturable(optimizer):
     """Preserve loaded Adam state while moving scalar steps to each GPU.
 
@@ -27,21 +48,7 @@ def migrate_adam_to_capturable(optimizer):
             state = optimizer.state.get(param, {})
             if not state:
                 continue
-            expected = {"step", "exp_avg", "exp_avg_sq"}
-            if group.get("amsgrad"):
-                expected.add("max_exp_avg_sq")
-            if set(state) != expected:
-                raise ValueError("Adam checkpoint state is incomplete")
-            step = state["step"]
-            if (not isinstance(step, torch.Tensor) or step.numel() != 1 or
-                    not step.is_floating_point() or not bool(torch.isfinite(step).all()) or
-                    bool((step < 0).any())):
-                raise ValueError("Adam checkpoint step is invalid")
-            for key in expected - {"step"}:
-                value = state[key]
-                if (not isinstance(value, torch.Tensor) or value.device != param.device or
-                        value.shape != param.shape or value.dtype != param.dtype):
-                    raise ValueError("Adam checkpoint moment metadata is invalid")
+            step = _validate_adam_state(param, state, group)
             steps.append((state, step.to(device=param.device, copy=True)))
     for state, step in steps:
         state["step"] = step
