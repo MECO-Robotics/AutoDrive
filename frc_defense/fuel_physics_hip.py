@@ -125,7 +125,8 @@ def _manifest_identity(binary, fingerprint, build_inputs):
         identity = _binary_identity(binary)
     except (OSError, ValueError, RuntimeError):
         return None
-    if (manifest.get("schema") != 1 or manifest.get("binary_path") != str(binary) or
+    if (not isinstance(manifest, dict) or
+            manifest.get("schema") != 1 or manifest.get("binary_path") != str(binary) or
             manifest.get("build_fingerprint") != fingerprint or
             manifest.get("build_inputs") != build_inputs or
             manifest.get("binary_sha256") != identity["sha256"]):

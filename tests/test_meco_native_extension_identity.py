@@ -32,3 +32,12 @@ def test_native_extension_identity_is_none_until_loaded(monkeypatch):
     monkeypatch.setattr(fuel_physics_hip, "_EXT", None)
     assert _native_fuel_extension_identity() is None
     _verify_native_fuel_extension(None)
+
+
+@pytest.mark.parametrize("manifest", ["null", "[]", "1", '"manifest"', "true"])
+def test_native_extension_rejects_non_mapping_manifest(tmp_path, manifest):
+    binary = tmp_path / "autodrive_fuel_physics_hip.so"
+    binary.write_bytes(b"native-binary")
+    fuel_physics_hip._manifest_path(binary).write_text(manifest)
+
+    assert fuel_physics_hip._manifest_identity(binary, "fingerprint", {}) is None
