@@ -19,7 +19,7 @@ void plan_a_dijkstra_frontier_launch(const double*, const double*, const int64_t
     const bool*, const bool*, const double*, const double*, int64_t, const int64_t*,
     const double*, const double*, double*, double*, int64_t*, double*, int64_t*,
     int64_t, int64_t, int64_t, double*, int64_t*, int64_t*, double*, double*,
-    uint8_t*, int64_t*, int64_t*, int64_t*, int64_t*, int64_t*, bool*, bool*, int, hipStream_t);
+    uint8_t*, int64_t*, int64_t*, int64_t*, int64_t*, int64_t*, bool*, bool*, int64_t*, int64_t*, int, hipStream_t);
 void plan_a_dijkstra_batch_launch(const int64_t*, const double*, const double*,
     const bool*, const int64_t*, const double*, const double*, double*, double*,
     int64_t*, double*, int64_t*, int64_t, int64_t, int64_t, int64_t, double*,
@@ -282,6 +282,8 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
   auto fallback = torch::zeros({}, edge_dst.options());
   auto visited = torch::empty({n}, edge_dst.options().dtype(at::kBool));
   auto frontier = torch::empty({n}, edge_dst.options().dtype(at::kBool));
+  auto active = torch::zeros({n}, edge_dst.options());
+  auto active_nodes = torch::empty({n}, edge_dst.options());
   hipDeviceProp_t properties;
   TORCH_CHECK(hipGetDeviceProperties(&properties, xy.get_device()) == hipSuccess,
       "failed to query HIP block limit");
@@ -303,6 +305,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
       edge_error.data_ptr<uint8_t>(), counts.data_ptr<int64_t>(), incoming.data_ptr<int64_t>(),
       fallback.data_ptr<int64_t>(), overflow_edges.data_ptr<int64_t>(),
       overflow_count.data_ptr<int64_t>(), visited.data_ptr<bool>(), frontier.data_ptr<bool>(),
+      active.data_ptr<int64_t>(), active_nodes.data_ptr<int64_t>(),
       block_size, c10::cuda::getCurrentCUDAStream(xy.get_device()));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   // Stable sorting preserves ascending node IDs for equal route costs.

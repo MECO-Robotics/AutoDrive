@@ -405,10 +405,11 @@ __global__ void plan_a_frontier_kernel(const double* xy, const double* heading,
     double* heap_distance, int64_t* heap_node, int64_t* status,
     const int64_t* counts, const int64_t* incoming, const int64_t* fallback,
     const int64_t* overflow_edges, const int64_t* overflow_count,
-    bool* visited, bool* frontier) {
+    bool* visited, bool* frontier, int64_t* active, int64_t* active_nodes) {
   __shared__ double mins[1024];
   __shared__ int use_serial;
   __shared__ double edge_min;
+  __shared__ unsigned long long active_count;
   const int t = threadIdx.x;
   double min_cost = INFINITY;
   for (int64_t e = t; e < n * slots; e += blockDim.x)
@@ -446,6 +447,7 @@ __global__ void plan_a_frontier_kernel(const double* xy, const double* heading,
   }
   __syncthreads();
   if (*status != 0) return;
+  unsigned long long epoch = 0;
   while (true) {
     double local = INFINITY;
     for (int64_t i = t; i < n; i += blockDim.x)
@@ -470,7 +472,26 @@ __global__ void plan_a_frontier_kernel(const double* xy, const double* heading,
       if (frontier[i]) visited[i] = true;
     }
     __syncthreads();
-    for (int64_t v = t; v < n; v += blockDim.x) {
+    // Each destination enters the queue once per frontier round.
+    ++epoch;
+    if (t == 0) active_count = 0;
+    __syncthreads();
+    for (int64_t u = t; u < n; u += blockDim.x) {
+      if (!frontier[u]) continue;
+      for (int64_t slot = 0; slot < slots; ++slot) {
+        const int64_t e = u * slots + slot;
+        if (allowed[e]) {
+          const int64_t v = dst[e];
+          if (atomicExch((unsigned long long*)&active[v], epoch) != epoch) {
+            const auto pos = atomicAdd(&active_count, 1ULL);
+            active_nodes[pos] = v;
+          }
+        }
+      }
+    }
+    __syncthreads();
+    for (int64_t i = t; i < active_count; i += blockDim.x) {
+      const int64_t v = active_nodes[i];
       double last_d = -INFINITY;
       int64_t last_src = -1, last_slot = -1;
       while (true) {
@@ -700,7 +721,8 @@ void plan_a_dijkstra_frontier_launch(const double* xy, const double* heading,
     double* heap_distance, int64_t* heap_node, int64_t* status, double* costs,
     double* lengths, uint8_t* errors, int64_t* counts, int64_t* incoming,
     int64_t* fallback, int64_t* overflow_edges, int64_t* overflow_count,
-    bool* visited, bool* frontier, int block_size, hipStream_t stream) {
+    bool* visited, bool* frontier, int64_t* active, int64_t* active_nodes,
+    int block_size, hipStream_t stream) {
   hipLaunchKernelGGL(plan_a_precompute_graph_edges, dim3((n * slots + 255) / 256),
       dim3(256), 0, stream, xy, heading, edge_dst, edge_allowed, node_valid,
       heading_values, turns, heading_count, n, slots, costs, lengths, errors);
@@ -711,7 +733,7 @@ void plan_a_dijkstra_frontier_launch(const double* xy, const double* heading,
       xy, heading, edge_dst, edge_allowed, node_valid, costs, lengths, errors,
       root, start, connector, route, physical, parent, parent_length, traversal,
       n, slots, capacity, heap_distance, heap_node, status, counts, incoming,
-      fallback, overflow_edges, overflow_count, visited, frontier);
+      fallback, overflow_edges, overflow_count, visited, frontier, active, active_nodes);
 }
 
 void plan_a_pose_regions_launch(const int64_t* edge_dst,
