@@ -779,7 +779,7 @@ void invalidate_tracks_launch(const float* pose, const float* length,
       fuel_radius);
 }
 
-__global__ void footprint_path_clear_kernel(const float* path,
+__global__ void footprint_path_clear_serial_kernel(const float* path,
     const float* heading, const float* length, const float* width,
     const float* boxes, const bool* active, bool* clear, int rows, int points, int box_count,
     float field_length, float field_width, float clearance) {
@@ -847,12 +847,97 @@ __global__ void footprint_path_clear_kernel(const float* path,
   clear[row] = !(path_hit || wall_hit);
 }
 
+
+__global__ void footprint_path_clear_kernel(const float* path,
+    const float* heading, const float* length, const float* width,
+    const float* boxes, const bool* active, bool* clear, int rows, int points, int box_count,
+    float field_length, float field_width, float clearance) {
+  const int row = blockIdx.x;
+  const int lane = threadIdx.x;
+  if (row >= rows) return;
+  if (active && !active[row]) { if (lane == 0) clear[row] = false; return; }
+  const float len = length[row], wid = width[row];
+  const float outer = .5f * sqrtf(len * len + wid * wid);
+  const float inner = .5f * fminf(len, wid);
+  const float half_len = .5f * len, half_wid = .5f * wid;
+  bool path_hit = false, wall_hit = false;
+  for (int segment = lane; segment < points - 1 && !path_hit && !wall_hit;
+       segment += blockDim.x) {
+    const int a = (row * points + segment) * 2;
+    const int b = a + 2;
+    const float x0 = path[a], y0 = path[a + 1];
+    const float dx = path[b] - x0, dy = path[b + 1] - y0;
+    const float h0 = heading[row];
+    const float dh = 0.f;
+    const float steps_f = ceilf(fmaxf(sqrtf(dx * dx + dy * dy),
+                                      fabsf(dh) * outer) / .02f);
+    const int steps = max(1, min(64, static_cast<int>(steps_f)));
+    const float segment_clearance = segment == 0 ? 0.f : clearance;
+    for (int sample = 1; sample <= steps && !path_hit && !wall_hit; ++sample) {
+      const float fraction = static_cast<float>(sample) / steps;
+      const float x = x0 + dx * fraction, y = y0 + dy * fraction;
+      const float angle = h0 + dh * fraction;
+      const float c = cosf(angle), s = sinf(angle);
+      const float ex = .5f * (len * fabsf(c) + wid * fabsf(s));
+      const float ey = .5f * (len * fabsf(s) + wid * fabsf(c));
+      wall_hit = x < ex || x > field_length - ex ||
+                 y < ey || y > field_width - ey;
+      for (int box = 0; box < box_count && !path_hit && !wall_hit; ++box) {
+        const float* q = boxes + box * 4;
+        const float bx = x - q[0], by = y - q[1];
+        const float hx = q[2], hy = q[3];
+        const float nx = fmaxf(fabsf(bx) - hx, 0.f);
+        const float ny = fmaxf(fabsf(by) - hy, 0.f);
+        const float separation = sqrtf(nx * nx + ny * ny);
+        const float box_outer = sqrtf(hx * hx + hy * hy);
+        const bool broad_clear = separation > outer + box_outer + segment_clearance;
+        const bool definite_hit = separation <= inner + segment_clearance;
+        bool hit = definite_hit;
+        if (!broad_clear && !definite_hit) {
+          const float signed_axis[4] = {
+              bx, by, bx * c + by * s, -bx * s + by * c};
+          const float robot_radius[4] = {
+              fabsf(c) * half_len + fabsf(s) * half_wid,
+              fabsf(s) * half_len + fabsf(c) * half_wid,
+              half_len, half_wid};
+          const float box_radius[4] = {
+              hx, hy, hx * fabsf(c) + hy * fabsf(s),
+              hx * fabsf(s) + hy * fabsf(c)};
+          float minimum = 1.e30f;
+          #pragma unroll
+          for (int axis = 0; axis < 4; ++axis)
+            minimum = fminf(minimum, robot_radius[axis] + box_radius[axis] -
+                                     fabsf(signed_axis[axis]) + segment_clearance);
+          hit = minimum >= 0.f;
+        }
+        path_hit = hit;
+      }
+    }
+  }
+  __shared__ int hits[64];
+  hits[lane] = path_hit || wall_hit;
+  __syncthreads();
+  for (int stride = 32; stride > 0; stride >>= 1) {
+    if (lane < stride) hits[lane] |= hits[lane + stride];
+    __syncthreads();
+  }
+  if (lane == 0) clear[row] = !hits[0];
+}
+
 void footprint_path_clear_launch(const float* path, const float* heading,
     const float* length, const float* width, const float* boxes, const bool* active, bool* clear,
     int rows, int points, int box_count, float field_length,
     float field_width, float clearance, hipStream_t stream) {
-  constexpr int threads = 128;
-  const int blocks = (rows + threads - 1) / threads;
+  if (points <= 2) {
+    constexpr int threads = 128;
+    const int blocks = (rows + threads - 1) / threads;
+    footprint_path_clear_serial_kernel<<<dim3(blocks), dim3(threads), 0, stream>>>(
+        path, heading, length, width, boxes, active, clear, rows, points, box_count,
+        field_length, field_width, clearance);
+    return;
+  }
+  constexpr int threads = 64;
+  const int blocks = rows;
   footprint_path_clear_kernel<<<dim3(blocks), dim3(threads), 0, stream>>>(
       path, heading, length, width, boxes, active, clear, rows, points, box_count,
       field_length, field_width, clearance);
