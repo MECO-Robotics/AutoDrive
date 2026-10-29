@@ -199,3 +199,105 @@ def test_routes_around_tower_uprights_validate_the_rotated_chassis(start, goal):
     route = planner.last_path
     assert (route[0] - route[0, :1]).norm(dim=-1).max() > .2
     assert planner._footprint_path_clear(route, heading, size, size).all()
+
+
+def test_experimental_hip_full_path_clearance_matches_torch(monkeypatch):
+    if not torch.cuda.is_available() or not torch.version.hip:
+        pytest.skip("full-path clearance requires a HIP device")
+    device = torch.device("cuda:0")
+    n, points = 96, 73
+    planner = _planner(n, device, avoid_bumps=True, with_circles=False)
+    generator = torch.Generator(device=device).manual_seed(61720261028)
+    heading = torch.rand((n,), generator=generator, device=device) * (2 * math.pi) - math.pi
+    length = torch.rand((n,), generator=generator, device=device) * .4 + .6
+    width = torch.rand((n,), generator=generator, device=device) * .4 + .6
+    start = torch.rand((n, 1, 2), generator=generator, device=device)
+    start = start * torch.tensor([planner.length, planner.width], device=device)
+    offsets = (torch.rand((n, points, 2), generator=generator, device=device) - .5) * .12
+    path = start + offsets.cumsum(dim=1)
+    # Exercise exact and adjacent floating-point wall contacts, the first
+    # segment's zero clearance, padded segments, and long segments.
+    heading[:6] = 0.
+    length[:6] = width[:6] = 1.
+    half = torch.tensor(.5, device=device)
+    wall = torch.stack((torch.nextafter(half, torch.tensor(0., device=device)),
+                        half, torch.nextafter(half, torch.tensor(1., device=device))))
+    path[:3, :, 0] = wall[:, None]
+    path[:3, :, 1] = 3.
+    path[3] = torch.tensor([2., 2.], device=device)
+    path[4, :, 0] = torch.linspace(1., planner.length - 1., points, device=device)
+    path[4, :, 1] = 1.
+    path[5, :, :] = path[5, :1, :].clone()
+    monkeypatch.setenv("AUTODRIVE_EXPERIMENTAL_HIP_PATH_CLEAR", "0")
+    expected = planner._footprint_path_clear(path, heading, length, width)
+    monkeypatch.setenv("AUTODRIVE_EXPERIMENTAL_HIP_PATH_CLEAR", "1")
+    actual = planner._footprint_path_clear(path, heading, length, width)
+    assert torch.equal(actual, expected)
+
+
+def test_experimental_hip_full_path_clearance_box_contacts(monkeypatch):
+    if not torch.cuda.is_available() or not torch.version.hip:
+        pytest.skip("full-path clearance requires a HIP device")
+    device = torch.device("cuda:0")
+    planner = _planner(6, device, avoid_bumps=True, with_circles=False)
+    planner._boxes = torch.tensor([[5., 3., .2, .2]], device=device)
+    planner.footprint_clearance = .04
+    zero, inf = torch.tensor(0., device=device), torch.tensor(float("inf"), device=device)
+    tangent = torch.tensor(5.74, device=device)
+    positions = torch.stack((torch.nextafter(tangent, zero), tangent,
+                             torch.nextafter(tangent, inf)))
+    path = torch.empty((6, 73, 2), device=device)
+    path[:3, :, 0] = positions[:, None]
+    path[:3, :, 1] = 3.
+    path[3:] = path[:3].clone()
+    path[3:, 0, 0] = 6.5
+    heading = torch.zeros(6, device=device)
+    size = torch.ones(6, device=device)
+    monkeypatch.setenv("AUTODRIVE_EXPERIMENTAL_HIP_PATH_CLEAR", "0")
+    expected = planner._footprint_path_clear(path, heading, size, size)
+    monkeypatch.setenv("AUTODRIVE_EXPERIMENTAL_HIP_PATH_CLEAR", "1")
+    actual = planner._footprint_path_clear(path, heading, size, size)
+    assert torch.equal(actual, expected)
+
+
+def test_experimental_hip_full_path_clearance_fails_closed_on_invalid_geometry(monkeypatch):
+    if not torch.cuda.is_available() or not torch.version.hip:
+        pytest.skip("full-path clearance requires a HIP device")
+    device = torch.device("cuda:0")
+    planner = _planner(5, device, avoid_bumps=True, with_circles=False)
+    planner._boxes = torch.tensor([[8., 6., .2, .2]], device=device)
+    path = torch.full((5, 73, 2), 3., device=device)
+    heading = torch.zeros(5, device=device)
+    length = torch.ones(5, device=device)
+    width = torch.ones(5, device=device)
+    path[0, 3, 0] = float("nan")
+    heading[1] = float("inf")
+    path[2, 1, 0] = 1.e10
+    length[3] = -1.
+    monkeypatch.setenv("AUTODRIVE_EXPERIMENTAL_HIP_PATH_CLEAR", "1")
+    actual = planner._footprint_path_clear(path, heading, length, width)
+    assert actual.tolist() == [False, False, False, False, True]
+    planner._boxes[0, 0] = float("nan")
+    assert not planner._footprint_path_clear(path, heading, length, width).any()
+    planner._boxes = torch.empty((0, 4), device=device)
+    assert planner._footprint_path_clear(path, heading, length, width).tolist() == [False, False, False, False, True]
+    planner.length = float("inf")
+    with pytest.raises(ValueError, match="invalid field geometry"):
+        planner._footprint_path_clear(path, heading, length, width)
+
+
+def test_experimental_hip_full_path_shortcut_invalid_start_is_empty(monkeypatch):
+    if not torch.cuda.is_available() or not torch.version.hip:
+        pytest.skip("full-path clearance requires a HIP device")
+    device = torch.device("cuda:0")
+    planner = _planner(1, device, avoid_bumps=True, with_circles=False)
+    path = torch.ones((1, 73, 2), device=device) * 3.
+    path[0, 0, 0] = float("nan")
+    lengths = torch.tensor([2], device=device)
+    heading, size = torch.zeros(1, device=device), torch.ones(1, device=device)
+    blocked = torch.zeros((1, planner.nx, planner.ny), device=device, dtype=torch.bool)
+    monkeypatch.setenv("AUTODRIVE_EXPERIMENTAL_HIP_PATH_CLEAR", "1")
+    monkeypatch.setenv("AUTODRIVE_EXPERIMENTAL_HIP_SHORTCUT", "1")
+    result, count = planner._shortcut_path(path, lengths, blocked, heading, size, size)
+    assert count.tolist() == [0]
+    assert torch.isfinite(result).all()

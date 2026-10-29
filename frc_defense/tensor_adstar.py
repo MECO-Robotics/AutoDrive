@@ -555,20 +555,62 @@ class TensorADStar:
         return torch.stack((self.xx.reshape(-1)[nearest_cell],
                             self.yy.reshape(-1)[nearest_cell]),-1)
 
+    def _full_path_geometry_valid(self, path, heading, length, width):
+        if (not all(math.isfinite(value) and 0. < value <= 1.e6
+                    for value in (self.length, self.width)) or
+                not math.isfinite(self.footprint_clearance) or
+                not 0. <= self.footprint_clearance <= 1.e6):
+            raise ValueError("experimental HIP path clearance has invalid field geometry")
+        rows = (torch.isfinite(path).all(dim=(1, 2)) &
+                (path.abs() <= 1.e6).all(dim=(1, 2)) &
+                torch.isfinite(heading) & (heading.abs() <= 1.e6) &
+                torch.isfinite(length) & (length > 0) & (length <= 1.e6) &
+                torch.isfinite(width) & (width > 0) & (width <= 1.e6))
+        boxes = (torch.isfinite(self._boxes).all() &
+                 (self._boxes.abs() <= 1.e6).all() &
+                 (self._boxes[:, 2:] >= 0).all())
+        return rows, boxes
+
     def _footprint_path_clear(self, path, heading, length, width):
         """Check the supplied robot footprint against field boxes."""
         if path.shape[0] == 0:
             return torch.empty(0, device=path.device, dtype=torch.bool)
         if not self._boxes.numel():
+            if (self.device.type == "cuda" and torch.version.hip and
+                    path.shape[1] > 2 and
+                    os.environ.get("AUTODRIVE_EXPERIMENTAL_HIP_PATH_CLEAR") == "1"):
+                valid_rows, valid_boxes = self._full_path_geometry_valid(
+                    path, heading, length, width)
+                return valid_rows & valid_boxes
             return torch.ones(path.shape[0],device=path.device,dtype=torch.bool)
         if (self.device.type == "cuda" and torch.version.hip and
-                path.shape[1] == 2):
+                (path.shape[1] == 2 or
+                 (path.shape[1] > 2 and
+                  os.environ.get("AUTODRIVE_EXPERIMENTAL_HIP_PATH_CLEAR") == "1"))):
             from . import tensor_collision_multi_hip
-            fused = tensor_collision_multi_hip.footprint_path_clear(
-                path, heading, length, width, self._boxes,
-                self.length, self.width, self.footprint_clearance)
-            if fused is not None:
-                return fused
+            if path.shape[1] != 2:
+                # Invalid geometry is never clear. Sanitize it before launch so
+                # float-to-int sample conversion stays bounded on the device.
+                valid_rows, valid_boxes = self._full_path_geometry_valid(
+                    path, heading, length, width)
+                safe_path = torch.where(valid_rows[:, None, None], path, 0.)
+                safe_heading = torch.where(valid_rows, heading, 0.)
+                safe_length = torch.where(valid_rows, length, 1.)
+                safe_width = torch.where(valid_rows, width, 1.)
+                safe_boxes = torch.where(valid_boxes, self._boxes, 0.)
+                fused = tensor_collision_multi_hip.footprint_path_clear(
+                    safe_path, safe_heading, safe_length, safe_width, safe_boxes,
+                    self.length, self.width, self.footprint_clearance)
+                if fused is not None:
+                    return fused & valid_rows & valid_boxes
+            else:
+                fused = tensor_collision_multi_hip.footprint_path_clear(
+                    path, heading, length, width, self._boxes,
+                    self.length, self.width, self.footprint_clearance)
+                if fused is not None:
+                    return fused
+            if path.shape[1] != 2:
+                raise RuntimeError("experimental HIP path clearance is unavailable")
         return torch.cat([
             self._footprint_path_clear_chunk(path[offset:offset+8],
                 heading[offset:offset+8],length[offset:offset+8],width[offset:offset+8],
@@ -728,6 +770,16 @@ class TensorADStar:
         """
         batch_n, point_count = path.shape[:2]
         source=path.clone()
+        if (path.is_cuda and torch.version.hip and path.shape[1] > 2 and
+                os.environ.get("AUTODRIVE_EXPERIMENTAL_HIP_PATH_CLEAR") == "1"):
+            valid_rows, valid_boxes = self._full_path_geometry_valid(
+                source, heading, length, width)
+            valid_rows = valid_rows & valid_boxes
+            source = torch.where(valid_rows[:, None, None], source, 0.)
+            lengths.copy_(torch.where(valid_rows, lengths, 0))
+            heading = torch.where(valid_rows, heading, 0.)
+            length = torch.where(valid_rows, length, 1.)
+            width = torch.where(valid_rows, width, 1.)
         sample_count=max(2,int(math.ceil(math.hypot(self.length,self.width)/
                                          (self.resolution*.5)))+1)
         blocked_flat=blocked.reshape(batch_n,-1)
