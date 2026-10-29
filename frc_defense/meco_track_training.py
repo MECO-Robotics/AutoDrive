@@ -2043,8 +2043,8 @@ def _run_macro_step(env, action_index: int, action_ticks: int, goal_xy=None, *,
             }
         executed_tick_mask.append(macro_active[0].clone())
         _, _, done, truncated, _ = env.step(actions, active_mask=macro_active, capture_info=False,
-            capture_observation=(not defer_observation or
-                bool(getattr(env, "phase4_observation_delay_ticks", 0))),
+            **({"capture_observation": False} if defer_observation and not
+                bool(getattr(env, "phase4_observation_delay_ticks", 0)) else {}),
             planner_goal_override=goal_xy,
             planner_goal_override_action=action_index if goal_xy is not None else None,
             planner_goal_override_target_track=goal_track_index,
