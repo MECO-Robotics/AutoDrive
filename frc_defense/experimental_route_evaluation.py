@@ -388,6 +388,7 @@ def _path_weighted_cost_device(scratch, path_xy: torch.Tensor,
                               torch.zeros_like(interval))
     result = per_segment.sum(dim=-1)
     if return_bump:
+        del terrain, values, interval, per_segment
         bump_values = bump_terrain.reshape(-1)[flat_index]
         bump_interval = (bump_values * (end - begin)).sum(dim=-1)
         bump_segments = torch.where(segment_valid, bump_interval * segment_steps,
