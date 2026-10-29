@@ -2008,7 +2008,8 @@ def _run_macro_step(env, action_index: int, action_ticks: int, goal_xy=None, *,
                     direct_pursuit_capture=None,
                     trench_interception_capture=None,
                     contact_progress_goal_id=None,
-                    return_execution_flags: bool = False):
+                    return_execution_flags: bool = False,
+                    defer_observation: bool = False):
     actions = torch.zeros((env.n, 6), device=env.device, dtype=torch.long)
     actions[0, 3] = int(action_index)
     total = torch.zeros((), device=env.device)
@@ -2035,6 +2036,8 @@ def _run_macro_step(env, action_index: int, action_ticks: int, goal_xy=None, *,
             }
         executed_tick_mask.append(macro_active[0].clone())
         _, _, done, truncated, _ = env.step(actions, active_mask=macro_active, capture_info=False,
+            capture_observation=(not defer_observation or
+                bool(getattr(env, "phase4_observation_delay_ticks", 0))),
             planner_goal_override=goal_xy,
             planner_goal_override_action=action_index if goal_xy is not None else None,
             planner_goal_override_target_track=goal_track_index,
@@ -2772,7 +2775,8 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                         None if prepared.get("fallback_used", False) else
                         prepared.get("planner_traversal_cost")),
                     planner_traversal_cost_scale=prepared.get(
-                        "planner_traversal_cost_scale", 1.))
+                        "planner_traversal_cost_scale", 1.),
+                    defer_observation=config.track in ("A1", "A2", "A3"))
                 if candidate is not None and candidate.device_batch is not None:
                     # Route/candidate evidence and its hashes are report data.
                     # Materialize them only after the selected action has been

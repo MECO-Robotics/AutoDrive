@@ -72,3 +72,30 @@ def test_macro_preemption_and_alignment_are_accumulated(action, event_field, fin
     assert result[3] == [action, action]
     assert result[6] is finish_near
     assert result[7] is not finish_near
+
+@pytest.mark.parametrize("delay,expected", [(0, False), (2, True)])
+def test_macro_observation_deferred_only_without_delay(delay, expected):
+    class Env:
+        n = 1
+        device = torch.device("cpu")
+        phase4_observation_delay_ticks = delay
+
+        def __init__(self):
+            self.last_actions = torch.zeros((1, 6), dtype=torch.long)
+            self.sim = SimpleNamespace(pose=torch.zeros((1, 6, 3)))
+            self.curriculum_metrics = SimpleNamespace(reward_delta=lambda: torch.ones(1))
+            self.captures = []
+            self.observations = 0
+
+        def step(self, actions, **kwargs):
+            self.captures.append(kwargs["capture_observation"])
+            return None, None, torch.tensor([False]), torch.tensor([False]), None
+
+        def observe(self):
+            self.observations += 1
+            return torch.zeros(1)
+
+    env = Env()
+    _run_macro_step(env, 7, 3, defer_observation=True)
+    assert env.captures == [expected] * 3
+    assert env.observations == 1
