@@ -36,6 +36,17 @@ def normalized_graph_source(source: bytes) -> bytes:
     return source.replace(OPEN, CLOSED)
 
 
+def checked_paths(row: dict, report_path: Path) -> dict:
+    paths = row.get("hip_paths")
+    if not isinstance(paths, list) or any(not isinstance(item, dict) or
+            not isinstance(item.get("path"), str) or not item["path"] for item in paths):
+        raise ValueError(f"{report_path}: malformed HIP path records")
+    by_path = {item["path"]: item for item in paths}
+    if len(by_path) != len(paths):
+        raise ValueError(f"{report_path}: duplicate HIP path records")
+    return by_path
+
+
 def check_report(root: Path, report_path: Path, expected_report_sha256: str,
                  current: dict[str, str], graph_source: bytes) -> dict:
     raw = report_path.read_bytes()
@@ -93,7 +104,7 @@ def check_report(root: Path, report_path: Path, expected_report_sha256: str,
         row = by_id[case["id"]]
         if row.get("graph_sha256") != case.get("graph_sha256") or row.get("tensor_sha256") != case.get("tensor_sha256"):
             raise ValueError(f"{report_path}: case input changed: {case['id']}")
-        paths = {r.get("path"): r for r in row.get("hip_paths", [])}
+        paths = checked_paths(row, report_path)
         is_graph = case.get("route_kind") == "geometry"
         if not is_graph:
             continue
@@ -111,9 +122,10 @@ def check_report(root: Path, report_path: Path, expected_report_sha256: str,
             graph.get("support_digest_sha256") != case.get("support_digest_sha256") or
             {v.get("field") for v in comparisons if v.get("exact_equal") is True} != set(OUTPUT_KEYS) or
             len(comparisons) != len(OUTPUT_KEYS) or
-            graph.get("warmups", 0) < 1 or graph.get("repeats", 0) < 3 or
+            type(graph.get("warmups")) is not int or graph["warmups"] < 1 or
+            type(graph.get("repeats")) is not int or graph["repeats"] < 3 or
             len(graph.get("hip_elapsed_ms", [])) != graph.get("repeats") or
-            any(not isinstance(v, (int, float)) or not 0 < v < float("inf") for v in graph.get("hip_elapsed_ms", []))):
+            any(type(v) not in (int, float) or not 0 < v < float("inf") for v in graph.get("hip_elapsed_ms", []))):
             raise ValueError(f"{report_path}: graph parity/profile incomplete: {case['id']}")
     identity = check_device(report, report_path)
     return {"report": str(report_path), "report_sha256": hashlib.sha256(raw).hexdigest(),
