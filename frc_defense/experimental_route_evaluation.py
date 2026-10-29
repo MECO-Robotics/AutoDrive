@@ -341,15 +341,17 @@ def _path_weighted_cost(scratch, points, learned_cost, scale: float) -> float:
 
 def _path_weighted_cost_device(scratch, path_xy: torch.Tensor,
                                path_length: torch.Tensor, learned_cost,
-                               scale: float) -> torch.Tensor:
+                               scale: float, *, return_bump: bool = False):
     """Integrate padded route batches without converting route data to host."""
     device = path_xy.device
     dtype = torch.float64
     count, point_count = path_xy.shape[:2]
     if point_count < 2:
-        return torch.zeros((count,), device=device, dtype=dtype)
+        zero = torch.zeros((count,), device=device, dtype=dtype)
+        return (zero, zero.clone()) if return_bump else zero
     path = path_xy.to(dtype=dtype)
-    terrain = scratch._bump_cost.to(device=device, dtype=dtype)
+    bump_terrain = scratch._bump_cost.to(device=device, dtype=dtype)
+    terrain = bump_terrain
     if learned_cost is not None:
         terrain = terrain + learned_cost.to(device=device, dtype=dtype) * scale
     resolution = float(scratch.resolution)
@@ -384,7 +386,14 @@ def _path_weighted_cost_device(scratch, path_xy: torch.Tensor,
                      (path_length - 1).clamp_min(0)[:, None])
     per_segment = torch.where(segment_valid, interval * segment_steps,
                               torch.zeros_like(interval))
-    return per_segment.sum(dim=-1)
+    result = per_segment.sum(dim=-1)
+    if return_bump:
+        bump_values = bump_terrain.reshape(-1)[flat_index]
+        bump_interval = (bump_values * (end - begin)).sum(dim=-1)
+        bump_segments = torch.where(segment_valid, bump_interval * segment_steps,
+                                    torch.zeros_like(bump_interval))
+        return result, bump_segments.sum(dim=-1)
+    return result
 
 
 def _scratch_planner(env, query_rows: list[tuple[RouteQuery, torch.Tensor]], *,
@@ -616,13 +625,14 @@ def evaluate_device_routes(env, queries: tuple[DeviceRouteQuery, ...] | list[Dev
     distance = torch.where(feasible, distance, distance)
     endpoint_error = torch.where(at_goal_clear, torch.zeros_like(endpoint_error),
                                  endpoint_error)
-    bump_cost = _path_weighted_cost_device(scratch, path_xy, path_length,
-                                           None, 1.)
     if learned_map is not None:
-        weighted_cost = _path_weighted_cost_device(scratch, path_xy, path_length,
-                                                   learned_map, learned_cost_scale)
+        weighted_cost, bump_cost = _path_weighted_cost_device(
+            scratch, path_xy, path_length, learned_map, learned_cost_scale,
+            return_bump=True)
         learned_cost = weighted_cost - bump_cost
     else:
+        bump_cost = _path_weighted_cost_device(scratch, path_xy, path_length,
+                                               None, 1.)
         weighted_cost = bump_cost
         learned_cost = torch.zeros_like(weighted_cost)
     return DeviceRouteBatch(items, status, feasible, path_xy, path_length,
