@@ -617,7 +617,7 @@
           ],
           [
             1,
-            0
+            1
           ],
           [
             2,
@@ -629,26 +629,26 @@
           ]
         ]
       },
-      "graph_sha256": "cb134d7ba77316a3fd398e36e27ed5185d6b61db61507253737e12644a9453c9",
+      "graph_sha256": "95da9f02557d3003680320406edbfe2d8a199a3bd151db681366f4f15b7e8e6b",
       "id": "geometry_disconnected_blocked",
       "purpose": "Disconnected node and blocked shorter direct edge",
       "route_kind": "geometry",
       "route_output_field_sha256": {
-        "parent_edge_m": "d88599065e499ed35ce80db95938c04f75b67f7030c5120b2e66731fae20e09b",
+        "parent_edge_m": "74e65f07cb5bf867516726e49764633ec2cf3b350d3d78d2b6708cd5bed79f81",
         "parent_ids": "20d9bf47f1036228494de55084176f609ab969de4529c73e36076248dea0b80b",
-        "physical_distance": "9d2bdf24b9279b2183bcb05adaf8ec7239a20e133786b176f099a62cf1ca33a0",
-        "route_cost": "beeed533f55e5560bcb915b65d2c78a043ce3263f179dd50bcca07e812dd2d26",
+        "physical_distance": "7f8a6f4f779f5e4616196181ead88f40cf7b91eaa8ce6a4a8aee639d1fd251fd",
+        "route_cost": "74969c71657d6184afbdd68e1ee0c7f7ba036ebd33eb00cccb68ca486a0abaec",
         "traversal_order": "434026bd98ff2d8a2fb346c89ae9de006d1e2a6862832b6b3cd86e51de36d5c5"
       },
-      "route_output_sha256": "ee2e4e4890c8f2a77151c4af94d3c8572ccb57baaa0bb72ce03ae9497cfe85d2",
-      "support_digest_sha256": "a27fa2ac2dc67c296a98cdbf2bd8c2b57f195581ec93c6a4a76fc844324e555b",
+      "route_output_sha256": "2a9c7386503460438dee87909d119df3a9cf3e2d8058cc1ecea95ba185c09b16",
+      "support_digest_sha256": "ba7bd6551c76a72435c9bc043770106c2541de4784d1a05befb7c422375e434e",
       "tensor_sha256": {
         "edge_allowed": "1d523c68d403340e104ccb90ac2a6ad358a2ba10bccb4f49bd54e679595d1309",
-        "edge_costs": "21eadd59bd7e7cb64e31053fb355754e1aaf76fd4334105a6e778b7b141cf0cf",
+        "edge_costs": "318a143b42ce462f4eb931822cb8600cdd23cefa6a1b3afd3cf39409ecc56b6b",
         "edge_dst": "496b65429ed2fe87bba7f5d418357320ee3747c7de64c73c8805a649006108a2",
-        "edge_lengths": "c8ef2c3398cd8b7bbf5760e5be9412da58fd7da1f479161d5c80e77dc4864623",
+        "edge_lengths": "127e4f59a6775a7f5190848551c0244ea4be78b2166d66fc3a380aa7a1eae319",
         "heading": "1c10b03518fff8fc374a20bbf5107c66496656bec0662d6c6db123d4a898f121",
-        "xy": "232f9a056f8f8316ed366640a783e7d21df4e9b4b819ddc3c06b82fd2fff724b"
+        "xy": "bea0d0dfa18f6fe6361b2ec89cb1c221ae96436fec98ae76e22d770211ff5048"
       }
     },
     {
@@ -816,7 +816,7 @@
     }
   ],
   "fixture_set": "plan_a_exact_heap_parity_v1",
-  "manifest_payload_sha256": "2f54638ac84fc4e7c4b126a2d078ea4d49e8f4d57d29a5b9ff37d885f1abb523",
+  "manifest_payload_sha256": "f21a63dc240781d3d6108327a7346ea922b9f7400fc5ca7a3f3562846e821f6f",
   "schema_version": 1,
   "source_sha256": {
     "frc_defense/csrc/meco_plan_a_shortest_path_hip.cpp": "828c3a20d9be8d99b37ebf2452e64c042963ada96c3b5f19f7f5c93753938bc6",
