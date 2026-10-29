@@ -490,11 +490,11 @@
     }
   ],
   "fixture_set": "plan_a_exact_heap_parity_v1",
-  "manifest_payload_sha256": "34e9d1afb512994430518f1bc4536acafd3f2973eed4cfae6816255d595664cd",
+  "manifest_payload_sha256": "ede3d0aa7108e080f6741bc507126e8a5885398872e5234f3d7ecc04c48bafbf",
   "schema_version": 1,
   "source_sha256": {
-    "frc_defense/csrc/meco_plan_a_shortest_path_hip.cpp": "d200fc392ce2cfb5c74f23d5513cea2f10c33135793cbf34a6b2b99396f2d479",
-    "frc_defense/csrc/meco_plan_a_shortest_path_hip_kernel.cu": "7195beddf506e4e7c9d5598fb56369ed3097ab2a384ecef380c93c06fbdaa376",
+    "frc_defense/csrc/meco_plan_a_shortest_path_hip.cpp": "63676946ffd07476e8bad8b106c7ddb2e459a5a29508168d831d685cf754f0b0",
+    "frc_defense/csrc/meco_plan_a_shortest_path_hip_kernel.cu": "0e112a0136a0b210d15408b8c8eb0dc814005d79f88a65736197d5e8e32eaede",
     "frc_defense/meco_device_lease.py": "ffb9f134086c614053f084fdf17ca55f37a3e54fca0412a0f8a7416220228597",
     "frc_defense/meco_gpu_attestation.py": "c6fa5aa807d492715abd848895a85f4c61213d7d15ac671f093c8d4c5f9af75e",
     "frc_defense/meco_plan_a_hip_fixture_graph.py": "e5b63f9373a90d159c21482d39c3f0d1fabc11767bbe735ae0c1fb64bbd7ce36",
