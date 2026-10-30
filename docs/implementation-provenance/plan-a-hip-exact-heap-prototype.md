@@ -110,3 +110,26 @@ still dispatches to the CPU oracle. Source-contract tests do not prove compiled
 HIP parity; hardware compilation, exact output/support-digest comparison,
 profiling, and a seeded simulator replay remain outstanding. The approved code
 was integrated on `main` as `fa59b2dcd`.
+
+## Graph-geometry gate qualification update — 2026-10-30
+
+The graph-geometry route gate is enabled on the current `main` source frontier;
+the legacy preweighted gate remains closed. The reviewed evidence matcher
+accepted two immutable `hip_parity_profile_candidate` reports against the
+current graph source with only the gate literal normalized. Both reports bind
+separate physical WX9100 devices and all 12 fixture cases, including exact
+equality for the five route outputs and downstream Plan A support digests.
+The 64,000-node graph-geometry case measured median route-boundary speedups of
+10.015x on `cuda:0` and 10.393x on `cuda:1`. Small graphs remain slower on HIP.
+
+Evidence files and SHA-256 digests:
+
+- `AutoDriveCampaigns/hip-parity-20261029/plan-a/cuda0/plan-a-hip-evidence-20261029T213604.450586Z-af6cb61ce4b6.json` — `860489b4a6f89f961fbd6bbb586cd6c97267d0ebc2a494c264f8add246f54e77`.
+- `AutoDriveCampaigns/hip-parity-20261029/plan-a/cuda1/plan-a-hip-evidence-20261029T213704.444503Z-268a67037b9f.json` — `b85102fb3bc678b3f51a15da4eedc52b83948280ab9ea6c16f4afc6a1e972e21`.
+
+`scripts/verify_plan_a_graph_gate_evidence.py` matched these reports and the
+refreshed source-bound fixture manifest. This establishes the exact-heap route
+parity/profile gate only. It does not establish full Plan A decision residency,
+training throughput, simulator outcomes, replay provenance, qualification, or
+promotion. Run a fresh A-track diagnostic campaign on the enabled checkout;
+do not resume checkpoints bound to a different native extension identity.

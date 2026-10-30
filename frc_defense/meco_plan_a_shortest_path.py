@@ -14,7 +14,7 @@ _EDGE_WEIGHT_CACHE = {}
 _EDGE_WEIGHT_CACHE_LOCK = threading.RLock()
 # Independent qualification is required for each entry point.
 PLAN_A_HIP_PARITY_PROFILE_GATE_PASSED = False  # preweighted entry
-PLAN_A_HIP_GRAPH_PARITY_PROFILE_GATE_PASSED = False
+PLAN_A_HIP_GRAPH_PARITY_PROFILE_GATE_PASSED = True
 
 
 def plan_a_cpu_turn_table(headings, *, device):

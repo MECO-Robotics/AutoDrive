@@ -816,7 +816,7 @@
     }
   ],
   "fixture_set": "plan_a_exact_heap_parity_v1",
-  "manifest_payload_sha256": "f21a63dc240781d3d6108327a7346ea922b9f7400fc5ca7a3f3562846e821f6f",
+  "manifest_payload_sha256": "21b5e50127d94964b09e0f93583a7c1ceabd4b10d6b75ac1fcb8f8b23661b382",
   "schema_version": 1,
   "source_sha256": {
     "frc_defense/csrc/meco_plan_a_shortest_path_hip.cpp": "828c3a20d9be8d99b37ebf2452e64c042963ada96c3b5f19f7f5c93753938bc6",
@@ -826,7 +826,7 @@
     "frc_defense/meco_plan_a_hip_fixture_graph.py": "e5b63f9373a90d159c21482d39c3f0d1fabc11767bbe735ae0c1fb64bbd7ce36",
     "frc_defense/meco_plan_a_hip_parity_harness.py": "8acfaca5581f3cb1707b4b2169ebf98c67643e36f199d2ee7ea63efaf5e1f229",
     "frc_defense/meco_plan_a_policy.py": "21d18e39043546390dbbeecced9eafbd5e39941ded0247ce0e144aea3519ec54",
-    "frc_defense/meco_plan_a_shortest_path.py": "5a5f752dd83e4b8e5808fba43eef71347dea8f3479b34dd169e4b1b6849cc46a",
+    "frc_defense/meco_plan_a_shortest_path.py": "d90b5d218bcf564294b2051bb1f981055138fc32ff4888a42402bcdfdf7328d1",
     "frc_defense/meco_plan_a_shortest_path_hip.py": "0295e866d4da3cbc495f1ba2cd4c1441e66c36cc82ae8b3f74b057a506363470",
     "frc_defense/meco_pose_graph.py": "62251b6cac235207fc669293bf792e73f1ecf7ce2586099ddb7616a7f8f31b67",
     "frc_defense/meco_training_manifest.py": "00da7eb8d8887382af9e4a2c87a66e40c892c79ee28421748746a64cfcc5755f",
