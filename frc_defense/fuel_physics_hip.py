@@ -418,6 +418,8 @@ class FuelHIP:
         self.dv = torch.zeros_like(p.vel)
         self.dw = torch.zeros_like(p.angular)
         self.rdv = torch.zeros_like(s.velocity)
+        self.contact_degree = torch.zeros((p.n, p.p), **kw)
+        self.sleep_snapshot = torch.zeros_like(p.sleeping)
         # Grid compaction bounds storage by neighbor capacity; overflowing
         # contacts use the fused path, preserving every contact impulse.
         capacity = (p.n*p.p*(p.p-1)//2 if c.broadphase == "all_pairs" or c.compact_capacity == "full" else min(p.n*p.p*c.max_neighbors,p.n*p.p*(p.p-1)//2)) if c.contact_mode == "compact" else 1
@@ -453,6 +455,8 @@ class FuelHIP:
                    self.boxes,self.reference,self.oldfree,self.heads,self.next,self.list,
                    self.counts,self.overflow,self.rebuild,self.metrics,self.dv,self.dw,
                    self.rdv,self.contacts,self.contact_count,self.robot_candidates,self.bumps,self.support_height]
+        tensors.append(self.contact_degree)
+        tensors.append(self.sleep_snapshot)
         from .field import BUMP_PANEL_THICKNESS, BUMP_RAMP_RISE
         params = [c.radius,c.mass,c.gravity,c.stiffness,c.damping,c.friction,
                   c.rolling_friction,c.robot_height,c.skin,dt,s.field_length,s.field_width,

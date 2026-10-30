@@ -33,11 +33,12 @@ __global__ void neighbors(const float*pos,const bool*free,const int*heads,const 
  counts[i]=min(total,c.M);if(total>c.M)atomicExch(overflow+w,1);}
 __global__ void save_ref(const float*pos,float*ref,const bool*free,bool*oldfree,int*rebuild,int*metrics,const int*counts,const int*overflow,C c){int i=blockIdx.x*blockDim.x+threadIdx.x;if(i>=c.N*c.P)return;int w=i/c.P;if(rebuild[w]){put(ref,i,get(pos,i));oldfree[i]=free[i];if(i%c.P==0){atomicAdd(metrics,1);atomicAdd(metrics+1,overflow[w]);}}}
 __global__ void finish_rebuild(int*rebuild,C c){int w=blockIdx.x*blockDim.x+threadIdx.x;if(w<c.N)rebuild[w]=0;}
-__device__ V impulse(V n,float depth,V relative,float inv,C c,float tangent_inv=-1){float vn=dot(relative,n);float jn=fmaxf(0.f,c.dt*(c.k*depth-c.d*vn)/(1+c.dt*c.d*inv+c.dt*c.dt*c.k*inv));if(depth>=2*c.r*c.compression)jn=fmaxf(jn,fmaxf(0.f,-vn/inv));V tangent=relative-n*vn;float speed=norm(tangent);float jt=fminf(speed/(tangent_inv<0?inv+2.5f/c.m:tangent_inv),c.mu*jn);return n*jn-tangent*(jt/fmaxf(speed,1.e-12f));}
-__device__ void pair(int i,int j,const float*pos,const float*vel,const float*angular,bool*sleep,float*dv,float*dw,C c){V delta=get(pos,i)-get(pos,j);float distance=norm(delta);if(distance>=2*c.r||(sleep[i]&&sleep[j]))return;V n=distance>1.e-12f?delta*(1/distance):V(1,0,0);V ri=n*(-.5f*distance),rj=n*(.5f*distance);V relative=get(vel,i)+cross(get(angular,i),ri)-get(vel,j)-cross(get(angular,j),rj);V jimp=impulse(n,2*c.r-distance,relative,2/c.m,c,2/c.m+.5f*distance*distance/(.4f*c.m*c.r*c.r));add(dv,i,jimp*(1/c.m));add(dv,j,jimp*(-1/c.m));float ii=.4f*c.m*c.r*c.r;add(dw,i,cross(ri,jimp)*(1/ii));add(dw,j,cross(rj,jimp*(-1))*(1/ii));sleep[i]=false;sleep[j]=false;}
-__global__ void fused_pairs(const float*pos,const float*vel,const float*angular,const bool*free,bool*sleep,const int*list,const int*counts,const int*overflow,float*dv,float*dw,C c){int i=blockIdx.x*blockDim.x+threadIdx.x;if(i>=c.N*c.P||!free[i])return;int w=i/c.P,pi=i%c.P;if(c.allpairs||overflow[w]){for(int j=pi+1;j<c.P;j++)if(free[w*c.P+j])pair(i,w*c.P+j,pos,vel,angular,sleep,dv,dw,c);}else{for(int k=0;k<counts[i];k++){int j=w*c.P+list[i*c.M+k];if(free[j])pair(i,j,pos,vel,angular,sleep,dv,dw,c);}}}
-__global__ void compact_pairs(const float*pos,const float*vel,const float*angular,const bool*free,bool*sleep,const int*list,const int*counts,const int*overflow,int*contacts,int*count,float*dv,float*dw,C c){int i=blockIdx.x*blockDim.x+threadIdx.x;if(i>=c.N*c.P||!free[i])return;int w=i/c.P,pi=i%c.P;if(!c.allpairs&&overflow[w]){for(int j=pi+1;j<c.P;j++)if(free[w*c.P+j])pair(i,w*c.P+j,pos,vel,angular,sleep,dv,dw,c);return;}int candidates=c.allpairs?c.P-pi-1:counts[i];for(int k=0;k<candidates;k++){int j=w*c.P+((c.allpairs||overflow[w])?pi+1+k:list[i*c.M+k]);if(!free[j]||norm(get(pos,i)-get(pos,j))>=2*c.r)continue;int q=atomicAdd(count,1);contacts[2*q]=i;contacts[2*q+1]=j;}}
-__global__ void solve_compact(const float*pos,const float*vel,const float*angular,bool*sleep,const int*contacts,const int*count,float*dv,float*dw,int capacity,C c){int q=blockIdx.x*blockDim.x+threadIdx.x;if(q>=capacity||q>=*count)return;pair(contacts[2*q],contacts[2*q+1],pos,vel,angular,sleep,dv,dw,c);}
+__device__ V impulse(V n,float depth,V relative,float inv,C c,float tangent_inv=-1,float damping=-1){float damper=damping<0?c.d:damping;float vn=dot(relative,n);float jn=fmaxf(0.f,c.dt*(c.k*depth-damper*vn)/(1+c.dt*damper*inv+c.dt*c.dt*c.k*inv));if(depth>=2*c.r*c.compression)jn=fmaxf(jn,fmaxf(0.f,-vn/inv));V tangent=relative-n*vn;float speed=norm(tangent);float jt=fminf(speed/(tangent_inv<0?inv+2.5f/c.m:tangent_inv),c.mu*jn);return n*jn-tangent*(jt/fmaxf(speed,1.e-12f));}
+__device__ void pair(int i,int j,const float*pos,const float*vel,const float*angular,const bool*sleep_before,bool*sleep,float*dv,float*dw,int*contact_degree,C c){V delta=get(pos,i)-get(pos,j);float distance=norm(delta);if(distance>=2*c.r||(sleep_before[i]&&sleep_before[j]))return;V n=distance>1.e-12f?delta*(1/distance):V(1,0,0);V ri=n*(-.5f*distance),rj=n*(.5f*distance);V relative=get(vel,i)+cross(get(angular,i),ri)-get(vel,j)-cross(get(angular,j),rj);V jimp=impulse(n,2*c.r-distance,relative,2/c.m,c,2/c.m+.5f*distance*distance/(.4f*c.m*c.r*c.r),160.f);add(dv,i,jimp*(1/c.m));add(dv,j,jimp*(-1/c.m));float ii=.4f*c.m*c.r*c.r;add(dw,i,cross(ri,jimp)*(1/ii));add(dw,j,cross(rj,jimp*(-1))*(1/ii));atomicAdd(contact_degree+i,1);atomicAdd(contact_degree+j,1);sleep[i]=false;sleep[j]=false;}
+__global__ void fused_pairs(const float*pos,const float*vel,const float*angular,const bool*free,const bool*sleep_before,bool*sleep,const int*list,const int*counts,const int*overflow,float*dv,float*dw,int*contact_degree,C c){int i=blockIdx.x*blockDim.x+threadIdx.x;if(i>=c.N*c.P||!free[i])return;int w=i/c.P,pi=i%c.P;if(c.allpairs||overflow[w]){for(int j=pi+1;j<c.P;j++)if(free[w*c.P+j])pair(i,w*c.P+j,pos,vel,angular,sleep_before,sleep,dv,dw,contact_degree,c);}else{for(int k=0;k<counts[i];k++){int j=w*c.P+list[i*c.M+k];if(free[j])pair(i,j,pos,vel,angular,sleep_before,sleep,dv,dw,contact_degree,c);}}}
+__global__ void compact_pairs(const float*pos,const float*vel,const float*angular,const bool*free,const bool*sleep_before,bool*sleep,const int*list,const int*counts,const int*overflow,int*contacts,int*count,float*dv,float*dw,int*contact_degree,C c){int i=blockIdx.x*blockDim.x+threadIdx.x;if(i>=c.N*c.P||!free[i])return;int w=i/c.P,pi=i%c.P;if(!c.allpairs&&overflow[w]){for(int j=pi+1;j<c.P;j++)if(free[w*c.P+j])pair(i,w*c.P+j,pos,vel,angular,sleep_before,sleep,dv,dw,contact_degree,c);return;}int candidates=c.allpairs?c.P-pi-1:counts[i];for(int k=0;k<candidates;k++){int j=w*c.P+((c.allpairs||overflow[w])?pi+1+k:list[i*c.M+k]);if(!free[j]||norm(get(pos,i)-get(pos,j))>=2*c.r)continue;int q=atomicAdd(count,1);contacts[2*q]=i;contacts[2*q+1]=j;}}
+__global__ void solve_compact(const float*pos,const float*vel,const float*angular,const bool*sleep_before,bool*sleep,const int*contacts,const int*count,float*dv,float*dw,int*contact_degree,int capacity,C c){int q=blockIdx.x*blockDim.x+threadIdx.x;if(q>=capacity||q>=*count)return;pair(contacts[2*q],contacts[2*q+1],pos,vel,angular,sleep_before,sleep,dv,dw,contact_degree,c);}
+__global__ void snapshot_sleep(const bool*sleep,bool*sleep_before,int count){int i=blockIdx.x*blockDim.x+threadIdx.x;if(i<count)sleep_before[i]=sleep[i];}
 // Round-robin edge coloring of the complete particle graph. Every color
 // contains disjoint pairs, so direct velocity writes have no atomic conflicts.
 // Sparse grid Jacobi is expected to win when most graph edges are absent.
@@ -60,7 +61,7 @@ __global__ void colored_pairs(const float*pos,float*vel,float*angular,const bool
   __syncthreads();
  }
 }
-__global__ void apply(float*vel,float*angular,const float*dv,const float*dw,C c){int i=blockIdx.x*blockDim.x+threadIdx.x;if(i<c.N*c.P){put(vel,i,get(vel,i)+get(dv,i));put(angular,i,get(angular,i)+get(dw,i));}}
+__global__ void apply(float*vel,float*angular,const float*dv,const float*dw,const int*contact_degree,C c){int world=blockIdx.x,thread=threadIdx.x;__shared__ float max_delta[128];__shared__ int max_degree[128];float local_delta=0.f;int local_degree=0;for(int p=thread;p<c.P;p+=blockDim.x){int i=world*c.P+p;local_delta=fmaxf(local_delta,norm(get(dv,i)));local_degree=max(local_degree,contact_degree[i]);}max_delta[thread]=local_delta;max_degree[thread]=local_degree;__syncthreads();for(int stride=blockDim.x/2;stride>0;stride>>=1){if(thread<stride){max_delta[thread]=fmaxf(max_delta[thread],max_delta[thread+stride]);max_degree[thread]=max(max_degree[thread],max_degree[thread+stride]);}__syncthreads();}float scale=max_degree[0]>4?fminf(1.f,.08f/fmaxf(max_delta[0],.08f)):1.f;for(int p=thread;p<c.P;p+=blockDim.x){int i=world*c.P+p;put(vel,i,get(vel,i)+get(dv,i)*scale);put(angular,i,get(angular,i)+get(dw,i)*scale);}}
 __device__ V boxnormal(float x,float y,float hx,float hy,float&distance){float cx=fmaxf(-hx,fminf(hx,x)),cy=fmaxf(-hy,fminf(hy,y));V delta(x-cx,y-cy,0);distance=norm(delta);if(distance>1.e-12f)return delta*(1/distance);float gx=hx-fabsf(x),gy=hy-fabsf(y);distance=-fminf(gx,gy);return gx<=gy?V(x>=0?1:-1,0,0):V(0,y>=0?1:-1,0);}
 __global__ void robot_candidates(const float*pose,const float*length,const float*width,const bool*free,const int*heads,const int*next,bool*mask,C c){
  int robot=blockIdx.x*blockDim.x+threadIdx.x;if(robot>=c.N*c.R)return;
@@ -81,7 +82,7 @@ __device__ void staticcontact(V n,float depth,V&v,V&ang,C c){if(depth<=0)return;
 __global__ void static_contacts(float*pos,float*vel,float*angular,const bool*free,bool*sleep,float*clock,const float*boxes,const float*bumps,float*support_height,C c){int i=blockIdx.x*blockDim.x+threadIdx.x;if(i>=c.N*c.P||!free[i])return;V p=get(pos,i),v=get(vel,i),ang=get(angular,i);float height=0;V floor_normal(0,0,1);for(int b=0;b<c.B;b++){float dx=p.x-bumps[4*b];if(fabsf(dx)<=bumps[4*b+2]&&fabsf(p.y-bumps[4*b+1])<=bumps[4*b+3]){float h=c.panel+c.rise*(1-fabsf(dx)/bumps[4*b+2]);if(h>height){height=h;float slope=(dx>0?-1:dx<0?1:0)*c.rise/bumps[4*b+2];floor_normal=V(-slope,0,1)*(1/sqrtf(1+slope*slope));}}}support_height[i]=height;if(!sleep[i]){staticcontact(floor_normal,c.r-(p.z-height)*floor_normal.z,v,ang,c);staticcontact(V(1,0,0),c.r-p.x,v,ang,c);staticcontact(V(-1,0,0),p.x+c.r-c.L,v,ang,c);staticcontact(V(0,1,0),c.r-p.y,v,ang,c);staticcontact(V(0,-1,0),p.y+c.r-c.W,v,ang,c);if(p.z<c.height+c.r)for(int k=0;k<c.K;k++){float distance;V normal=boxnormal(p.x-boxes[4*k],p.y-boxes[4*k+1],boxes[4*k+2],boxes[4*k+3],distance);staticcontact(normal,c.r-distance,v,ang,c);}}
  if(c.sleep==1){V support=v; if(p.z<height+c.r+.005f&&!sleep[i])support.z-=c.g*c.dt;bool quiet=norm(support)<c.sv&&norm(ang)<c.sw&&p.z<height+c.r+.005f;clock[i]=quiet?clock[i]+c.dt:0;sleep[i]=quiet&&clock[i]>=c.st;if(sleep[i]){v=V();ang=V();}}else if(c.sleep==0)sleep[i]=false;put(vel,i,v);put(angular,i,ang);}
 
-void fuel_substep_launch(float*pos,float*vel,float*angular,bool*sleep,float*clock,const bool*free,const float*pose,float*rv,const float*length,const float*width,const float*mass,const float*inertia,const float*boxes,float*reference,bool*oldfree,int*heads,int*next,int*list,int*counts,int*overflow,int*rebuild,int*metrics,float*dv,float*dw,float*rdv,int*contacts,int*contact_count,bool*robot_mask,const float*bumps,float*support_height,const float*params,const int*dims,hipStream_t stream){C c;
+void fuel_substep_launch(float*pos,float*vel,float*angular,bool*sleep,float*clock,const bool*free,const float*pose,float*rv,const float*length,const float*width,const float*mass,const float*inertia,const float*boxes,float*reference,bool*oldfree,int*heads,int*next,int*list,int*counts,int*overflow,int*rebuild,int*metrics,float*dv,float*dw,float*rdv,int*contacts,int*contact_count,bool*robot_mask,const float*bumps,float*support_height,int*contact_degree,bool*sleep_before,const float*params,const int*dims,hipStream_t stream){C c;
 
  c.r=params[0];
 c.m=params[1];
@@ -119,6 +120,7 @@ c.capacity=dims[15];
 int threads=128,blocks=(c.N*c.P+threads-1)/threads;
 
  integrate<<<blocks,threads,0,stream>>>(pos,vel,free,sleep,angular,c);
+snapshot_sleep<<<blocks,threads,0,stream>>>(sleep,sleep_before,c.N*c.P);
 
  if(!c.allpairs||c.robotgrid){
 detect<<<blocks,threads,0,stream>>>(pos,reference,free,oldfree,rebuild,c);
@@ -133,6 +135,7 @@ finish_rebuild<<<(c.N+threads-1)/threads,threads,0,stream>>>(rebuild,c);
  hipMemsetAsync(dv,0,c.N*c.P*3*sizeof(float),stream);
 hipMemsetAsync(dw,0,c.N*c.P*3*sizeof(float),stream);
 hipMemsetAsync(rdv,0,c.N*c.R*3*sizeof(float),stream);
+hipMemsetAsync(contact_degree,0,c.N*c.P*sizeof(int),stream);
 if(c.robotgrid&&c.R>0){
 hipMemsetAsync(robot_mask,0,c.N*c.R*c.P*sizeof(bool),stream);
 robot_candidates<<<(c.N*c.R+threads-1)/threads,threads,0,stream>>>(pose,length,width,free,heads,next,robot_mask,c);
@@ -144,14 +147,14 @@ colored_pairs<<<c.N,128,0,stream>>>(pos,vel,angular,free,sleep,c);
 }
 else if(c.compact){
 hipMemsetAsync(contact_count,0,sizeof(int),stream);
-compact_pairs<<<blocks,threads,0,stream>>>(pos,vel,angular,free,sleep,list,counts,overflow,contacts,contact_count,dv,dw,c);
+compact_pairs<<<blocks,threads,0,stream>>>(pos,vel,angular,free,sleep_before,sleep,list,counts,overflow,contacts,contact_count,dv,dw,contact_degree,c);
 int capacity=c.capacity;
 if(capacity>0)
-solve_compact<<<(capacity+threads-1)/threads,threads,0,stream>>>(pos,vel,angular,sleep,contacts,contact_count,dv,dw,capacity,c);
+solve_compact<<<(capacity+threads-1)/threads,threads,0,stream>>>(pos,vel,angular,sleep_before,sleep,contacts,contact_count,dv,dw,contact_degree,capacity,c);
 }else
- fused_pairs<<<blocks,threads,0,stream>>>(pos,vel,angular,free,sleep,list,counts,overflow,dv,dw,c);
+ fused_pairs<<<blocks,threads,0,stream>>>(pos,vel,angular,free,sleep_before,sleep,list,counts,overflow,dv,dw,contact_degree,c);
 
- apply<<<blocks,threads,0,stream>>>(vel,angular,dv,dw,c);
+ apply<<<c.N,128,0,stream>>>(vel,angular,dv,dw,contact_degree,c);
 robot_contacts<<<blocks,threads,0,stream>>>(pos,vel,angular,free,sleep,pose,rv,length,width,mass,inertia,rdv,robot_mask,c);
 if(c.R>0)
 apply_robot<<<(c.N*c.R+threads-1)/threads,threads,0,stream>>>(rv,rdv,c);

@@ -85,6 +85,7 @@ class TensorThreeVsThreeEnv(
         self.field_length = float(field_length)
         self.alliance_zone_depth = float(ALLIANCE_ZONE_DEPTH)
         self.dt, self.horizon = float(dt), int(horizon)
+        # ROCm graph capture passed end-to-end parity on both WX9100 devices.
         self._target_action_graph_enabled = bool(
             torch.version.hip and self.n <= 8 and
             os.environ.get("AUTODRIVE_3V3_TARGET_GRAPH", "1") != "0")
