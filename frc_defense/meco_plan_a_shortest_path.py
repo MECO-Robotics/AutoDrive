@@ -246,11 +246,13 @@ def plan_a_dijkstra_hip_for_graph(graph, *, device, root, root_start_cost,
     route_entry = (ext.dijkstra_graph_active
                    if os.environ.get("AUTODRIVE_EXPERIMENTAL_PLAN_A_ACTIVE_FRONTIER") == "1"
                    else ext.dijkstra_graph)
-    route, physical, parent, parent_length, settled, status = route_entry(
+    route_outputs = route_entry(
         xy.contiguous(), heading.contiguous(), edge_dst.contiguous(),
         edge_allowed.contiguous(), graph.node_valid[0].contiguous(),
         root.contiguous(), root_start_cost.contiguous(),
         root_connector_m.contiguous(), heading_values, turns)
+    # Experimental active-frontier entry also returns candidate-count diagnostics.
+    route, physical, parent, parent_length, settled, status = route_outputs[:6]
     return {"route_cost": route, "physical_distance": physical,
         "parent_ids": parent, "parent_edge_m": parent_length,
         "traversal_order": settled, "status": status}
