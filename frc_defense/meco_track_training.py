@@ -1262,7 +1262,8 @@ def _plan_a_route_support(env, graph, support, snapshot_id, penalty_map, config)
         grid_queries = tuple(DeviceRouteQuery(
             candidate_id=f"plan-a-grid:{node}", snapshot_id=snapshot_id,
             world=0, slot=3) for node in range(grid_count))
-        grid_routes = evaluate_device_route_chunks(env, grid_queries, grid, **kwargs)
+        grid_routes = evaluate_device_route_chunks(env, grid_queries, grid,
+            _internal_batch_size=512, **kwargs)
         route_fields = ("status_code", "feasible", "path_xy", "path_length",
             "distance_m", "endpoint_error_m", "weighted_cost_grid_edges",
             "bump_cost_grid_edges", "learned_cost_grid_edges")

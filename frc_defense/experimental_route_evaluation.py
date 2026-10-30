@@ -436,12 +436,12 @@ def _scratch_planner(env, query_rows: list[tuple[RouteQuery, torch.Tensor]], *,
 
 
 @torch.no_grad()
-def evaluate_device_routes(env, queries: tuple[DeviceRouteQuery, ...] | list[DeviceRouteQuery],
-                           goal_xy: torch.Tensor, *, goal_tolerance_m: float = 0.05,
-                           endpoint_tolerance_m: float = 0.05,
-                           learned_traversal_cost=None,
-                           learned_cost_scale: float = 1.0,
-                           learned_cost_provenance: str = "caller_supplied") -> DeviceRouteBatch:
+def _evaluate_device_routes_impl(
+        env, queries: tuple[DeviceRouteQuery, ...] | list[DeviceRouteQuery],
+        goal_xy: torch.Tensor, *, max_queries: int = MAX_ROUTE_QUERY_BATCH,
+        goal_tolerance_m: float = 0.05, endpoint_tolerance_m: float = 0.05,
+        learned_traversal_cost=None, learned_cost_scale: float = 1.0,
+        learned_cost_provenance: str = "caller_supplied") -> DeviceRouteBatch:
     """Evaluate numeric route goals on device and retain fixed-shape tensor rows.
 
     Query identity and order are immutable host metadata. Goal coordinates,
@@ -473,8 +473,8 @@ def evaluate_device_routes(env, queries: tuple[DeviceRouteQuery, ...] | list[Dev
                 if learned_traversal_cost is None else learned_cost_provenance),
             bump_cost_grid_edges=empty_float.clone(),
             learned_cost_grid_edges=empty_float.clone())
-    if len(items) > MAX_ROUTE_QUERY_BATCH:
-        raise ValueError(f"route batch exceeds {MAX_ROUTE_QUERY_BATCH} queries")
+    if len(items) > max_queries:
+        raise ValueError(f"route batch exceeds {max_queries} queries")
     if any(not isinstance(query, DeviceRouteQuery) for query in items):
         raise TypeError("queries must contain DeviceRouteQuery values")
     snapshot_ids = {query.snapshot_id for query in items
@@ -644,6 +644,22 @@ def evaluate_device_routes(env, queries: tuple[DeviceRouteQuery, ...] | list[Dev
 
 
 @torch.no_grad()
+def evaluate_device_routes(env, queries: tuple[DeviceRouteQuery, ...] | list[DeviceRouteQuery],
+                           goal_xy: torch.Tensor, *, goal_tolerance_m: float = 0.05,
+                           endpoint_tolerance_m: float = 0.05,
+                           learned_traversal_cost=None,
+                           learned_cost_scale: float = 1.0,
+                           learned_cost_provenance: str = "caller_supplied") -> DeviceRouteBatch:
+    """Evaluate one public route batch, preserving the fixed 64-row contract."""
+    return _evaluate_device_routes_impl(env, queries, goal_xy,
+        max_queries=MAX_ROUTE_QUERY_BATCH, goal_tolerance_m=goal_tolerance_m,
+        endpoint_tolerance_m=endpoint_tolerance_m,
+        learned_traversal_cost=learned_traversal_cost,
+        learned_cost_scale=learned_cost_scale,
+        learned_cost_provenance=learned_cost_provenance)
+
+
+@torch.no_grad()
 def evaluate_device_route_chunks(env, queries, goal_xy: torch.Tensor, **kwargs):
     """Evaluate ordered device goals in bounded planner batches and concatenate tensors."""
     items = tuple(queries)
@@ -652,40 +668,79 @@ def evaluate_device_route_chunks(env, queries, goal_xy: torch.Tensor, **kwargs):
         raise ValueError("goal_xy must be floating [Q,2] aligned with queries")
     if goal_xy.device != torch.device(env.device) or not goal_xy.is_floating_point():
         raise ValueError("goal_xy must be floating on env.device")
+    # Plan A may batch adjacent public chunks in the planner kernel. The public
+    # route API and its validation/reassembly boundaries remain fixed at 64.
+    internal_batch_size = kwargs.pop("_internal_batch_size", MAX_ROUTE_QUERY_BATCH)
+    if (type(internal_batch_size) is not int or
+            internal_batch_size < MAX_ROUTE_QUERY_BATCH or
+            internal_batch_size % MAX_ROUTE_QUERY_BATCH != 0):
+        raise ValueError("internal route batch size must be a positive multiple of 64")
     mapping = make_device_route_chunk_map(len(items), device=goal_xy.device)
     chunks = []
     all_chunks_valid = torch.ones((), device=goal_xy.device, dtype=torch.bool)
     common_metadata = None
-    for start, stop in mapping.spans:
-        chunk_queries = items[start:stop]
-        chunk = evaluate_device_routes(env, chunk_queries,
-            goal_xy[start:stop], **kwargs)
-        contract_ok = validate_device_route_batch(chunk, chunk_queries,
+    span_index = 0
+    while span_index < len(mapping.spans):
+        start = mapping.spans[span_index][0]
+        stop = min(start + internal_batch_size, len(items))
+        if internal_batch_size == MAX_ROUTE_QUERY_BATCH:
+            chunk_queries = items[start:stop]
+            chunk = evaluate_device_routes(env, chunk_queries,
+                goal_xy[start:stop], **kwargs)
+            chunk_spans = ((start, stop),)
+        else:
+            chunk_queries = items[start:stop]
+            chunk = _evaluate_device_routes_impl(env, chunk_queries,
+                goal_xy[start:stop], max_queries=internal_batch_size, **kwargs)
+            chunk_spans = tuple((offset, min(offset + MAX_ROUTE_QUERY_BATCH, stop))
+                                for offset in range(start, stop,
+                                                    MAX_ROUTE_QUERY_BATCH))
+        for public_start, public_stop in chunk_spans:
+            local_start, local_stop = public_start - start, public_stop - start
+            public_queries = items[public_start:public_stop]
+            public_chunk = DeviceRouteBatch(public_queries,
+                chunk.status_code[local_start:local_stop],
+                chunk.feasible[local_start:local_stop],
+                chunk.path_xy[local_start:local_stop],
+                chunk.path_length[local_start:local_stop],
+                chunk.distance_m[local_start:local_stop],
+                chunk.endpoint_error_m[local_start:local_stop],
+                chunk.weighted_cost_grid_edges[local_start:local_stop],
+                torch.arange(public_stop - public_start, device=goal_xy.device,
+                             dtype=torch.long),
+                cost_units=chunk.cost_units,
+                cost_provenance=chunk.cost_provenance,
+                bump_cost_grid_edges=(None if chunk.bump_cost_grid_edges is None else
+                                      chunk.bump_cost_grid_edges[local_start:local_stop]),
+                learned_cost_grid_edges=(None if chunk.learned_cost_grid_edges is None else
+                                         chunk.learned_cost_grid_edges[local_start:local_stop]))
+            contract_ok = validate_device_route_batch(public_chunk, public_queries,
                                                   device=goal_xy.device)
-        metadata = (chunk.cost_units, chunk.cost_provenance,
-                    chunk.bump_cost_grid_edges is not None,
-                    chunk.learned_cost_grid_edges is not None)
-        if common_metadata is None:
-            common_metadata = metadata
-        elif metadata != common_metadata:
-            contract_ok = torch.zeros_like(contract_ok)
-        if chunk.cost_units != "normalized_grid_edge_units":
-            contract_ok = torch.zeros_like(contract_ok)
-        all_chunks_valid = all_chunks_valid & contract_ok
-        # A malformed or non-finite chunk invalidates the complete route batch.
-        # Keep that decision on device so no good chunk can remain selectable.
-        chunk = DeviceRouteBatch(chunk.queries,
-            torch.where(all_chunks_valid, chunk.status_code,
-                        torch.full_like(chunk.status_code, DeviceRouteBatch.INVALID)),
-            chunk.feasible & all_chunks_valid, chunk.path_xy, chunk.path_length,
-            chunk.distance_m, chunk.endpoint_error_m,
-            chunk.weighted_cost_grid_edges,
-            torch.arange(stop - start, device=goal_xy.device, dtype=torch.long),
-            cost_units=chunk.cost_units,
-            cost_provenance=chunk.cost_provenance,
-            bump_cost_grid_edges=chunk.bump_cost_grid_edges,
-            learned_cost_grid_edges=chunk.learned_cost_grid_edges)
-        chunks.append(chunk)
+            metadata = (public_chunk.cost_units, public_chunk.cost_provenance,
+                        public_chunk.bump_cost_grid_edges is not None,
+                        public_chunk.learned_cost_grid_edges is not None)
+            if common_metadata is None:
+                common_metadata = metadata
+            elif metadata != common_metadata:
+                contract_ok = torch.zeros_like(contract_ok)
+            if public_chunk.cost_units != "normalized_grid_edge_units":
+                contract_ok = torch.zeros_like(contract_ok)
+            all_chunks_valid = all_chunks_valid & contract_ok
+            # Any malformed or non-finite public chunk invalidates the complete
+            # result, even when adjacent chunks shared one internal planner batch.
+            chunks.append(DeviceRouteBatch(public_queries,
+                torch.where(all_chunks_valid, public_chunk.status_code,
+                    torch.full_like(public_chunk.status_code, DeviceRouteBatch.INVALID)),
+                public_chunk.feasible & all_chunks_valid, public_chunk.path_xy,
+                public_chunk.path_length, public_chunk.distance_m,
+                public_chunk.endpoint_error_m, public_chunk.weighted_cost_grid_edges,
+                torch.arange(public_stop - public_start, device=goal_xy.device,
+                             dtype=torch.long),
+                cost_units=public_chunk.cost_units,
+                cost_provenance=public_chunk.cost_provenance,
+                bump_cost_grid_edges=public_chunk.bump_cost_grid_edges,
+                learned_cost_grid_edges=public_chunk.learned_cost_grid_edges))
+        span_index += len(chunk_spans)
     if not chunks:
         return evaluate_device_routes(env, (), goal_xy, **kwargs)
     def concatenate_optional(name):

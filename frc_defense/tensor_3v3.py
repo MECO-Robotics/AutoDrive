@@ -985,6 +985,11 @@ class TensorThreeVsThreeEnv(
         replan=active&((self.planner_ticks%self.replan_interval)==0)
         if planner_modes_dirty:
             replan=active
+        # CUDA graph capture requires fixed planner batch shapes. Outside a
+        # capture, select due routes dynamically so no-op planner ticks can
+        # return before occupancy and blocked-grid preprocessing.
+        planner_static_batch = (self.device.type == "cuda" and
+                                torch.cuda.is_current_stream_capturing())
         flat_active=(replan[:,None]&planner_robot_mask[None]).reshape(-1)
         focal_override=(planner_goal_override_mask[:,3] & replan &
                         planner_robot_mask[3])
@@ -1017,13 +1022,13 @@ class TensorThreeVsThreeEnv(
                 fallback_goal=goal,waypoint_mask=raster_mask.reshape(-1),
                 speed=speeds,lateral_friction=lateral,acceleration=accel,
                 active_mask=flat_active,robot_obstacles=robot_obstacles,
-                static_active_mask=True)
+                static_active_mask=planner_static_batch)
         else:
             self.planner.plan(
                 start,goal,heading,lengths,widths,speed=speeds,
                 lateral_friction=lateral,acceleration=accel,
                 active_mask=flat_active,robot_obstacles=robot_obstacles,
-                static_active_mask=True)
+                static_active_mask=planner_static_batch)
 
         if planner_traversal_cost is not None:
             rows=self.n*NUM_ROBOTS
@@ -1041,7 +1046,7 @@ class TensorThreeVsThreeEnv(
                     fallback_goal=goal,waypoint_mask=raster_mask.reshape(-1),
                     speed=speeds,lateral_friction=lateral,acceleration=accel,
                     active_mask=selected,robot_obstacles=robot_obstacles,
-                    static_active_mask=True,
+                    static_active_mask=planner_static_batch,
                     learned_traversal_cost=planner_traversal_cost,
                     learned_cost_scale=planner_traversal_cost_scale)
             else:
@@ -1049,7 +1054,7 @@ class TensorThreeVsThreeEnv(
                     start,goal,heading,lengths,widths,speed=speeds,
                     lateral_friction=lateral,acceleration=accel,
                     active_mask=selected,robot_obstacles=robot_obstacles,
-                    static_active_mask=True,
+                    static_active_mask=planner_static_batch,
                     learned_traversal_cost=planner_traversal_cost,
                     learned_cost_scale=planner_traversal_cost_scale)
             self._last_applied_planner_traversal_signature=traversal_signature
@@ -1079,13 +1084,13 @@ class TensorThreeVsThreeEnv(
                 fallback_goal=goal,waypoint_mask=raster_mask.reshape(-1),
                 speed=speeds,lateral_friction=lateral,acceleration=accel,
                 active_mask=retry_flat,robot_obstacles=None,
-                static_active_mask=True)
+                static_active_mask=planner_static_batch)
         else:
             self.planner.plan(
                 start,goal,heading,lengths,widths,speed=speeds,
                 lateral_friction=lateral,acceleration=accel,
                 active_mask=retry_flat,robot_obstacles=None,
-                static_active_mask=True)
+                static_active_mask=planner_static_batch)
         if planner_traversal_cost is not None:
             retry_selected=retry_flat.clone()
             focal=torch.zeros_like(retry_selected)
@@ -1101,7 +1106,7 @@ class TensorThreeVsThreeEnv(
                     fallback_goal=goal,waypoint_mask=raster_mask.reshape(-1),
                     speed=speeds,lateral_friction=lateral,acceleration=accel,
                     active_mask=retry_selected,robot_obstacles=None,
-                    static_active_mask=True,
+                    static_active_mask=planner_static_batch,
                     learned_traversal_cost=planner_traversal_cost,
                     learned_cost_scale=planner_traversal_cost_scale)
             else:
@@ -1109,7 +1114,7 @@ class TensorThreeVsThreeEnv(
                     start,goal,heading,lengths,widths,speed=speeds,
                     lateral_friction=lateral,acceleration=accel,
                     active_mask=retry_selected,robot_obstacles=None,
-                    static_active_mask=True,
+                    static_active_mask=planner_static_batch,
                     learned_traversal_cost=planner_traversal_cost,
                     learned_cost_scale=planner_traversal_cost_scale)
             self._planner_traversal_pending &= ~retry_selected.reshape(self.n,NUM_ROBOTS)[:,3]
