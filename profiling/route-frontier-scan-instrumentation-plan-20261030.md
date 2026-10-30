@@ -40,11 +40,17 @@ The relevant saved A1 profile is
 `AutoDriveCampaigns/meco-full-match-offense-production-20261030-0f13e5bd3/profiling/route-pathclear/candidate-stage-profile-v2/route-pathclear-candidate.json`
 in the primary checkout: support build p50 16.35 ms, digest p50 2.41 ms,
 route-support wall p50 about 125 ms. Those aggregates do not say how many
-frontier rounds ran or whether the serial fallback was used.
+frontier rounds ran or whether the serial fallback was used. The available
+`.pt` captures contain support outputs, not the graph/root input tensors passed
+to `dijkstra_graph`; a suitable low-level solver capture is not currently
+available. Capture those inputs from a production A1 call before implementing
+the counters below. Save scenario, seed, checkpoint identity, source hashes,
+tensor shapes/dtypes, and the call-site provenance with the capture.
 
 ## Instrument-only benchmark plan
 
-Add an opt-in stats output to the HIP extension for one invocation. Keep the
+After capturing the production graph/root inputs, add an opt-in stats output to
+the HIP extension for one invocation. Keep the
 existing route outputs and dispatch unchanged. Put counters in a separate
 fixed-size `int64`/`float64` device tensor and write them only when stats are
 requested. Count and return:

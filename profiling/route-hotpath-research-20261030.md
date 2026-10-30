@@ -46,11 +46,15 @@ made here.
 
 ## Required next benchmark
 
-On the WX9100 HIP path, use the captured A1 route/support inputs and identical
-source/checkpoint for paired A/B/A runs. Record kernel-level timings and
-frontier/fallback counters, then compare route costs, physical distances,
-parents, parent-edge lengths, traversal order, graph status, support masks,
-support digests, and selected route results exactly. If it wins, run the
-representative seeded end-to-end simulator evaluation and verify the dashboard
-backend/frontend and fresh replay provenance per `AGENTS.md` before promoting
-it. This branch contains no benchmark result and no runtime change.
+On the WX9100 HIP path, first capture the actual graph and root tensors passed
+to `dijkstra_graph()` from a production A1 call. Existing `.pt` artifacts are
+route support outputs and cannot serve as solver inputs. Include scenario,
+seed, checkpoint identity, source hashes, tensor shapes/dtypes, and call-site
+provenance. Then run paired A/B/A using identical captured inputs and source
+identity. Record kernel-level timings and frontier/fallback counters, then
+compare route costs, physical distances, parents, parent-edge lengths,
+traversal order, graph status, support masks, support digests, and selected
+route results exactly. If it wins, run the representative seeded end-to-end
+simulator evaluation and verify the dashboard backend/frontend and fresh replay
+provenance per `AGENTS.md` before promoting it. No runtime change or solver
+speedup is established by the current evidence.
