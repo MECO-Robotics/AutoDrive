@@ -67,7 +67,7 @@ def extension():
     return _EXT
 
 
-def step(sim, command, active_mask, *, debug=True):
+def step(sim, command, active_mask, *, debug=True, clear_contact_flags=False):
     """Run fused swerve + pose update; debug storage is optional."""
     if sim.device.type != "cuda" or torch.version.hip is None:
         raise RuntimeError("experimental swerve fusion requires HIP tensors")
@@ -103,6 +103,8 @@ def step(sim, command, active_mask, *, debug=True):
         sim.robot_supply_limit, sim.battery_resistance,
         sim.module_angle, sim.module_steer_rate, sim.module_drive_speed,
         sim.module_current, sim.module_supply_current, sim.robot_current,
+        sim.robot_contact, sim.robot_contact_by_robot, sim.opponent_contact,
+        sim.field_contact, sim.wall_contact, bool(clear_contact_flags),
         sim.bump_regions.contiguous(), debug_tensor, sim.dt,
         p.module_x_offset, p.module_y_offset, inverse_wheel_radius,
         p.steer_current_limit, p.steer_rate_limit, p.steer_acceleration,

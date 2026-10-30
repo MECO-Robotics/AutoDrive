@@ -73,7 +73,7 @@ def _extension():
     return _EXT
 
 
-def contact_pipeline(sim, active_mask):
+def contact_pipeline(sim, active_mask, *, update_safety_counters=False):
     """Mutate contact state once, executing all ordered iterations; bool success."""
     if (sim.device.type != "cuda" or not torch.version.hip or
             any(not t.is_contiguous() for t in (
@@ -81,7 +81,9 @@ def contact_pipeline(sim, active_mask):
                 sim.yaw_inertia_multiplier, sim.mu, sim.wall_mu, active_mask,
                 sim.robot_contact, sim.opponent_contact, sim.field_contact,
                 sim.robot_contact_by_robot, sim.wall_contact, sim.obstacles,
-                sim.field_colliders))):
+                sim.field_colliders, sim.safety_active_physics_ticks,
+                sim.safety_robot_contact_ticks, sim.safety_field_contact_ticks,
+                sim.safety_wall_contact_ticks))):
         return False
     ext = _extension()
     if ext is None:
@@ -90,6 +92,8 @@ def contact_pipeline(sim, active_mask):
         sim.yaw_inertia_multiplier, sim.mu, sim.wall_mu, active_mask,
         sim.robot_contact, sim.opponent_contact, sim.field_contact,
         sim.robot_contact_by_robot, sim.wall_contact, sim.obstacles,
-        sim.field_colliders,
+        sim.field_colliders, sim.safety_active_physics_ticks,
+        sim.safety_robot_contact_ticks, sim.safety_field_contact_ticks,
+        sim.safety_wall_contact_ticks, bool(update_safety_counters),
         sim.contact_iterations, sim.field_length, sim.field_width, -1)
     return True

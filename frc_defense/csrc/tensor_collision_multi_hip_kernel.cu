@@ -8,6 +8,44 @@ __device__ __forceinline__ float cross_ref(float ax, float ay, float bx, float b
   return ax * by - ay * bx;
 }
 
+// Replace the eager per-counter casts, reductions, masks, and adds after one
+// six-robot physics step with a single stream-ordered launch. Contact flags have
+// already been cleared before collision resolution and now contain this tick's
+// results.
+__global__ void sim_tick_accounting_kernel(const bool* active,
+    const bool* robot_contact_by_robot, const bool* field_contact,
+    const bool* wall_contact, int64_t* safety_active_ticks,
+    int64_t* safety_robot_ticks, int64_t* safety_field_ticks,
+    int64_t* safety_wall_ticks, int64_t* physics_substep_index,
+    double* physics_time_s, int n, double step_dt) {
+  const int world = blockIdx.x;
+  const int robot = threadIdx.x;
+  if (world >= n || !active[world]) return;
+  if (robot < 6) {
+    const int row = world * 6 + robot;
+    safety_active_ticks[row] += 1;
+    safety_robot_ticks[row] += robot_contact_by_robot[row] ? 1 : 0;
+    safety_field_ticks[row] += field_contact[row] ? 1 : 0;
+    safety_wall_ticks[row] += (wall_contact[row * 2] || wall_contact[row * 2 + 1]) ? 1 : 0;
+  }
+  if (robot == 0) {
+    physics_substep_index[world] += 1;
+    physics_time_s[world] += step_dt;
+  }
+}
+
+void sim_tick_accounting_launch(const bool* active,
+    const bool* robot_contact_by_robot, const bool* field_contact,
+    const bool* wall_contact, int64_t* safety_active_ticks,
+    int64_t* safety_robot_ticks, int64_t* safety_field_ticks,
+    int64_t* safety_wall_ticks, int64_t* physics_substep_index,
+    double* physics_time_s, int n, double step_dt, hipStream_t stream) {
+  hipLaunchKernelGGL(sim_tick_accounting_kernel, dim3(n), dim3(64), 0, stream,
+      active, robot_contact_by_robot, field_contact, wall_contact,
+      safety_active_ticks, safety_robot_ticks, safety_field_ticks,
+      safety_wall_ticks, physics_substep_index, physics_time_s, n, step_dt);
+}
+
 __global__ void robot_contacts_kernel(float* pose, float* velocity,
     const float* length, const float* width, const float* mass,
     const float* yaw_mult, const float* friction, const bool* active,

@@ -3,6 +3,7 @@
 // from the production wall-only kernel until full parity is demonstrated.
 #include <hip/hip_runtime.h>
 #include <cmath>
+#include <cstdint>
 
 __device__ __forceinline__ float sign_ref(float x) {
   return static_cast<float>((x > 0.0f) - (x < 0.0f));
@@ -363,6 +364,9 @@ __global__ void contact_pipeline_kernel(
     const float* wall_mu, const bool* active, bool* robot_contact,
     bool* opponent_contact, bool* field_contact,
     bool* robot_contact_by_robot, bool* wall_contact,
+    int64_t* safety_active_ticks, int64_t* safety_robot_ticks,
+    int64_t* safety_field_ticks, int64_t* safety_wall_ticks,
+    bool update_safety_counters,
     const float* obstacles, int obstacle_count, const float* boxes,
     int box_count, int worlds, float field_length, float field_width,
     int iterations, int stage) {
@@ -400,6 +404,13 @@ __global__ void contact_pipeline_kernel(
     field_contact[world * 2 + r] = fc[r];
     robot_contact_by_robot[world * 2 + r] = rbc[r];
     for (int a = 0; a < 2; ++a) wall_contact[world * 4 + r * 2 + a] = wc[r * 2 + a];
+    if (update_safety_counters) {
+      const int index = world * 2 + r;
+      safety_active_ticks[index] += 1;
+      safety_robot_ticks[index] += rbc[r] ? 1 : 0;
+      safety_field_ticks[index] += fc[r] ? 1 : 0;
+      safety_wall_ticks[index] += (wc[r * 2] || wc[r * 2 + 1]) ? 1 : 0;
+    }
   }
 }
 
@@ -408,6 +419,9 @@ void contact_pipeline_launch(float* pose, float* velocity, const float* length,
     const float* mu, const float* wall_mu, const bool* active, bool* robot_contact,
     bool* opponent_contact, bool* field_contact,
     bool* robot_contact_by_robot, bool* wall_contact,
+    int64_t* safety_active_ticks, int64_t* safety_robot_ticks,
+    int64_t* safety_field_ticks, int64_t* safety_wall_ticks,
+    bool update_safety_counters,
     const float* obstacles, int obstacle_count, const float* boxes, int box_count,
     int worlds, float field_length, float field_width, int iterations, int stage,
     hipStream_t stream) {
@@ -416,7 +430,9 @@ void contact_pipeline_launch(float* pose, float* velocity, const float* length,
   hipLaunchKernelGGL(contact_pipeline_kernel, dim3(blocks), dim3(threads), 0, stream,
       pose, velocity, length, width, mass, yaw_inertia_multiplier, mu, wall_mu,
       active, robot_contact, opponent_contact, field_contact,
-      robot_contact_by_robot, wall_contact,
+      robot_contact_by_robot, wall_contact, safety_active_ticks,
+      safety_robot_ticks, safety_field_ticks, safety_wall_ticks,
+      update_safety_counters,
       obstacles, obstacle_count, boxes, box_count, worlds, field_length,
       field_width, iterations, stage);
 }

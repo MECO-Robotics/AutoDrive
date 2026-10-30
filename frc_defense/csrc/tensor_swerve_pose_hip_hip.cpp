@@ -6,13 +6,26 @@
 #include <hip/hip_runtime_api.h>
 
 void swerve_pose_launch(
-    float*, float*, const float*, const bool*, const float*, const float*,
-    const float*, const float*, const float*, const float*, const float*,
-    const float*, const float*, const float*, const float*, const float*,
-    const float*, const float*, const float*, float*, float*, float*, float*,
-    float*, float*, const float*, float*, int, int, int,
-    float, float, float, float, float, float, float, float,
-    float, float, float, float, float, float, float, float, hipStream_t);
+    float* pose, float* velocity, const float* command, const bool* active,
+    const float* length, const float* width, const float* mass,
+    const float* speed_limit, const float* accel_limit,
+    const float* omega_limit, const float* alpha_limit,
+    const float* ground_mu, const float* lateral_mu,
+    const float* yaw_inertia_multiplier, const float* drive_ratio,
+    const float* drive_current_limit, const float* drive_supply_limit,
+    const float* robot_supply_limit, const float* battery_resistance,
+    float* module_angle, float* module_steer_rate, float* module_drive_speed,
+    float* module_current, float* module_supply_current, float* robot_current,
+    bool* robot_contact, bool* robot_contact_by_robot, bool* opponent_contact,
+    bool* field_contact, bool* wall_contact, bool clear_contact_flags,
+    const float* bumps, float* debug,
+    int worlds, int robots, int bump_count, float dt, float module_x_offset,
+    float module_y_offset, float inverse_wheel_radius, float steer_current_limit,
+    float steer_rate_limit, float steer_acceleration,
+    float inverse_steer_current_limit, float inverse_resistance,
+    float inverse_stall, float inverse_kv, float kt, float free_current_a,
+    float motor_efficiency, float battery_voltage, float inverse_four_dt,
+    hipStream_t stream);
 
 void step(torch::Tensor pose, torch::Tensor velocity, torch::Tensor command,
     torch::Tensor active, torch::Tensor length, torch::Tensor width,
@@ -25,6 +38,9 @@ void step(torch::Tensor pose, torch::Tensor velocity, torch::Tensor command,
     torch::Tensor module_angle, torch::Tensor module_steer_rate,
     torch::Tensor module_drive_speed, torch::Tensor module_current,
     torch::Tensor module_supply_current, torch::Tensor robot_current,
+    torch::Tensor robot_contact, torch::Tensor robot_contact_by_robot,
+    torch::Tensor opponent_contact, torch::Tensor field_contact,
+    torch::Tensor wall_contact, bool clear_contact_flags,
     torch::Tensor bump_regions, torch::Tensor debug, double dt, double module_x_offset,
     double module_y_offset, double inverse_wheel_radius, double steer_current_limit,
     double steer_rate_limit, double steer_acceleration,
@@ -54,6 +70,12 @@ void step(torch::Tensor pose, torch::Tensor velocity, torch::Tensor command,
        module_current,module_supply_current})
     require_shape(t, {n,robots,4}, at::kFloat, "module state");
   require_shape(robot_current, {n,robots}, at::kFloat, "robot_current");
+  require_shape(robot_contact, {n}, at::kBool, "robot_contact");
+  require_shape(robot_contact_by_robot, {n,robots}, at::kBool,
+                "robot_contact_by_robot");
+  require_shape(opponent_contact, {n}, at::kBool, "opponent_contact");
+  require_shape(field_contact, {n,robots}, at::kBool, "field_contact");
+  require_shape(wall_contact, {n,robots,2}, at::kBool, "wall_contact");
   TORCH_CHECK(bump_regions.dim() == 2 && bump_regions.size(1) == 4 &&
               bump_regions.scalar_type() == at::kFloat,
               "bump_regions must be float [B,4]");
@@ -66,7 +88,8 @@ void step(torch::Tensor pose, torch::Tensor velocity, torch::Tensor command,
        yaw_inertia_multiplier,drive_ratio,drive_current_limit,drive_supply_limit,
        robot_supply_limit,battery_resistance,module_angle,module_steer_rate,
        module_drive_speed,module_current,module_supply_current,robot_current,
-       bump_regions,debug})
+       robot_contact,robot_contact_by_robot,opponent_contact,field_contact,
+       wall_contact,bump_regions,debug})
     TORCH_CHECK(t.is_cuda() && t.is_contiguous() && t.device() == pose.device(),
                 "all swerve tensors must be contiguous on one accelerator");
   c10::cuda::CUDAGuard guard(pose.device());
@@ -81,7 +104,11 @@ void step(torch::Tensor pose, torch::Tensor velocity, torch::Tensor command,
       battery_resistance.data_ptr<float>(), module_angle.data_ptr<float>(),
       module_steer_rate.data_ptr<float>(), module_drive_speed.data_ptr<float>(),
       module_current.data_ptr<float>(), module_supply_current.data_ptr<float>(),
-      robot_current.data_ptr<float>(), bump_regions.data_ptr<float>(),
+      robot_current.data_ptr<float>(), robot_contact.data_ptr<bool>(),
+      robot_contact_by_robot.data_ptr<bool>(), opponent_contact.data_ptr<bool>(),
+      field_contact.data_ptr<bool>(), wall_contact.data_ptr<bool>(),
+      clear_contact_flags,
+      bump_regions.data_ptr<float>(),
       debug.numel() == 0 ? nullptr : debug.data_ptr<float>(),
       static_cast<int>(n), static_cast<int>(robots),
       static_cast<int>(bump_regions.size(0)),

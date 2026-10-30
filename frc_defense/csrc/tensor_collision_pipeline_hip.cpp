@@ -3,9 +3,11 @@
 #include <c10/cuda/CUDAGuard.h>
 #include <c10/cuda/CUDAStream.h>
 #include <hip/hip_runtime_api.h>
+#include <cstdint>
 
 void contact_pipeline_launch(float*, float*, const float*, const float*, const float*,
     const float*, const float*, const float*, const bool*, bool*, bool*, bool*, bool*, bool*,
+    int64_t*, int64_t*, int64_t*, int64_t*, bool,
     const float*, int, const float*, int, int, float, float, int, int, hipStream_t);
 
 void contact_pipeline(torch::Tensor pose, torch::Tensor velocity,
@@ -15,7 +17,11 @@ void contact_pipeline(torch::Tensor pose, torch::Tensor velocity,
     torch::Tensor opponent_contact, torch::Tensor field_contact,
     torch::Tensor robot_contact_by_robot,
     torch::Tensor wall_contact, torch::Tensor obstacles,
-    torch::Tensor field_colliders, int64_t iterations,
+    torch::Tensor field_colliders,
+    torch::Tensor safety_active_ticks, torch::Tensor safety_robot_ticks,
+    torch::Tensor safety_field_ticks, torch::Tensor safety_wall_ticks,
+    bool update_safety_counters,
+    int64_t iterations,
     double field_length, double field_width, int64_t stage) {
   TORCH_CHECK(pose.is_cuda() && pose.scalar_type() == at::kFloat && pose.dim() == 3 &&
               pose.size(1) == 2 && pose.size(2) == 3, "pose must be CUDA float [world,2,3]");
@@ -34,6 +40,11 @@ void contact_pipeline(torch::Tensor pose, torch::Tensor velocity,
               robot_contact_by_robot.sizes() == torch::IntArrayRef({n, 2}) && robot_contact_by_robot.scalar_type() == at::kBool &&
               wall_contact.sizes() == torch::IntArrayRef({n, 2, 2}) && wall_contact.scalar_type() == at::kBool,
               "contact mask shape or dtype mismatch");
+  for (const auto& ticks : {safety_active_ticks, safety_robot_ticks,
+                            safety_field_ticks, safety_wall_ticks})
+    TORCH_CHECK(ticks.sizes() == torch::IntArrayRef({n, 2}) &&
+                ticks.scalar_type() == at::kLong,
+                "safety counters must be int64 [world,2]");
   TORCH_CHECK(obstacles.dim() == 2 && obstacles.size(1) == 3 && obstacles.scalar_type() == at::kFloat &&
               field_colliders.dim() == 2 && field_colliders.size(1) == 4 &&
               field_colliders.scalar_type() == at::kFloat, "collider shape or dtype mismatch");
@@ -41,7 +52,10 @@ void contact_pipeline(torch::Tensor pose, torch::Tensor velocity,
   TORCH_CHECK(stage >= -1 && stage <= 3, "stage must be -1 (all) or 0..3");
   for (const auto& t : {pose, velocity, length, width, mass, yaw_inertia_multiplier,
                         mu, wall_mu, active, robot_contact, opponent_contact,
-                        field_contact, robot_contact_by_robot, wall_contact, obstacles, field_colliders}) {
+                        field_contact, robot_contact_by_robot, wall_contact,
+                        safety_active_ticks, safety_robot_ticks,
+                        safety_field_ticks, safety_wall_ticks, obstacles,
+                        field_colliders}) {
     TORCH_CHECK(t.is_cuda() && t.is_contiguous() && t.device() == pose.device(),
                 "contact tensors must be contiguous on the same accelerator");
   }
@@ -51,7 +65,10 @@ void contact_pipeline(torch::Tensor pose, torch::Tensor velocity,
       yaw_inertia_multiplier.data_ptr<float>(), mu.data_ptr<float>(), wall_mu.data_ptr<float>(),
       active.data_ptr<bool>(), robot_contact.data_ptr<bool>(), opponent_contact.data_ptr<bool>(),
       field_contact.data_ptr<bool>(), robot_contact_by_robot.data_ptr<bool>(),
-      wall_contact.data_ptr<bool>(), obstacles.data_ptr<float>(),
+      wall_contact.data_ptr<bool>(), safety_active_ticks.data_ptr<int64_t>(),
+      safety_robot_ticks.data_ptr<int64_t>(), safety_field_ticks.data_ptr<int64_t>(),
+      safety_wall_ticks.data_ptr<int64_t>(), update_safety_counters,
+      obstacles.data_ptr<float>(),
       static_cast<int>(obstacles.size(0)), field_colliders.data_ptr<float>(),
       static_cast<int>(field_colliders.size(0)), static_cast<int>(n),
       static_cast<float>(field_length), static_cast<float>(field_width),

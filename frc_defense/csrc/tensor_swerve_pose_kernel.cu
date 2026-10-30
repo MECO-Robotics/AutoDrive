@@ -41,6 +41,9 @@ __global__ void swerve_pose_kernel(
     float* module_angle, float* module_steer_rate,
     float* module_drive_speed, float* module_current,
     float* module_supply_current, float* robot_current,
+    bool* robot_contact, bool* robot_contact_by_robot,
+    bool* opponent_contact, bool* field_contact, bool* wall_contact,
+    bool clear_contact_flags,
     const float* bumps, float* debug, int worlds, int robots, int bump_count,
     float dt, float module_x_offset, float module_y_offset,
     float inverse_wheel_radius, float steer_current_limit, float steer_rate_limit,
@@ -302,6 +305,20 @@ __global__ void swerve_pose_kernel(
   pose[p3] += vx * dt;
   pose[p3 + 1] += vy_final * dt;
   pose[p3 + 2] = remainder_positive(pose[p3 + 2] + omega * dt + kPi, kTwoPi) - kPi;
+
+  // Clear previous-substep contact flags for this active world. Each robot
+  // lane owns its per-robot flags; lane zero owns world-level flags.
+  if (clear_contact_flags) {
+    const int robot = row % robots;
+    robot_contact_by_robot[row] = false;
+    field_contact[row] = false;
+    wall_contact[row * 2] = false;
+    wall_contact[row * 2 + 1] = false;
+    if (robot == 0) {
+      robot_contact[world] = false;
+      opponent_contact[world] = false;
+    }
+  }
 }
 } // namespace
 
@@ -317,6 +334,9 @@ void swerve_pose_launch(
     float* module_angle, float* module_steer_rate,
     float* module_drive_speed, float* module_current,
     float* module_supply_current, float* robot_current,
+    bool* robot_contact, bool* robot_contact_by_robot,
+    bool* opponent_contact, bool* field_contact, bool* wall_contact,
+    bool clear_contact_flags,
     const float* bumps, float* debug, int worlds, int robots, int bump_count,
     float dt, float module_x_offset, float module_y_offset,
     float inverse_wheel_radius, float steer_current_limit, float steer_rate_limit,
@@ -334,7 +354,10 @@ void swerve_pose_launch(
       yaw_inertia_multiplier, drive_ratio, drive_current_limit,
       drive_supply_limit, robot_supply_limit, battery_resistance, module_angle,
       module_steer_rate, module_drive_speed, module_current, module_supply_current,
-      robot_current, bumps, debug, worlds, robots, bump_count, dt, module_x_offset,
+      robot_current, robot_contact, robot_contact_by_robot, opponent_contact,
+      field_contact, wall_contact, clear_contact_flags, bumps, debug,
+      worlds, robots, bump_count,
+      dt, module_x_offset,
       module_y_offset, inverse_wheel_radius, steer_current_limit, steer_rate_limit,
       steer_acceleration, inverse_steer_current_limit, inverse_resistance,
       inverse_stall, inverse_kv, kt, free_current_a, motor_efficiency,

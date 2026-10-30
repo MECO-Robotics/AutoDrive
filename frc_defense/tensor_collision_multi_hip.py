@@ -107,6 +107,31 @@ def robot_contacts(sim, active_mask):
     return True
 
 
+def sim_tick_accounting(sim, active_mask):
+    """Fuse post-contact safety and tick counters; false requests Torch fallback."""
+    if (not ENABLED or sim.device.type != "cuda" or not torch.version.hip or
+            sim.num_robots != 6):
+        return False
+    active = torch.as_tensor(active_mask, device=sim.device,
+                              dtype=torch.bool).reshape(sim.n).contiguous()
+    tensors = (active, sim.robot_contact_by_robot, sim.field_contact,
+               sim.wall_contact, sim.safety_active_physics_ticks,
+               sim.safety_robot_contact_ticks, sim.safety_field_contact_ticks,
+               sim.safety_wall_contact_ticks, sim.physics_substep_index,
+               sim.physics_time_s)
+    if any(t.device != sim.pose.device or not t.is_contiguous() for t in tensors):
+        return False
+    ext = _extension()
+    if ext is None or not hasattr(ext, "sim_tick_accounting"):
+        return False
+    ext.sim_tick_accounting(
+        active, sim.robot_contact_by_robot, sim.field_contact, sim.wall_contact,
+        sim.safety_active_physics_ticks, sim.safety_robot_contact_ticks,
+        sim.safety_field_contact_ticks, sim.safety_wall_contact_ticks,
+        sim.physics_substep_index, sim.physics_time_s, float(sim.dt))
+    return True
+
+
 def field_contacts(sim, active_mask):
     """Resolve six robots against field boxes in one HIP kernel."""
     if (not ENABLED or sim.device.type != "cuda" or not torch.version.hip or

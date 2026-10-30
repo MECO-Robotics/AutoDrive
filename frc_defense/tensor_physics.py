@@ -429,6 +429,8 @@ class TensorVectorizedSimulator(TensorPhysicsCollisionMixin):
         cmd=torch.cat((cmd[...,:2]*translation_scale[...,None],omega[...,None]),-1)
         field_sweep_pose=(self.pose.clone() if self.field_colliders.shape[0] else None)
         fused_swerve_pose = False
+        fuse_contact_accounting = (
+            os.environ.get("AUTODRIVE_EXPERIMENTAL_CONTACT_ACCOUNTING_FUSION") == "1")
         if (self.num_robots in (2, 6) and _use_compiled_swerve and self._fused_swerve_pose_hip_enabled and
                 not self._fused_swerve_pose_hip_failed):
             # Build before mutating simulator state. If compilation is
@@ -445,8 +447,11 @@ class TensorVectorizedSimulator(TensorPhysicsCollisionMixin):
             else:
                 # Runtime launch failures propagate: retrying with Torch could
                 # apply a partially completed physics step twice.
-                tensor_swerve_pose_hip.step(self, cmd, active_mask, debug=False)
+                tensor_swerve_pose_hip.step(
+                    self, cmd, active_mask, debug=False,
+                    clear_contact_flags=fuse_contact_accounting)
                 fused_swerve_pose = True
+        fuse_contact_flags = (fused_swerve_pose and fuse_contact_accounting)
         if not fused_swerve_pose:
             if _use_compiled_swerve:
                 self._swerve(cmd,active_mask)
@@ -457,11 +462,12 @@ class TensorVectorizedSimulator(TensorPhysicsCollisionMixin):
                     self.pose+self.velocity*self.dt,self.pose))
                 wrapped=torch.remainder(self.pose[...,2]+math.pi,2*math.pi)-math.pi
                 self.pose[...,2].copy_(torch.where(active_mask[:,None],wrapped,self.pose[...,2]))
-        self.robot_contact &= ~active_mask
-        self.robot_contact_by_robot &= ~active_mask[:,None]
-        self.opponent_contact &= ~active_mask
-        self.field_contact &= ~active_mask[:,None]
-        self.wall_contact &= ~active_mask[:,None,None]
+        if not fuse_contact_flags:
+            self.robot_contact &= ~active_mask
+            self.robot_contact_by_robot &= ~active_mask[:,None]
+            self.opponent_contact &= ~active_mask
+            self.field_contact &= ~active_mask[:,None]
+            self.wall_contact &= ~active_mask[:,None,None]
         if field_sweep_pose is not None:
             # Endpoint-only SAT misses thin field structures when a chassis
             # crosses them in one physics tick. Integrate the solved chassis
@@ -477,25 +483,35 @@ class TensorVectorizedSimulator(TensorPhysicsCollisionMixin):
             if not self._field_sweep_collision(active_mask,sweep_steps,substep):
                 self._field_sweep_torch(active_mask,sweep_steps,substep)
         fused_contacts = False
+        fuse_safety_counters = fuse_contact_accounting
         if (self.num_robots == 2 and self._fused_contact_pipeline_hip_enabled and
                 _contact_pipeline_hip is not None):
             active_mask = active_mask.contiguous()
-            fused_contacts = _contact_pipeline_hip(self, active_mask)
+            fused_contacts = _contact_pipeline_hip(
+                self, active_mask, update_safety_counters=fuse_safety_counters)
         if not fused_contacts:
             for _ in range(self.contact_iterations):
                 self._robot_collision(active_mask); self._walls(active_mask)
                 self._obstacle_collision(active_mask); self._field_collision(active_mask)
-        active_robots = active_mask[:,None]
-        self.safety_active_physics_ticks.add_(active_robots.expand_as(
-            self.safety_active_physics_ticks).long())
-        self.safety_robot_contact_ticks.add_(
-            (self.robot_contact_by_robot & active_robots).long())
-        self.safety_field_contact_ticks.add_(
-            (self.field_contact & active_robots).long())
-        self.safety_wall_contact_ticks.add_(
-            (self.wall_contact.any(-1) & active_robots).long())
-        self.physics_substep_index.add_(active_mask.long())
-        self.physics_time_s.add_(active_mask.to(torch.float64) * float(self.dt))
+        fused_tick_accounting = False
+        if (self.num_robots == 6 and
+                os.environ.get("AUTODRIVE_EXPERIMENTAL_FUSED_SIM_TICK_ACCOUNTING") == "1"):
+            from . import tensor_collision_multi_hip
+            fused_tick_accounting = tensor_collision_multi_hip.sim_tick_accounting(
+                self, active_mask)
+        if not fused_tick_accounting:
+            active_robots = active_mask[:,None]
+            if not (fused_contacts and fuse_safety_counters):
+                self.safety_active_physics_ticks.add_(active_robots.expand_as(
+                    self.safety_active_physics_ticks).long())
+                self.safety_robot_contact_ticks.add_(
+                    (self.robot_contact_by_robot & active_robots).long())
+                self.safety_field_contact_ticks.add_(
+                    (self.field_contact & active_robots).long())
+                self.safety_wall_contact_ticks.add_(
+                    (self.wall_contact.any(-1) & active_robots).long())
+            self.physics_substep_index.add_(active_mask.long())
+            self.physics_time_s.add_(active_mask.to(torch.float64) * float(self.dt))
         return self.pose, self.velocity
 
     def _swerve(self,cmd,active_mask=None):

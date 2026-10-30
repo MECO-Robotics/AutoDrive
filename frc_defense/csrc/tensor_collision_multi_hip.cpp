@@ -24,6 +24,51 @@ void invalidate_tracks_launch(const float*, const float*, const float*,
 void footprint_path_clear_launch(const float*, const float*, const float*,
     const float*, const float*, const bool*, bool*, int, int, int, float, float, float,
     hipStream_t);
+void sim_tick_accounting_launch(const bool*, const bool*, const bool*, const bool*,
+    int64_t*, int64_t*, int64_t*, int64_t*, int64_t*, double*,
+    int, double, hipStream_t);
+
+void sim_tick_accounting(torch::Tensor active, torch::Tensor robot_contact_by_robot,
+    torch::Tensor field_contact, torch::Tensor wall_contact,
+    torch::Tensor safety_active_ticks, torch::Tensor safety_robot_ticks,
+    torch::Tensor safety_field_ticks, torch::Tensor safety_wall_ticks,
+    torch::Tensor physics_substep_index, torch::Tensor physics_time_s,
+    double step_dt) {
+  const auto n = active.numel();
+  TORCH_CHECK(active.is_cuda() && active.scalar_type() == at::kBool &&
+              active.dim() == 1 && robot_contact_by_robot.sizes() == torch::IntArrayRef({n, 6}) &&
+              robot_contact_by_robot.scalar_type() == at::kBool &&
+              field_contact.sizes() == robot_contact_by_robot.sizes() &&
+              field_contact.scalar_type() == at::kBool &&
+              wall_contact.sizes() == torch::IntArrayRef({n, 6, 2}) &&
+              wall_contact.scalar_type() == at::kBool &&
+              safety_active_ticks.sizes() == robot_contact_by_robot.sizes() &&
+              safety_robot_ticks.sizes() == robot_contact_by_robot.sizes() &&
+              safety_field_ticks.sizes() == robot_contact_by_robot.sizes() &&
+              safety_wall_ticks.sizes() == robot_contact_by_robot.sizes() &&
+              safety_active_ticks.scalar_type() == at::kLong &&
+              safety_robot_ticks.scalar_type() == at::kLong &&
+              safety_field_ticks.scalar_type() == at::kLong &&
+              safety_wall_ticks.scalar_type() == at::kLong &&
+              physics_substep_index.sizes() == torch::IntArrayRef({n}) &&
+              physics_substep_index.scalar_type() == at::kLong &&
+              physics_time_s.sizes() == torch::IntArrayRef({n}) &&
+              physics_time_s.scalar_type() == at::kDouble && step_dt > 0.,
+              "sim tick accounting tensor shape or dtype mismatch");
+  for (const auto& t : {active, robot_contact_by_robot, field_contact, wall_contact,
+                        safety_active_ticks, safety_robot_ticks, safety_field_ticks,
+                        safety_wall_ticks, physics_substep_index, physics_time_s})
+    TORCH_CHECK(t.is_cuda() && t.is_contiguous() && t.device() == active.device(),
+                "sim tick accounting tensors must be contiguous on one HIP device");
+  sim_tick_accounting_launch(active.data_ptr<bool>(),
+      robot_contact_by_robot.data_ptr<bool>(), field_contact.data_ptr<bool>(),
+      wall_contact.data_ptr<bool>(), safety_active_ticks.data_ptr<int64_t>(),
+      safety_robot_ticks.data_ptr<int64_t>(), safety_field_ticks.data_ptr<int64_t>(),
+      safety_wall_ticks.data_ptr<int64_t>(), physics_substep_index.data_ptr<int64_t>(),
+      physics_time_s.data_ptr<double>(), static_cast<int>(n), step_dt,
+      c10::cuda::getCurrentCUDAStream(active.get_device()));
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
 
 torch::Tensor footprint_path_clear(torch::Tensor path, torch::Tensor heading,
     torch::Tensor length, torch::Tensor width, torch::Tensor boxes, torch::Tensor active,
@@ -303,6 +348,8 @@ void invalidate_tracks_in_robot_contact(torch::Tensor pose,
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  m.def("sim_tick_accounting", &sim_tick_accounting,
+        "Fused six-robot safety and tick accounting (HIP)");
   m.def("robot_contacts", &robot_contacts, "Fused six-robot SAT contacts (HIP)");
   m.def("field_contacts", &field_contacts, "Fused six-robot field SAT contacts (HIP)");
   m.def("field_sweep_contacts", &field_sweep_contacts,
