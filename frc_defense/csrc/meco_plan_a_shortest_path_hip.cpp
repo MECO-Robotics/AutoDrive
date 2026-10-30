@@ -24,7 +24,7 @@ hipError_t plan_a_csr_finish_launch(const double*, const double*, const int64_t*
     double*, double*, int64_t*, double*, int64_t*, int64_t, int64_t, int64_t,
     double*, int64_t*, int64_t*, const double*, const double*, const uint8_t*,
     int64_t*, const int64_t*, int64_t*, int64_t*, const int64_t*, bool*, bool*,
-    int64_t*, int64_t*, const int32_t*, int64_t, int, hipStream_t);
+    int64_t*, int64_t*, int64_t*, int64_t*, const int32_t*, int64_t, int, bool, hipStream_t);
 void plan_a_dijkstra_batch_launch(const int64_t*, const double*, const double*,
     const bool*, const int64_t*, const double*, const double*, double*, double*,
     int64_t*, double*, int64_t*, int64_t, int64_t, int64_t, int64_t, double*,
@@ -216,10 +216,12 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
 }
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
-           torch::Tensor, torch::Tensor> dijkstra_graph_frontier(torch::Tensor xy,
+           torch::Tensor, torch::Tensor> dijkstra_graph_frontier_impl(torch::Tensor xy,
     torch::Tensor heading, torch::Tensor edge_dst, torch::Tensor edge_allowed,
     torch::Tensor node_valid, torch::Tensor root, torch::Tensor root_start_cost,
-    torch::Tensor root_connector_m, torch::Tensor heading_values, torch::Tensor turns) {
+    torch::Tensor root_connector_m, torch::Tensor heading_values, torch::Tensor turns,
+    bool active_frontier, torch::Tensor* active_trace_out,
+    int requested_block_size = 0) {
   TORCH_CHECK(xy.is_cuda() && xy.dim() == 2 && xy.size(1) == 2 &&
       (xy.scalar_type() == at::kFloat || xy.scalar_type() == at::kDouble),
       "xy must be HIP float32/float64 [N,2]");
@@ -291,6 +293,9 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
   auto frontier = torch::empty({n}, edge_dst.options().dtype(at::kBool));
   auto active = torch::zeros({n}, edge_dst.options());
   auto active_nodes = torch::empty({n}, edge_dst.options());
+  auto candidate_nodes = torch::empty({n}, edge_dst.options());
+  auto active_trace = active_frontier
+      ? torch::full({n + 1, 2}, -1, edge_dst.options()) : torch::empty({0}, edge_dst.options());
   auto zero_sources = torch::zeros({n}, edge_dst.options().dtype(at::kInt));
   hipDeviceProp_t properties;
   TORCH_CHECK(hipGetDeviceProperties(&properties, xy.get_device()) == hipSuccess,
@@ -299,6 +304,12 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
   int block_size = 1;
   while (block_size < 1024 && block_size * 2 <= properties.maxThreadsPerBlock)
     block_size *= 2;
+  if (requested_block_size > 0) {
+    TORCH_CHECK(requested_block_size <= block_size &&
+        (requested_block_size & (requested_block_size - 1)) == 0,
+        "requested route block size must be a supported power of two");
+    block_size = requested_block_size;
+  }
   const auto stream = c10::cuda::getCurrentCUDAStream(xy.get_device());
   C10_CUDA_CHECK(plan_a_csr_prepare_launch(xy64.data_ptr<double>(), heading64.data_ptr<double>(),
       edge_dst.data_ptr<int64_t>(), edge_allowed.data_ptr<bool>(),
@@ -317,14 +328,53 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
       counts.data_ptr<int64_t>(), offsets.data_ptr<int64_t>(), incoming.data_ptr<int64_t>(),
       cursor.data_ptr<int64_t>(), fallback.data_ptr<int64_t>(), visited.data_ptr<bool>(),
       frontier.data_ptr<bool>(), active.data_ptr<int64_t>(), active_nodes.data_ptr<int64_t>(),
-      zero_sources.data_ptr<int32_t>(), incoming_capacity, block_size, stream));
+      candidate_nodes.data_ptr<int64_t>(),
+      active_frontier ? active_trace.data_ptr<int64_t>() : nullptr,
+      zero_sources.data_ptr<int32_t>(),
+      incoming_capacity, block_size, active_frontier, stream));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   // Stable sorting preserves ascending node IDs for equal route costs.
   // Leave unreachable rows and all rows from a failed search as -1.
   auto sorted = at::sort(route, /*stable=*/true, /*dim=*/0, /*descending=*/false);
   traversal = torch::where(torch::isfinite(std::get<0>(sorted)) & (status == 0),
       std::get<1>(sorted), -1);
+  if (active_trace_out) *active_trace_out = active_trace;
   return {route, physical, parent, parent_length, traversal, status};
+}
+
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
+           torch::Tensor, torch::Tensor> dijkstra_graph_frontier(torch::Tensor xy,
+    torch::Tensor heading, torch::Tensor edge_dst, torch::Tensor edge_allowed,
+    torch::Tensor node_valid, torch::Tensor root, torch::Tensor root_start_cost,
+    torch::Tensor root_connector_m, torch::Tensor heading_values, torch::Tensor turns) {
+  return dijkstra_graph_frontier_impl(xy, heading, edge_dst, edge_allowed,
+      node_valid, root, root_start_cost, root_connector_m, heading_values, turns,
+      false, nullptr);
+}
+
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
+           torch::Tensor, torch::Tensor, torch::Tensor> dijkstra_graph_frontier_active(torch::Tensor xy,
+    torch::Tensor heading, torch::Tensor edge_dst, torch::Tensor edge_allowed,
+    torch::Tensor node_valid, torch::Tensor root, torch::Tensor root_start_cost,
+    torch::Tensor root_connector_m, torch::Tensor heading_values, torch::Tensor turns) {
+  torch::Tensor trace;
+  auto outputs = dijkstra_graph_frontier_impl(xy, heading, edge_dst, edge_allowed,
+      node_valid, root, root_start_cost, root_connector_m, heading_values, turns,
+      true, &trace);
+  return std::tuple_cat(outputs, std::make_tuple(trace));
+}
+
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
+           torch::Tensor, torch::Tensor, torch::Tensor> dijkstra_graph_frontier_active_block(
+    torch::Tensor xy, torch::Tensor heading, torch::Tensor edge_dst,
+    torch::Tensor edge_allowed, torch::Tensor node_valid, torch::Tensor root,
+    torch::Tensor root_start_cost, torch::Tensor root_connector_m,
+    torch::Tensor heading_values, torch::Tensor turns, int block_size) {
+  torch::Tensor trace;
+  auto outputs = dijkstra_graph_frontier_impl(xy, heading, edge_dst, edge_allowed,
+      node_valid, root, root_start_cost, root_connector_m, heading_values, turns,
+      true, &trace, block_size);
+  return std::tuple_cat(outputs, std::make_tuple(trace));
 }
 
 
@@ -379,6 +429,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
       "Serial Plan A graph route reference");
   module.def("dijkstra_graph", &dijkstra_graph_frontier,
       "Plan A ordered-frontier graph route");
+  module.def("dijkstra_graph_active", &dijkstra_graph_frontier_active,
+      "Experimental Plan A ordered active-candidate graph route");
+  module.def("dijkstra_graph_active_block", &dijkstra_graph_frontier_active_block,
+      "Experimental active-candidate route with a tuned block size");
   module.def("pose_regions", &pose_regions,
       "Exact ordered Plan A connected-region partition on HIP");
   module.def("sha256_bytes", &sha256_bytes,

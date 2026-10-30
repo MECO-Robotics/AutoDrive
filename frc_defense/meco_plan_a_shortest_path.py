@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import heapq
 import math
+import os
 import threading
 import weakref
 
@@ -241,7 +242,11 @@ def plan_a_dijkstra_hip_for_graph(graph, *, device, root, root_start_cost,
     headings = (torch.arange(HEADING_BINS, dtype=heading.dtype) *
                 (2 * math.pi / HEADING_BINS)).tolist()
     heading_values, turns = plan_a_cpu_turn_table(headings, device=selected)
-    route, physical, parent, parent_length, settled, status = extension().dijkstra_graph(
+    ext = extension()
+    route_entry = (ext.dijkstra_graph_active
+                   if os.environ.get("AUTODRIVE_EXPERIMENTAL_PLAN_A_ACTIVE_FRONTIER") == "1"
+                   else ext.dijkstra_graph)
+    route, physical, parent, parent_length, settled, status = route_entry(
         xy.contiguous(), heading.contiguous(), edge_dst.contiguous(),
         edge_allowed.contiguous(), graph.node_valid[0].contiguous(),
         root.contiguous(), root_start_cost.contiguous(),

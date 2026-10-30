@@ -405,6 +405,7 @@ __global__ void plan_a_reverse_scatter(const int64_t* dst, const bool* allowed,
   if (index < incoming_capacity) incoming[index] = e;
 }
 
+template<bool ActiveFrontier>
 __global__ void plan_a_frontier_kernel(const double* xy, const double* heading,
     const int64_t* dst, const bool* allowed, const bool* node_valid,
     const double* costs, const double* lengths, const uint8_t* errors,
@@ -415,7 +416,9 @@ __global__ void plan_a_frontier_kernel(const double* xy, const double* heading,
     const int64_t* counts, const int64_t* offsets, const int64_t* incoming,
     const int64_t* fallback,
     bool* visited, bool* frontier, int64_t* active, int64_t* active_nodes,
-    const int32_t* zero_sources, int64_t incoming_capacity) {
+    int64_t* candidate_nodes, int64_t* debug_trace,
+    const int32_t* zero_sources,
+    int64_t incoming_capacity) {
   __shared__ double mins[1024];
   __shared__ double zero_mins[1024];
   __shared__ int64_t min_nodes[1024];
@@ -465,20 +468,40 @@ __global__ void plan_a_frontier_kernel(const double* xy, const double* heading,
   if (t == 0) {
     if (*root < 0 || *root >= n || !node_valid[*root] || !isfinite(*start) ||
         !isfinite(*connector) || *start < 0.0 || *connector < 0.0) *status = 3;
-    else { route[*root] = *start; physical[*root] = *connector; }
+    else {
+      route[*root] = *start; physical[*root] = *connector;
+      if constexpr (ActiveFrontier) {
+        candidate_nodes[0] = *root;
+        active_count = 1;
+      }
+    }
   }
   __syncthreads();
   if (*status != 0) return;
+  int64_t candidate_count = ActiveFrontier ? 1 : 0;
+  int64_t* current_candidates = candidate_nodes;
+  int64_t* next_candidates = active_nodes;
   unsigned long long epoch = 0;
   while (true) {
     double local = INFINITY, local_zero = INFINITY;
     int64_t local_node = n;
-    for (int64_t i = t; i < n; i += blockDim.x) {
-      if (visited[i]) continue;
-      if (route[i] < local || (route[i] == local && i < local_node)) {
-        local = route[i]; local_node = i;
+    if constexpr (ActiveFrontier) {
+      for (int64_t i = t; i < candidate_count; i += blockDim.x) {
+        const int64_t node = current_candidates[i];
+        if (visited[node]) continue;
+        if (route[node] < local || (route[node] == local && node < local_node)) {
+          local = route[node]; local_node = node;
+        }
+        if (zero_present && zero_sources[node]) local_zero = fmin(local_zero, route[node]);
       }
-      if (zero_present && zero_sources[i]) local_zero = fmin(local_zero, route[i]);
+    } else {
+      for (int64_t i = t; i < n; i += blockDim.x) {
+        if (visited[i]) continue;
+        if (route[i] < local || (route[i] == local && i < local_node)) {
+          local = route[i]; local_node = i;
+        }
+        if (zero_present && zero_sources[i]) local_zero = fmin(local_zero, route[i]);
+      }
     }
     mins[t] = local; min_nodes[t] = local_node; zero_mins[t] = local_zero;
     __syncthreads();
@@ -496,7 +519,15 @@ __global__ void plan_a_frontier_kernel(const double* xy, const double* heading,
     // At that boundary preserve the heap order one node at a time.
     const bool single = zero_present && zero_mins[0] == mins[0];
     const double cutoff = fmin(mins[0] + edge_min, zero_mins[0]);
-    if (!isfinite(mins[0])) break;
+    if (!isfinite(mins[0])) {
+      if constexpr (ActiveFrontier) {
+        if (t == 0 && debug_trace) {
+          debug_trace[2 * epoch] = candidate_count;
+          debug_trace[2 * epoch + 1] = 0;
+        }
+      }
+      break;
+    }
     if (zero_present) {
       if (t == 0) zero_rounds = single ? zero_rounds + 1 : 0;
       __syncthreads();
@@ -510,31 +541,63 @@ __global__ void plan_a_frontier_kernel(const double* xy, const double* heading,
           heap_node, status);
       return;
     }
-    for (int64_t i = t; i < n; i += blockDim.x) {
-      frontier[i] = !visited[i] && (single ? i == min_nodes[0] : route[i] < cutoff);
-      if (frontier[i]) visited[i] = true;
+    if constexpr (ActiveFrontier) {
+      for (int64_t i = t; i < candidate_count; i += blockDim.x) {
+        const int64_t node = current_candidates[i];
+        frontier[node] = !visited[node] &&
+            (single ? node == min_nodes[0] : route[node] < cutoff);
+        if (frontier[node]) visited[node] = true;
+      }
+    } else {
+      for (int64_t i = t; i < n; i += blockDim.x) {
+        frontier[i] = !visited[i] && (single ? i == min_nodes[0] : route[i] < cutoff);
+        if (frontier[i]) visited[i] = true;
+      }
     }
     __syncthreads();
     // Each destination enters the queue once per frontier round.
     ++epoch;
     if (t == 0) active_count = 0;
     __syncthreads();
-    for (int64_t u = t; u < n; u += blockDim.x) {
-      if (!frontier[u]) continue;
-      for (int64_t slot = 0; slot < slots; ++slot) {
-        const int64_t e = u * slots + slot;
-        if (allowed[e]) {
-          const int64_t v = dst[e];
-          if (atomicExch((unsigned long long*)&active[v], epoch) != epoch) {
-            const auto pos = atomicAdd(&active_count, 1ULL);
-            active_nodes[pos] = v;
+    if constexpr (ActiveFrontier) {
+      for (int64_t i = t; i < candidate_count; i += blockDim.x) {
+        const int64_t u = current_candidates[i];
+        if (!frontier[u] && !visited[u] &&
+            atomicExch((unsigned long long*)&active[u], epoch) != epoch) {
+          const auto pos = atomicAdd(&active_count, 1ULL);
+          next_candidates[pos] = u;
+        }
+        if (frontier[u]) {
+          for (int64_t slot = 0; slot < slots; ++slot) {
+            const int64_t e = u * slots + slot;
+            if (allowed[e]) {
+              const int64_t v = dst[e];
+              if (atomicExch((unsigned long long*)&active[v], epoch) != epoch) {
+                const auto pos = atomicAdd(&active_count, 1ULL);
+                next_candidates[pos] = v;
+              }
+            }
+          }
+        }
+      }
+    } else {
+      for (int64_t u = t; u < n; u += blockDim.x) {
+        if (!frontier[u]) continue;
+        for (int64_t slot = 0; slot < slots; ++slot) {
+          const int64_t e = u * slots + slot;
+          if (allowed[e]) {
+            const int64_t v = dst[e];
+            if (atomicExch((unsigned long long*)&active[v], epoch) != epoch) {
+              const auto pos = atomicAdd(&active_count, 1ULL);
+              active_nodes[pos] = v;
+            }
           }
         }
       }
     }
     __syncthreads();
     for (int64_t i = t; i < active_count; i += blockDim.x) {
-      const int64_t v = active_nodes[i];
+      const int64_t v = ActiveFrontier ? next_candidates[i] : active_nodes[i];
       double last_d = -INFINITY;
       int64_t last_src = -1, last_slot = -1;
       while (true) {
@@ -566,6 +629,19 @@ __global__ void plan_a_frontier_kernel(const double* xy, const double* heading,
     }
     __syncthreads();
     if (*status != 0) break;
+    if constexpr (ActiveFrontier) {
+      if (t == 0 && debug_trace) {
+        debug_trace[2 * (epoch - 1)] = candidate_count;
+        debug_trace[2 * (epoch - 1) + 1] = active_count;
+      }
+      for (int64_t i = t; i < candidate_count; i += blockDim.x)
+        frontier[current_candidates[i]] = false;
+      __syncthreads();
+      candidate_count = active_count;
+      int64_t* previous_candidates = current_candidates;
+      current_candidates = next_candidates;
+      next_candidates = previous_candidates;
+    }
   }
 }
 
@@ -777,18 +853,29 @@ hipError_t plan_a_csr_finish_launch(const double* xy, const double* heading,
     const double* costs, const double* lengths, const uint8_t* errors,
     int64_t* counts, const int64_t* offsets, int64_t* incoming, int64_t* cursor,
     const int64_t* fallback, bool* visited, bool* frontier, int64_t* active,
-    int64_t* active_nodes, const int32_t* zero_sources, int64_t incoming_capacity,
-    int block_size, hipStream_t stream) {
+    int64_t* active_nodes, int64_t* candidate_nodes, int64_t* debug_trace,
+    const int32_t* zero_sources, int64_t incoming_capacity,
+    int block_size, bool active_frontier, hipStream_t stream) {
   hipLaunchKernelGGL(plan_a_reverse_scatter, dim3((n * slots + 255) / 256),
       dim3(256), 0, stream, edge_dst, edge_allowed, costs, errors, n, slots,
       counts, offsets, cursor, incoming, incoming_capacity);
   hipError_t error = hipGetLastError();
   if (error != hipSuccess) return error;
-  hipLaunchKernelGGL(plan_a_frontier_kernel, dim3(1), dim3(block_size), 0, stream,
-      xy, heading, edge_dst, edge_allowed, node_valid, costs, lengths, errors,
-      root, start, connector, route, physical, parent, parent_length, traversal,
-      n, slots, capacity, heap_distance, heap_node, status, counts, offsets,
-      incoming, fallback, visited, frontier, active, active_nodes, zero_sources, incoming_capacity);
+  if (active_frontier) {
+    hipLaunchKernelGGL((plan_a_frontier_kernel<true>), dim3(1), dim3(block_size), 0, stream,
+        xy, heading, edge_dst, edge_allowed, node_valid, costs, lengths, errors,
+        root, start, connector, route, physical, parent, parent_length, traversal,
+        n, slots, capacity, heap_distance, heap_node, status, counts, offsets,
+        incoming, fallback, visited, frontier, active, active_nodes, candidate_nodes,
+        debug_trace, zero_sources, incoming_capacity);
+  } else {
+    hipLaunchKernelGGL((plan_a_frontier_kernel<false>), dim3(1), dim3(block_size), 0, stream,
+        xy, heading, edge_dst, edge_allowed, node_valid, costs, lengths, errors,
+        root, start, connector, route, physical, parent, parent_length, traversal,
+        n, slots, capacity, heap_distance, heap_node, status, counts, offsets,
+        incoming, fallback, visited, frontier, active, active_nodes, candidate_nodes,
+        nullptr, zero_sources, incoming_capacity);
+  }
   return hipGetLastError();
 }
 
