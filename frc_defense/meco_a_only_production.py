@@ -423,7 +423,7 @@ def launch_campaign(manifest: dict, *, source_root: Path = ROOT,
                 "plan_a_graph_extension": {"path": str(route_binary),
                     "sha256": route_binary_sha,
                     "source_files": {name: _file_sha(Path(source_root) / name)
-                        for name in ("frc_defense/meco_plan_a_shortest_path_hip.cpp",
+                        for name in ("frc_defense/csrc/meco_plan_a_shortest_path_hip.cpp",
                             "frc_defense/csrc/meco_plan_a_shortest_path_hip_kernel.cu")}},
                 "hip_graph_parity_evidence": manifest["hip_graph_parity_evidence"],
                 "attested_at_utc": datetime.now(timezone.utc).isoformat()})
